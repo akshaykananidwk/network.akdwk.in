@@ -6,6 +6,43 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.1.2] — 2026-09-21
+
+### Added
+
+**`selftest`** — the agent checks everything that depends on the operating
+system and reports each as pass or fail with the actual error: privileges, the
+tunnel driver, a key store round trip, whether the stored identity still
+unseals, and creating and removing a real adapter. It never destroys an
+existing identity — the round-trip check restores whatever was there.
+
+This exists because those are precisely the parts that cannot be tested from a
+build machine. A tester now gets "DPAPI unseal failed with X" rather than "the
+agent did not start".
+
+**The Windows test pack** — `services/kit/akconnect-windows-test-pack.zip`,
+committed so it can be downloaded from one URL. Agent for amd64 and arm64,
+**`wintun.dll` bundled** for both, the Wintun licence, a twelve-stage runbook
+where every step is a command to paste and an expected output to compare, a
+collector, and a packager.
+
+The collector records failures rather than stopping at them. Verified by
+running it under PowerShell 7.4 on Linux, where 24 of 27 checks fail: it still
+produced a complete report that reached the end, with every failure recorded in
+place and nothing escaping to the console.
+
+**`docs/WINTUN-LICENSING.md`** — Wintun's source is GPLv2, but the prebuilt
+signed DLLs ship under a separate licence whose clause 3(d) permits
+redistribution alongside software using only its documented API. That is us, so
+the DLL is now bundled rather than asked for. The pinned checksums are enforced
+by the build, so an upstream change cannot silently alter what we ship.
+
+**`docs/CODE-SIGNING.md`** — OV against EV against Azure Trusted Signing, Indian
+pricing, the documents an Indian entity needs, what changes in the build, and
+how agent auto-update should verify signatures once a certificate exists.
+
+---
+
 ## [1.1.1] — 2026-09-21
 
 ### Added

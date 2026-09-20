@@ -37,3 +37,8 @@ Thumbs.db
 
 # Field kit build output — binaries are built on demand, never committed.
 /services/kit/dist/
+/services/kit/pack/
+
+# The Windows test pack IS committed: a tester needs one URL to download, and
+# a release asset I cannot create from here is no use to them.
+!/services/kit/akconnect-windows-test-pack.zip

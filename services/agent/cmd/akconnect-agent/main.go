@@ -58,6 +58,8 @@ func main() {
 		err = runStatus(ctx, os.Args[2:])
 	case "service":
 		err = runService(ctx, os.Args[2:])
+	case "selftest":
+		err = runSelftest(ctx, os.Args[2:])
 	case "reset":
 		err = runReset(os.Args[2:])
 	case "version", "--version", "-v":
@@ -94,6 +96,11 @@ func usage() {
     --port N           UDP listen port (default: 51820)
 
   status   Show enrolment, approval and tunnel state.
+
+  selftest Check everything that depends on this operating system:
+           privileges, the tunnel driver, the key store round trip, and
+           creating a real adapter. Reports each as pass or fail with the
+           actual error, and never destroys an existing identity.
 
   reset    Forget this enrolment.
 
