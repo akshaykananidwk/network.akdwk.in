@@ -1,12 +1,12 @@
 {
-  "version": "1.0.3",
-  "released_at": "2026-09-20T19:00:00Z",
+  "version": "1.0.4",
+  "released_at": "2026-09-20T20:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Records which dumper wrote each backup, so the recovery instructions can warn when a dump predates the generated-column fix and cannot be replayed. Also stops a rollback from reconstructing VERSION with a trailing newline the original did not have.",
+  "notes": "A rollback now removes the migration files it added, so a reversed migration does not come back as pending. Transactions also unwind safely when a statement inside them commits implicitly.",
   "migrations": [
-    "2026_09_20_180000_add_backup_db_method.php"
+    "2026_09_20_193000_add_update_copied_migrations.php"
   ],
   "protected": [
     ".env",

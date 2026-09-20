@@ -44,11 +44,19 @@ final class DatabaseTests
 
     public static function run(): void
     {
+        // Outside the transaction, deliberately: the runner applies real
+        // migrations, and MySQL commits implicitly on DDL. Run inside, a
+        // single pending migration would end the transaction and silently
+        // commit every fixture created up to that point — the suite would
+        // still pass while leaving rows behind in the database.
+        self::migrationLedger();
+
+        $before = self::rowCensus();
+
         DB::begin();
 
         try {
             self::seedFixtures();
-            self::migrationLedger();
             self::tenantIsolation();
             self::ipamAllocation();
             self::deviceLifecycle();
@@ -62,6 +70,48 @@ final class DatabaseTests
             Auth::reset();
             TenantScope::reset();
         }
+
+        self::isolationHeld($before);
+    }
+
+    /**
+     * Row counts for the tables the suite writes to.
+     *
+     * @return array<string,int>
+     */
+    private static function rowCensus(): array
+    {
+        $census = [];
+        foreach (['tenants', 'users', 'networks', 'devices', 'ip_allocations', 'join_codes', 'api_keys'] as $table) {
+            $census[$table] = (int) DB::scalar('SELECT COUNT(*) FROM ' . DB::table($table));
+        }
+
+        return $census;
+    }
+
+    /**
+     * The suite's own guarantee, checked rather than asserted in a comment.
+     *
+     * A rolled-back transaction that quietly committed is worse than a failing
+     * test: every later run starts from data it did not create and cannot
+     * account for.
+     *
+     * @param array<string,int> $before
+     */
+    private static function isolationHeld(array $before): void
+    {
+        TestCase::group('Isolation — the suite leaves no trace');
+
+        $after = self::rowCensus();
+        $leaked = [];
+        foreach ($before as $table => $count) {
+            if (($after[$table] ?? $count) !== $count) {
+                $leaked[] = sprintf('%s %+d', $table, ($after[$table] ?? $count) - $count);
+            }
+        }
+
+        TestCase::assert($leaked === [], 'every row the suite created was rolled back',
+            $leaked === [] ? count($before) . ' tables unchanged' : implode(', ', $leaked));
     }
 
     // ------------------------------------------------------------ fixtures

@@ -39,6 +39,12 @@ final class HttpTests
     {
         self::$baseUrl = $baseUrl;
 
+        // The suite deliberately trips the login limiter, and enrolment has a
+        // limiter of its own. Left behind, that state makes the next run fail
+        // with 429s that look like broken endpoints — so each run starts from
+        // a clean slate rather than inheriting the last one's.
+        DB::execute('DELETE FROM ' . DB::table('rate_limits'));
+
         try {
             self::createFixtures();
             self::publicSurface();

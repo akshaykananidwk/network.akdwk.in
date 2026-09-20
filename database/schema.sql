@@ -544,6 +544,9 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__app_updates` (
   `stage_path` VARCHAR(255) NULL,
   `manifest_json` JSON NULL,
   `applied_migrations_json` JSON NULL,
+  -- The migration files MIGRATE copied into database/migrations, so a
+  -- rollback can remove exactly those and leave the rest alone.
+  `copied_migrations_json` JSON NULL,
   `error_text` TEXT NULL,
   `started_by` BIGINT UNSIGNED NULL,
   `trigger_source` ENUM('web','cli','schedule') NOT NULL DEFAULT 'web',

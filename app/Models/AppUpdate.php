@@ -15,12 +15,12 @@ final class AppUpdate extends Model
     protected static string $table = 'app_updates';
     protected static bool $tenantScoped = false;
     protected static bool $softDeletes = false;
-    protected static array $jsonColumns = ['manifest_json', 'applied_migrations_json'];
+    protected static array $jsonColumns = ['manifest_json', 'applied_migrations_json', 'copied_migrations_json'];
     protected static array $sortable = ['id', 'created_at', 'status'];
     protected static array $fillable = [
         'from_version', 'to_version', 'from_commit', 'to_commit', 'status', 'step',
         'progress_pct', 'backup_id', 'log_path', 'journal_path', 'stage_path',
-        'manifest_json', 'applied_migrations_json', 'error_text',
+        'manifest_json', 'applied_migrations_json', 'copied_migrations_json', 'error_text',
         'started_by', 'trigger_source', 'started_at', 'finished_at',
     ];
 
@@ -147,6 +147,23 @@ final class AppUpdate extends Model
     }
 
     /**
+     * The migration files this update copied into database/migrations.
+     *
+     * Recorded separately from the applied list: a rollback needs to remove
+     * the files it introduced, which is not the same set as the migrations
+     * that ran — a file already on disk is applied but not copied.
+     *
+     * @param list<string> $filenames
+     */
+    public static function recordCopiedMigrations(int $id, array $filenames): void
+    {
+        DB::execute(
+            'UPDATE ' . self::tableName() . ' SET copied_migrations_json = :m, updated_at = UTC_TIMESTAMP() WHERE id = :id',
+            ['id' => $id, 'm' => json_encode(array_values($filenames))]
+        );
+    }
+
+    /**
      * @return array{rows:list<array<string,mixed>>,total:int,page:int,per_page:int,pages:int}
      */
     public static function history(int $page = 1, int $perPage = 20): array
@@ -178,7 +195,7 @@ final class AppUpdate extends Model
     /** @param array<string,mixed> $row @return array<string,mixed> */
     private static function decode(array $row): array
     {
-        foreach (['manifest_json', 'applied_migrations_json'] as $column) {
+        foreach (['manifest_json', 'applied_migrations_json', 'copied_migrations_json'] as $column) {
             if (isset($row[$column]) && is_string($row[$column])) {
                 $decoded = json_decode($row[$column], true);
                 $row[$column] = is_array($decoded) ? $decoded : null;

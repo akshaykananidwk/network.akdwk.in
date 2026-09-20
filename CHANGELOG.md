@@ -6,6 +6,43 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.0.4] — 2026-09-20
+
+### Fixed
+
+**A rollback left the new version's migration files behind.** `MIGRATE` copies
+a release's migration files into `database/migrations` before running them, so
+the ledger and the disk agree even if a later step fails — but nothing recorded
+which files were new. A rollback therefore reversed the migration in the
+database and left its file in place, where `migrate.php --status` reported it
+as pending, inviting an operator to re-apply a migration from the very version
+they had just rolled back from. `app_updates.copied_migrations_json` records
+the filenames, and the rollback removes exactly those.
+
+**A lost transaction no longer buries the error that caused it.** MySQL commits
+implicitly on any DDL, and on `LOCK TABLES`, `UNLOCK TABLES` and `TRUNCATE`.
+The transaction ends and every savepoint under it is destroyed, which the
+nesting counter cannot see, so the next `ROLLBACK TO SAVEPOINT` raised error
+1305 on top of whatever the caller was actually reporting. `DB::commit()` and
+`DB::rollback()` now check the connection rather than trusting the counter, and
+log a warning — the work is already committed either way, and an outer rollback
+that silently commits must not pass unnoticed.
+
+**The verification suite no longer leaks rows into its own database.** Its
+migration-ledger test runs the real migration runner, whose `ALTER TABLE`
+committed the transaction the suite wraps itself in — so whenever a migration
+was genuinely pending, every fixture created up to that point was committed for
+real while the suite still reported success. Six stray tenants had accumulated
+this way. The ledger test now runs before the transaction opens, and a new
+check compares row counts across the whole suite so the guarantee is verified
+instead of merely asserted in a comment.
+
+**The HTTP suite reset its own rate limiter.** It deliberately trips the login
+limiter, and enrolment has a limiter of its own; left behind, that state made
+the next run fail with 429s that looked like broken endpoints.
+
+---
+
 ## [1.0.3] — 2026-09-20
 
 ### Added

@@ -161,6 +161,11 @@ final class DB
             return;
         }
         self::$transactionDepth--;
+
+        if (self::transactionWasLost('commit')) {
+            return;
+        }
+
         if (self::$transactionDepth === 0) {
             self::write()->commit();
         } else {
@@ -174,13 +179,47 @@ final class DB
             return;
         }
         self::$transactionDepth--;
+
+        if (self::transactionWasLost('rollback')) {
+            return;
+        }
+
         if (self::$transactionDepth === 0) {
-            if (self::write()->inTransaction()) {
-                self::write()->rollBack();
-            }
+            self::write()->rollBack();
         } else {
             self::write()->exec('ROLLBACK TO SAVEPOINT sp' . self::$transactionDepth);
         }
+    }
+
+    /**
+     * Has something ended the transaction behind our back?
+     *
+     * MySQL commits implicitly on any DDL, and on LOCK TABLES, UNLOCK TABLES
+     * and TRUNCATE. The transaction ends and every savepoint under it is
+     * destroyed, which the depth counter cannot see. Issuing
+     * ROLLBACK TO SAVEPOINT afterwards raises error 1305 and buries whatever
+     * the caller was actually trying to report — the work is already
+     * committed either way, so there is nothing left to undo.
+     *
+     * Losing a transaction is never intended, so it is logged rather than
+     * quietly absorbed: an outer rollback that silently commits is exactly
+     * the kind of thing that must not pass unnoticed.
+     */
+    private static function transactionWasLost(string $operation): bool
+    {
+        if (self::write()->inTransaction()) {
+            return false;
+        }
+
+        Logger::warning('db', 'Transaction ended before ' . $operation
+            . '; a statement in it committed implicitly (DDL, LOCK TABLES or TRUNCATE). '
+            . 'Work done inside it is already committed and cannot be rolled back.', [
+                'depth' => self::$transactionDepth,
+            ]);
+
+        self::$transactionDepth = 0;
+
+        return true;
     }
 
     /** @template T @param callable():T $callback @return T */

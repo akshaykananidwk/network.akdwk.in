@@ -355,7 +355,11 @@ final class UpdateSteps
             @mkdir($liveMigrations, 0755, true);
         }
 
-        $copied = 0;
+        // Remembered, not just counted: a rollback has to delete the files it
+        // introduced, or migrate.php reports them as pending and invites an
+        // operator to re-apply a migration from the version they rolled back
+        // from.
+        $copied = [];
         foreach (scandir($stagedMigrations) ?: [] as $entry) {
             if ($entry === '.' || $entry === '..') {
                 continue;
@@ -363,8 +367,12 @@ final class UpdateSteps
             $source = $stagedMigrations . '/' . $entry;
             $target = $liveMigrations . '/' . basename($entry);
             if (is_file($source) && !is_file($target) && copy($source, $target)) {
-                $copied++;
+                $copied[] = basename($entry);
             }
+        }
+
+        if ($copied !== []) {
+            AppUpdate::recordCopiedMigrations((int) $update['id'], $copied);
         }
 
         $runner = new MigrationRunner($liveMigrations, DB::prefix());
@@ -388,7 +396,7 @@ final class UpdateSteps
             count($result['applied']),
             $result['batch'],
             $result['elapsed_ms'],
-            $copied
+            count($copied)
         );
         $log->info($message);
 

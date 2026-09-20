@@ -186,10 +186,47 @@ final class RollbackManager
                 count($reversal['irreversible'])
             );
             $log->info(end($steps));
+
+            $removed = $this->removeCopiedMigrationFiles($update);
+            if ($removed > 0) {
+                $steps[] = sprintf('Removed %d migration file(s) this update had added.', $removed);
+                $log->info(end($steps));
+            }
         } catch (\Throwable $e) {
             $failures[] = 'Migration rollback failed: ' . $e->getMessage();
             $log->error(end($failures));
         }
+    }
+
+    /**
+     * Delete the migration files MIGRATE copied in, and only those.
+     *
+     * Reversing a migration in the database while leaving its file on disk
+     * leaves it showing as pending, so the next `migrate.php` would re-apply a
+     * migration belonging to the version that was just rolled back.
+     *
+     * @param array<string,mixed> $update
+     */
+    private function removeCopiedMigrationFiles(array $update): int
+    {
+        $copied = (array) ($update['copied_migrations_json'] ?? []);
+        if ($copied === []) {
+            return 0;
+        }
+
+        $directory = $this->appRoot . '/database/migrations';
+        $removed = 0;
+
+        foreach ($copied as $filename) {
+            // basename() so a recorded name can never walk out of the
+            // migrations directory, however it got into the column.
+            $path = $directory . '/' . basename((string) $filename);
+            if (is_file($path) && @unlink($path)) {
+                $removed++;
+            }
+        }
+
+        return $removed;
     }
 
     /**
