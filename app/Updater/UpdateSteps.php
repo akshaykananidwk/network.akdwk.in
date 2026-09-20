@@ -580,17 +580,26 @@ final class UpdateSteps
         $updateId = (int) $update['id'];
         AppUpdate::succeed($updateId);
 
-        // The journal's job is done; keeping it would just consume disk and
-        // invite a stale rollback.
-        $journalPath = sprintf('%s/storage/updates/journal-%d.jsonl', $this->appRoot, $updateId);
-        (new RollbackJournal($journalPath, sprintf('%s/storage/updates/journal-%d-files', $this->appRoot, $updateId)))->discard();
-
         $this->cleanStaging((string) $update['to_commit']);
 
+        // The journal is deliberately kept. It is the per-file undo list that
+        // "roll back to this point" in History replays; discarding it here
+        // would leave that button able to reverse migrations but restore no
+        // files at all. It is pruned on the same retention count as the
+        // backups it pairs with.
         $retention = (int) UpdateSetting::current()['backup_retention'];
         $pruned = BackupManager::make()->prune($retention);
         if ($pruned['removed'] > 0) {
             $log->info(sprintf('Pruned %d old backup(s), freeing %s.', $pruned['removed'], UpdateEnv::humanBytes($pruned['freed_bytes'])));
+        }
+
+        $prunedJournals = RollbackJournal::pruneDirectory($this->appRoot . '/storage/updates', $retention);
+        if ($prunedJournals['removed'] > 0) {
+            $log->info(sprintf(
+                'Pruned %d old rollback journal(s), freeing %s.',
+                $prunedJournals['removed'],
+                UpdateEnv::humanBytes($prunedJournals['freed_bytes'])
+            ));
         }
 
         Config::set('app.version', (string) $update['to_version']);

@@ -32,6 +32,7 @@ use App\Core\Config;
 use App\Core\Lang;
 use App\Core\Logger;
 use App\Core\View;
+use Tests\BackupTests;
 use Tests\DatabaseTests;
 use Tests\HttpTests;
 use Tests\TestCase;
@@ -85,6 +86,9 @@ if ($runAll || isset($options['db'])) {
 
         try {
             DatabaseTests::run();
+            // Runs after, and outside, the transaction DatabaseTests wraps
+            // itself in: dumping and restoring means DDL, which commits.
+            BackupTests::run();
         } catch (Throwable $e) {
             // A throw here is a genuine failure, not a missing database —
             // report it as one, with where it happened.

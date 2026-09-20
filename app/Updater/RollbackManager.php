@@ -74,6 +74,11 @@ final class RollbackManager
         if ($ok) {
             $this->maintenance->disable();
             AppUpdate::markRolledBack($updateId, $reason);
+            // The undo list has been consumed: the tree is back at its
+            // pre-APPLY state, so replaying it again could only confuse a
+            // later operator. It is kept on failure, where a second attempt
+            // still needs it.
+            $this->discardJournal($update);
             $log->info('Rollback complete. The previous version is live again.');
         } else {
             AppUpdate::fail($updateId, $reason . ' — rollback incomplete: ' . implode(' ', $failures));
@@ -143,6 +148,20 @@ final class RollbackManager
             $failures[] = 'File rollback failed: ' . $e->getMessage();
             $log->error(end($failures));
         }
+    }
+
+    /** @param array<string,mixed> $update */
+    private function discardJournal(array $update): void
+    {
+        $relative = (string) ($update['journal_path'] ?? '');
+        if ($relative === '') {
+            return;
+        }
+
+        (new RollbackJournal(
+            $this->appRoot . '/' . ltrim($relative, '/'),
+            sprintf('%s/storage/updates/journal-%d-files', $this->appRoot, (int) $update['id'])
+        ))->discard();
     }
 
     /**

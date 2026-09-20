@@ -6,6 +6,56 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.0.2] — 2026-09-20
+
+Three fixes to the update system, each found by running a real rollback
+against a live MariaDB rather than by reading the code. Every one of them
+made a backup unrestorable, which is the same as having no backup.
+
+### Fixed
+
+**A dump no longer writes back generated columns.** `mysqldump` lists STORED
+generated columns in its `INSERT` statements — with or without
+`--complete-insert` — and the restore then fails outright with *"the value
+specified for generated column ... has been ignored"* (error 1906). The
+pure-PHP dumper had the same flaw, because it selected `*`. It now reads the
+writable columns from `information_schema` and emits an explicit column list,
+and a schema containing generated columns always takes the PHP path, since
+`mysqldump` cannot be made to produce a restorable dump for one.
+
+**A failed restore no longer strands the connection.** A dump that brackets
+its tables in `LOCK TABLES` left the session holding those locks when a
+statement in between threw, so every later query answered *"table ... was not
+locked with LOCK TABLES"* — turning one restore failure into a rollback that
+could not even record why it had failed. Locks are now released on the way
+out, and only when they are actually held, because `UNLOCK TABLES` commits an
+open transaction as a side effect.
+
+**The rollback journal survives a successful update.** It was discarded at
+`FINALISE`, so *Roll back to this point* in History could reverse migrations
+and restore the database but silently put no files back, reporting *"nothing
+to undo"*. The journal is now kept and pruned on the same retention count as
+the backups it pairs with, and discarded only once a rollback has consumed it.
+
+### Added
+
+`tests/BackupTests.php` — a dump-and-restore suite that reproduces all three
+faults against a live database: a probe table with a stored generated column
+and values carrying quotes, semicolons, newlines, backslashes and multi-byte
+UTF-8 is dumped, dropped, restored, and compared row for row.
+
+---
+
+## [1.0.1] — 2026-09-21
+
+### Added
+
+`devices.last_handshake_at`, recorded separately from the control-plane
+heartbeat, so the dashboard can tell *"the agent called us"* from *"the tunnel
+is up"*.
+
+---
+
 ## [1.0.0] — 2026-09-20
 
 First release. Phase 1 of the delivery plan: the complete control plane,

@@ -8,24 +8,17 @@ use App\Core\Config;
 use App\Core\DB;
 use App\Core\Logger;
 use App\Core\UpdateException;
-use PDO;
 
 /**
  * Database dump and restore.
  *
- * mysqldump is used when the host allows shell_exec; a great many shared and
- * aaPanel setups disable it, so a complete pure-PHP dumper is the fallback
- * rather than an afterthought. Both paths produce the same restorable SQL:
+ * mysqldump is used when the host allows it and the schema is simple enough
+ * for it (see chooseMethod); otherwise SqlDumpWriter produces the same
+ * restorable SQL in pure PHP. Either way the output is a gzip stream of
  * DROP + CREATE + chunked INSERTs, plus views, triggers and routines.
- *
- * Rows are streamed with an unbuffered query and written in batches, so a
- * multi-gigabyte table does not have to fit in memory.
  */
 final class DatabaseDumper
 {
-    private const ROWS_PER_INSERT = 200;
-    private const ROWS_PER_FLUSH = 5000;
-
     public function __construct(
         private readonly string $host,
         private readonly int $port,
@@ -58,19 +51,19 @@ final class DatabaseDumper
             throw new UpdateException('Cannot create backup directory: ' . $directory, 'BACKUP_DB');
         }
 
-        $method = 'php';
-        $tables = 0;
+        $writer = new SqlDumpWriter($this->database);
+        $method = $this->chooseMethod($writer);
 
-        if ($this->canShellOut()) {
+        if ($method === 'mysqldump') {
             try {
-                $tables = $this->dumpWithMysqldump($destination);
-                $method = 'mysqldump';
+                $tables = $this->dumpWithMysqldump($destination, $writer);
             } catch (UpdateException $e) {
                 Logger::warning('backup', 'mysqldump failed; falling back to the PHP dumper', ['error' => $e->getMessage()]);
-                $tables = $this->dumpWithPhp($destination);
+                $method = 'php';
+                $tables = $writer->writeTo($destination);
             }
         } else {
-            $tables = $this->dumpWithPhp($destination);
+            $tables = $writer->writeTo($destination);
         }
 
         $bytes = (int) filesize($destination);
@@ -83,6 +76,31 @@ final class DatabaseDumper
         Logger::info('backup', 'Database dumped', ['bytes' => $bytes, 'method' => $method, 'tables' => $tables]);
 
         return ['path' => $destination, 'bytes' => $bytes, 'sha256' => $sha256, 'method' => $method, 'tables' => $tables];
+    }
+
+    /**
+     * Pick the dumper.
+     *
+     * mysqldump is much faster, but MariaDB's writes STORED generated columns
+     * into its INSERT statements — with or without --complete-insert — and
+     * restoring that fails outright with "the value specified for generated
+     * column ... has been ignored" (error 1906). A backup that cannot be
+     * restored is not a backup, so a schema with generated columns always goes
+     * through the PHP dumper, which emits an explicit column list without them.
+     */
+    private function chooseMethod(SqlDumpWriter $writer): string
+    {
+        $generated = $writer->generatedColumns();
+        if ($generated !== []) {
+            Logger::info('backup', 'Using the PHP dumper: mysqldump mishandles generated columns', [
+                'count'   => count($generated),
+                'example' => $generated[0],
+            ]);
+
+            return 'php';
+        }
+
+        return $this->canShellOut() ? 'mysqldump' : 'php';
     }
 
     /**
@@ -99,7 +117,8 @@ final class DatabaseDumper
             throw new UpdateException('Backup file not found: ' . $dumpPath);
         }
 
-        $handle = str_ends_with($dumpPath, '.gz') ? gzopen($dumpPath, 'rb') : fopen($dumpPath, 'rb');
+        $gzipped = str_ends_with($dumpPath, '.gz');
+        $handle = $gzipped ? gzopen($dumpPath, 'rb') : fopen($dumpPath, 'rb');
         if ($handle === false) {
             throw new UpdateException('Cannot read backup file: ' . $dumpPath);
         }
@@ -109,10 +128,11 @@ final class DatabaseDumper
 
         $executed = 0;
         $buffer = '';
+        $holdsLocks = false;
 
         try {
             while (!feof($handle)) {
-                $line = str_ends_with($dumpPath, '.gz') ? gzgets($handle) : fgets($handle);
+                $line = $gzipped ? gzgets($handle) : fgets($handle);
                 if ($line === false) {
                     break;
                 }
@@ -130,23 +150,75 @@ final class DatabaseDumper
                     if ($statement === '' || $statement === ';') {
                         continue;
                     }
+                    $holdsLocks = $this->locksAfter($statement, $holdsLocks);
                     $pdo->exec($statement);
                     $executed++;
                 }
             }
 
             if (trim($buffer) !== '') {
-                $pdo->exec(trim($buffer));
+                $statement = trim($buffer);
+                $holdsLocks = $this->locksAfter($statement, $holdsLocks);
+                $pdo->exec($statement);
                 $executed++;
             }
         } finally {
-            $pdo->exec('SET FOREIGN_KEY_CHECKS = 1');
-            str_ends_with($dumpPath, '.gz') ? gzclose($handle) : fclose($handle);
+            $this->releaseConnection($pdo, $holdsLocks);
+            $gzipped ? gzclose($handle) : fclose($handle);
         }
 
         Logger::info('backup', 'Database restored', ['statements' => $executed, 'from' => basename($dumpPath)]);
 
         return $executed;
+    }
+
+    /**
+     * Does the connection hold table locks once this statement has run?
+     *
+     * A dump written by mysqldump brackets each table in LOCK TABLES /
+     * UNLOCK TABLES, so the answer changes as the restore replays.
+     */
+    private function locksAfter(string $statement, bool $current): bool
+    {
+        if (preg_match('/^UNLOCK\s+TABLES/i', $statement) === 1) {
+            return false;
+        }
+        if (preg_match('/^LOCK\s+TABLES/i', $statement) === 1) {
+            return true;
+        }
+
+        return $current;
+    }
+
+    /**
+     * Put the connection back into a usable state after a restore.
+     *
+     * If a restore throws between a LOCK TABLES and its UNLOCK — as it does on
+     * a dump this class cannot replay — the session is left holding locks, and
+     * every later query on it dies with "table ... was not locked with LOCK
+     * TABLES". That turns one restore failure into a rollback that cannot even
+     * record why it failed.
+     *
+     * The unlock is issued only when locks are actually held, because
+     * UNLOCK TABLES commits the caller's open transaction as a side effect and
+     * a restore of a lock-free dump has no business doing that.
+     *
+     * @param \PDO $pdo
+     */
+    private function releaseConnection(\PDO $pdo, bool $holdsLocks): void
+    {
+        $statements = $holdsLocks ? ['UNLOCK TABLES', 'SET FOREIGN_KEY_CHECKS = 1'] : ['SET FOREIGN_KEY_CHECKS = 1'];
+
+        foreach ($statements as $statement) {
+            try {
+                $pdo->exec($statement);
+            } catch (\PDOException $e) {
+                Logger::warning('backup', 'Could not reset the connection after a restore', [
+                    'statement' => $statement,
+                    'error'     => $e->getMessage(),
+                ]);
+            }
+        }
     }
 
     // ------------------------------------------------------------- mysqldump
@@ -166,7 +238,7 @@ final class DatabaseDumper
         return is_string($which) && trim($which) !== '';
     }
 
-    private function dumpWithMysqldump(string $destination): int
+    private function dumpWithMysqldump(string $destination, SqlDumpWriter $writer): int
     {
         // The password goes in a 0600 defaults file, never on the command line
         // where it would be visible in `ps` to every user on the box.
@@ -184,9 +256,13 @@ final class DatabaseDumper
         ));
 
         try {
+            // --skip-lock-tables: --single-transaction already gives InnoDB a
+            // consistent snapshot, and the LOCK TABLES statements it would
+            // otherwise emit are what strand a failed restore mid-lock.
             $command = sprintf(
-                'mysqldump --defaults-extra-file=%s --single-transaction --quick --routines --triggers --events '
-                . '--add-drop-table --default-character-set=utf8mb4 --no-tablespaces %s 2>&1 | gzip -6 > %s',
+                'mysqldump --defaults-extra-file=%s --single-transaction --skip-lock-tables --quick '
+                . '--routines --triggers --events --add-drop-table --complete-insert '
+                . '--default-character-set=utf8mb4 --no-tablespaces %s 2>&1 | gzip -6 > %s',
                 escapeshellarg($configFile),
                 escapeshellarg($this->database),
                 escapeshellarg($destination)
@@ -203,225 +279,7 @@ final class DatabaseDumper
             @unlink($configFile);
         }
 
-        return count($this->tableNames());
-    }
-
-    // ------------------------------------------------------------ PHP dumper
-
-    private function dumpWithPhp(string $destination): int
-    {
-        $handle = gzopen($destination, 'wb6');
-        if ($handle === false) {
-            throw new UpdateException('Cannot open the dump file for writing: ' . $destination, 'BACKUP_DB');
-        }
-
-        $pdo = DB::write();
-
-        try {
-            $this->write($handle, "-- " . (string) Config::get('brand.name', 'Panel') . " database backup\n");
-            $this->write($handle, '-- Generated ' . gmdate('c') . " UTC\n");
-            $this->write($handle, '-- Database: ' . $this->database . "\n\n");
-            $this->write($handle, "SET NAMES utf8mb4;\n");
-            $this->write($handle, "SET FOREIGN_KEY_CHECKS = 0;\n");
-            $this->write($handle, "SET SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';\n");
-            $this->write($handle, "SET time_zone = '+00:00';\n\n");
-
-            $tables = $this->tableNames();
-            foreach ($tables as $table) {
-                $this->dumpTableStructure($handle, $pdo, $table);
-                $this->dumpTableRows($handle, $pdo, $table);
-            }
-
-            $this->dumpViews($handle, $pdo);
-            $this->dumpTriggers($handle, $pdo);
-            $this->dumpRoutines($handle, $pdo);
-
-            $this->write($handle, "\nSET FOREIGN_KEY_CHECKS = 1;\n");
-
-            return count($tables);
-        } finally {
-            gzclose($handle);
-        }
-    }
-
-    /** @return list<string> base tables only; views are emitted separately */
-    private function tableNames(): array
-    {
-        $rows = DB::select(
-            'SELECT TABLE_NAME FROM information_schema.TABLES
-             WHERE TABLE_SCHEMA = :db AND TABLE_TYPE = \'BASE TABLE\' ORDER BY TABLE_NAME',
-            ['db' => $this->database]
-        );
-
-        return array_map(static fn (array $r): string => (string) $r['TABLE_NAME'], $rows);
-    }
-
-    /** @param resource $handle */
-    private function dumpTableStructure($handle, PDO $pdo, string $table): void
-    {
-        $row = DB::selectOne('SHOW CREATE TABLE `' . str_replace('`', '', $table) . '`');
-        $create = (string) ($row['Create Table'] ?? '');
-
-        $this->write($handle, "\n-- Table: {$table}\n");
-        $this->write($handle, 'DROP TABLE IF EXISTS `' . $table . "`;\n");
-        $this->write($handle, $create . ";\n\n");
-    }
-
-    /** @param resource $handle */
-    private function dumpTableRows($handle, PDO $pdo, string $table): void
-    {
-        // @sql-identifier A table name cannot be a bound parameter. $table
-        // comes from information_schema for the configured database, never
-        // from a request, and every backtick is stripped before it is quoted.
-        $safeTable = '`' . str_replace('`', '', $table) . '`';
-
-        // Unbuffered so MySQL streams rows instead of materialising the whole
-        // result set in PHP's memory.
-        $pdo->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
-
-        try {
-            // @sql-identifier $safeTable is a backtick-stripped identifier from
-            // information_schema, not request input; a table name cannot bind.
-            $statement = $pdo->query('SELECT * FROM ' . $safeTable);
-            if ($statement === false) {
-                return;
-            }
-
-            $batch = [];
-            $columns = null;
-            $written = 0;
-
-            while (($row = $statement->fetch(PDO::FETCH_ASSOC)) !== false) {
-                if ($columns === null) {
-                    $columns = '(`' . implode('`, `', array_keys($row)) . '`)';
-                }
-
-                $values = [];
-                foreach ($row as $value) {
-                    $values[] = $this->quote($pdo, $value);
-                }
-                $batch[] = '(' . implode(', ', $values) . ')';
-
-                if (count($batch) >= self::ROWS_PER_INSERT) {
-                    $this->write($handle, 'INSERT INTO ' . $safeTable . ' ' . $columns . " VALUES\n" . implode(",\n", $batch) . ";\n");
-                    $written += count($batch);
-                    $batch = [];
-
-                    if ($written % self::ROWS_PER_FLUSH === 0) {
-                        Logger::debug('backup', 'Dump progress', ['table' => $table, 'rows' => $written]);
-                    }
-                }
-            }
-
-            if ($batch !== [] && $columns !== null) {
-                $this->write($handle, 'INSERT INTO ' . $safeTable . ' ' . $columns . " VALUES\n" . implode(",\n", $batch) . ";\n");
-            }
-        } finally {
-            $pdo->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, true);
-        }
-    }
-
-    /** @param resource $handle */
-    private function dumpViews($handle, PDO $pdo): void
-    {
-        $views = DB::select(
-            'SELECT TABLE_NAME FROM information_schema.VIEWS WHERE TABLE_SCHEMA = :db',
-            ['db' => $this->database]
-        );
-
-        foreach ($views as $view) {
-            $name = (string) $view['TABLE_NAME'];
-            $row = DB::selectOne('SHOW CREATE VIEW `' . str_replace('`', '', $name) . '`');
-            $create = (string) ($row['Create View'] ?? '');
-            if ($create === '') {
-                continue;
-            }
-            $this->write($handle, "\n-- View: {$name}\n");
-            $this->write($handle, 'DROP VIEW IF EXISTS `' . $name . "`;\n");
-            // DEFINER clauses break a restore onto a server without that user.
-            $this->write($handle, $this->stripDefiner($create) . ";\n");
-        }
-    }
-
-    /** @param resource $handle */
-    private function dumpTriggers($handle, PDO $pdo): void
-    {
-        $triggers = DB::select(
-            'SELECT TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = :db',
-            ['db' => $this->database]
-        );
-
-        if ($triggers === []) {
-            return;
-        }
-
-        $this->write($handle, "\nDELIMITER ;;\n");
-        foreach ($triggers as $trigger) {
-            $name = (string) $trigger['TRIGGER_NAME'];
-            $row = DB::selectOne('SHOW CREATE TRIGGER `' . str_replace('`', '', $name) . '`');
-            $create = (string) ($row['SQL Original Statement'] ?? '');
-            if ($create === '') {
-                continue;
-            }
-            $this->write($handle, 'DROP TRIGGER IF EXISTS `' . $name . "`;;\n");
-            $this->write($handle, $this->stripDefiner($create) . ";;\n");
-        }
-        $this->write($handle, "DELIMITER ;\n");
-    }
-
-    /** @param resource $handle */
-    private function dumpRoutines($handle, PDO $pdo): void
-    {
-        $routines = DB::select(
-            'SELECT ROUTINE_NAME, ROUTINE_TYPE FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = :db',
-            ['db' => $this->database]
-        );
-
-        if ($routines === []) {
-            return;
-        }
-
-        $this->write($handle, "\nDELIMITER ;;\n");
-        foreach ($routines as $routine) {
-            $name = (string) $routine['ROUTINE_NAME'];
-            $type = strtoupper((string) $routine['ROUTINE_TYPE']) === 'FUNCTION' ? 'FUNCTION' : 'PROCEDURE';
-            $row = DB::selectOne('SHOW CREATE ' . $type . ' `' . str_replace('`', '', $name) . '`');
-            $create = (string) ($row['Create ' . ucfirst(strtolower($type))] ?? '');
-            if ($create === '') {
-                continue;
-            }
-            $this->write($handle, 'DROP ' . $type . ' IF EXISTS `' . $name . "`;;\n");
-            $this->write($handle, $this->stripDefiner($create) . ";;\n");
-        }
-        $this->write($handle, "DELIMITER ;\n");
-    }
-
-    private function quote(PDO $pdo, mixed $value): string
-    {
-        if ($value === null) {
-            return 'NULL';
-        }
-        if (is_int($value) || is_float($value)) {
-            return (string) $value;
-        }
-        if (is_bool($value)) {
-            return $value ? '1' : '0';
-        }
-
-        $string = (string) $value;
-
-        // Binary columns are emitted as hex literals so the dump stays valid
-        // UTF-8 text and survives a round trip through gzip and a text editor.
-        if (!mb_check_encoding($string, 'UTF-8')) {
-            return '0x' . bin2hex($string);
-        }
-
-        return $pdo->quote($string);
-    }
-
-    private function stripDefiner(string $sql): string
-    {
-        return (string) preg_replace('/DEFINER\s*=\s*`[^`]*`@`[^`]*`\s*/i', '', $sql);
+        return count($writer->tableNames());
     }
 
     /**
@@ -468,13 +326,5 @@ final class DatabaseDumper
         }
 
         return !$inSingle && !$inDouble && !$inBacktick && $lastSignificant === ';';
-    }
-
-    /** @param resource $handle */
-    private function write($handle, string $data): void
-    {
-        if (gzwrite($handle, $data) === false) {
-            throw new UpdateException('Failed writing to the database dump (disk full?).', 'BACKUP_DB');
-        }
     }
 }

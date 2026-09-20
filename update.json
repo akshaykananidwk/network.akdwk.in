@@ -1,13 +1,11 @@
 {
-  "version": "1.0.1",
-  "released_at": "2026-09-21T09:00:00Z",
+  "version": "1.0.2",
+  "released_at": "2026-09-20T18:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Records the WireGuard handshake time separately from the control-plane heartbeat, so the dashboard can tell \"the agent called us\" from \"the tunnel is up\".",
-  "migrations": [
-    "2026_09_21_090000_add_device_handshake.php"
-  ],
+  "notes": "Fixes three faults that made a backup unrestorable and a rollback unable to put files back. Found by running a real rollback against a live MariaDB, not by inspection.",
+  "migrations": [],
   "protected": [
     ".env",
     "config/config.php",
