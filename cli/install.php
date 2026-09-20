@@ -1,0 +1,299 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * Unattended installation from a JSON answers file.
+ *
+ * For scripted deployments and for hosts where the web installer cannot run.
+ * It performs exactly the same work as the wizard and produces the same
+ * config/config.php and install.lock.
+ *
+ *   php cli/install.php --answers=install-answers.json
+ *   php cli/install.php --print-template > install-answers.json
+ */
+
+if (PHP_SAPI !== 'cli') {
+    exit("CLI only.\n");
+}
+
+define('APP_ROOT', dirname(__DIR__));
+
+require APP_ROOT . '/app/Core/Autoloader.php';
+$autoloader = new App\Core\Autoloader();
+$autoloader->addNamespace('App', APP_ROOT . '/app');
+$autoloader->addNamespace('Install', APP_ROOT . '/install');
+$autoloader->register();
+require APP_ROOT . '/app/Core/helpers.php';
+
+use App\Core\Crypto;
+use App\Core\DB;
+use App\Core\Totp;
+use Install\Installer;
+
+$options = [];
+foreach (array_slice($argv, 1) as $argument) {
+    if (str_starts_with($argument, '--')) {
+        $argument = substr($argument, 2);
+        [$key, $value] = str_contains($argument, '=') ? explode('=', $argument, 2) : [$argument, true];
+        $options[$key] = $value;
+    }
+}
+
+if (isset($options['print-template'])) {
+    echo json_encode([
+        'site_name'        => 'AK Connect',
+        'org_name'         => 'AK Computer',
+        'app_url'          => 'https://net.example.com',
+        'timezone'         => 'Asia/Kolkata',
+        'support_email'    => 'support@net.example.com',
+        'db_host'          => '127.0.0.1',
+        'db_port'          => 3306,
+        'db_name'          => 'akconnect',
+        'db_user'          => 'akconnect',
+        'db_pass'          => '',
+        'db_prefix'        => '',
+        'admin_name'       => 'Administrator',
+        'admin_email'      => 'admin@example.com',
+        'admin_password'   => 'change-this-to-a-strong-password',
+        'enable_2fa'       => false,
+        'mail_host'        => '',
+        'mail_port'        => 587,
+        'mail_user'        => '',
+        'mail_pass'        => '',
+        'mail_security'    => 'tls',
+        'mail_from'        => '',
+        'coordinator_host' => '127.0.0.1',
+        'coordinator_port' => 8443,
+        'gh_owner'         => '',
+        'gh_repo'          => '',
+        'gh_branch'        => 'main',
+        'gh_token'         => '',
+        'drop_existing'    => false,
+    ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+    exit(0);
+}
+
+$installer = new Installer(APP_ROOT);
+
+if ($installer->isLocked()) {
+    fwrite(STDERR, "Already installed (install/install.lock exists). Remove it and config/config.php to reinstall.\n");
+    exit(1);
+}
+
+$answersFile = (string) ($options['answers'] ?? '');
+if ($answersFile === '' || !is_file($answersFile)) {
+    fwrite(STDERR, "Usage: php cli/install.php --answers=<file.json>\n       php cli/install.php --print-template\n");
+    exit(1);
+}
+
+$answers = json_decode((string) file_get_contents($answersFile), true);
+if (!is_array($answers)) {
+    fwrite(STDERR, "The answers file is not valid JSON.\n");
+    exit(1);
+}
+
+function out(string $message): void
+{
+    fwrite(STDOUT, $message . "\n");
+}
+
+function fail(string $message): never
+{
+    fwrite(STDERR, "✗ " . $message . "\n");
+    exit(1);
+}
+
+// ------------------------------------------------------------- validation
+
+foreach (['app_url', 'db_name', 'db_user', 'admin_name', 'admin_email', 'admin_password'] as $required) {
+    if (($answers[$required] ?? '') === '') {
+        fail('Missing required answer: ' . $required);
+    }
+}
+if (filter_var($answers['admin_email'], FILTER_VALIDATE_EMAIL) === false) {
+    fail('admin_email is not a valid email address.');
+}
+if (strlen((string) $answers['admin_password']) < 10) {
+    fail('admin_password must be at least 10 characters.');
+}
+
+$answers += [
+    'db_host' => '127.0.0.1', 'db_port' => 3306, 'db_pass' => '', 'db_prefix' => '',
+    'timezone' => 'Asia/Kolkata', 'site_name' => 'AK Connect', 'support_email' => '',
+];
+
+// ------------------------------------------------------------ requirements
+
+out('Checking requirements…');
+$check = $installer->checkRequirements();
+foreach ($check['groups'] as $group => $rows) {
+    foreach ($rows as $row) {
+        if ($row['required'] && !$row['ok']) {
+            out(sprintf('  ✗ %s: %s (need %s)', $row['label'], $row['found'], $row['expected']));
+            if ($row['fix'] !== '') {
+                out('    ' . $row['fix']);
+            }
+        }
+    }
+}
+// The rewrite probe needs a reachable HTTP server, which a CLI install may not
+// have; it is reported but not fatal here.
+if (!$check['ok']) {
+    $blocking = false;
+    foreach ($check['groups'] as $group => $rows) {
+        foreach ($rows as $row) {
+            if ($row['required'] && !$row['ok'] && $group !== 'Web server') {
+                $blocking = true;
+            }
+        }
+    }
+    if ($blocking) {
+        fail('Required checks failed. Fix them and run again.');
+    }
+    out('  ! URL rewriting could not be verified from the command line. Confirm it once the site is reachable.');
+}
+out('  ✓ Requirements satisfied');
+
+// ---------------------------------------------------------------- database
+
+out('Connecting to the database…');
+$test = $installer->testDatabase(
+    (string) $answers['db_host'], (int) $answers['db_port'], (string) $answers['db_name'],
+    (string) $answers['db_user'], (string) $answers['db_pass'], (string) $answers['db_prefix']
+);
+if (!$test['ok']) {
+    fail($test['message']);
+}
+out('  ✓ ' . $test['message']);
+
+$existing = (int) ($test['existing_tables'] ?? 0);
+if ($existing > 0 && empty($answers['drop_existing'])) {
+    fail(sprintf(
+        'The database already contains %d table(s). Point at an empty database, or set "drop_existing": true '
+        . 'in the answers file to drop them (this cannot be undone).',
+        $existing
+    ));
+}
+
+$pdo = DB::connectWith(
+    (string) $answers['db_host'], (int) $answers['db_port'], (string) $answers['db_name'],
+    (string) $answers['db_user'], (string) $answers['db_pass'], (string) $answers['db_prefix']
+);
+DB::setConnection($pdo, (string) $answers['db_prefix']);
+
+out('Importing the schema…');
+$import = $installer->importSchema($pdo, (string) $answers['db_prefix'], $existing > 0 && !empty($answers['drop_existing']));
+if (!$import['ok']) {
+    fail($import['message']);
+}
+out('  ✓ ' . $import['message']);
+
+// ------------------------------------------------------------------ secrets
+
+$answers['app_key'] = Crypto::generateAppKey();
+$answers['backup_key'] = Crypto::generateAppKey();
+$answers['health_token'] = Crypto::randomToken(16);
+$answers['coordinator_secret'] = Crypto::randomToken(32);
+$answers['admin_password_hash'] = Crypto::hashPassword((string) $answers['admin_password']);
+
+if (function_exists('sodium_crypto_sign_keypair')) {
+    $keypair = Crypto::generateSigningKeypair();
+    $answers['controller_public_key'] = $keypair['public'];
+    $answers['controller_secret_key'] = $keypair['secret'];
+} else {
+    $answers['controller_public_key'] = '';
+    $answers['controller_secret_key'] = '';
+    out('  ! ext-sodium is missing — no controller signing keypair was generated.');
+}
+
+App\Core\Config::set('app.key', $answers['app_key']);
+
+// ------------------------------------------------------------ admin account
+
+out('Creating the administrator…');
+$prefix = (string) $answers['db_prefix'];
+
+$twofaSecret = null;
+$recovery = null;
+if (!empty($answers['enable_2fa'])) {
+    $plainSecret = Totp::generateSecret();
+    $twofaSecret = Crypto::encrypt($plainSecret);
+    $recovery = Totp::generateRecoveryCodes(8);
+    $answers['twofa_secret'] = $plainSecret;
+}
+
+DB::execute(
+    'INSERT INTO ' . $prefix . 'users
+        (tenant_id, name, email, password_hash, role, status, twofa_secret, twofa_enabled,
+         twofa_recovery_json, timezone, password_changed_at, created_at, updated_at)
+     VALUES
+        (NULL, :name, :email, :hash, \'super_admin\', \'active\', :secret, :enabled,
+         :recovery, :tz, UTC_TIMESTAMP(), UTC_TIMESTAMP(), UTC_TIMESTAMP())
+     ON DUPLICATE KEY UPDATE
+        name = VALUES(name), password_hash = VALUES(password_hash), role = \'super_admin\',
+        status = \'active\', updated_at = UTC_TIMESTAMP()',
+    [
+        'name'     => $answers['admin_name'],
+        'email'    => strtolower((string) $answers['admin_email']),
+        'hash'     => $answers['admin_password_hash'],
+        'secret'   => $twofaSecret,
+        'enabled'  => $twofaSecret !== null ? 1 : 0,
+        'recovery' => $recovery !== null ? json_encode($recovery['hashes']) : null,
+        'tz'       => $answers['timezone'],
+    ]
+);
+out('  ✓ ' . $answers['admin_email']);
+
+if (($answers['gh_owner'] ?? '') !== '' && ($answers['gh_repo'] ?? '') !== '') {
+    DB::execute(
+        'INSERT INTO ' . $prefix . 'update_settings (id, repo_owner, repo_name, branch, token_encrypted, created_at, updated_at)
+         VALUES (1, :owner, :repo, :branch, :token, UTC_TIMESTAMP(), UTC_TIMESTAMP())
+         ON DUPLICATE KEY UPDATE
+            repo_owner = VALUES(repo_owner), repo_name = VALUES(repo_name),
+            branch = VALUES(branch), token_encrypted = VALUES(token_encrypted), updated_at = UTC_TIMESTAMP()',
+        [
+            'owner'  => $answers['gh_owner'],
+            'repo'   => $answers['gh_repo'],
+            'branch' => $answers['gh_branch'] ?? 'main',
+            'token'  => ($answers['gh_token'] ?? '') !== '' ? Crypto::encrypt((string) $answers['gh_token']) : null,
+        ]
+    );
+    out('  ✓ GitHub updates configured for ' . $answers['gh_owner'] . '/' . $answers['gh_repo']);
+}
+
+// ------------------------------------------------------------------ config
+
+out('Writing the configuration…');
+$installer->writeConfig($answers);
+$installer->writeEnv($answers);
+$installer->lock();
+$installer->writeLog();
+out('  ✓ config/config.php, .env, install/install.lock');
+
+out('');
+out('Installation complete.');
+out('');
+out('  Sign in at : ' . rtrim((string) $answers['app_url'], '/') . '/login');
+out('  Username   : ' . $answers['admin_email']);
+out('');
+
+if ($recovery !== null) {
+    out('  Two-factor recovery codes (shown once — save them now):');
+    foreach (array_chunk($recovery['plain'], 4) as $chunk) {
+        out('    ' . implode('   ', $chunk));
+    }
+    out('');
+    out('  Authenticator key: ' . chunk_split((string) $answers['twofa_secret'], 4, ' '));
+    out('');
+}
+
+out('  Add this to cron:');
+out('    ' . $installer->crontabLine());
+out('');
+out('  Then remove the installer:');
+out('    rm -rf ' . APP_ROOT . '/install');
+out('');
+
+exit(0);

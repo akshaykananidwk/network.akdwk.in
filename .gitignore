@@ -1,0 +1,36 @@
+# Local configuration & secrets — NEVER commit
+/config/config.php
+/config/*.local.php
+/config/.env
+/.env
+/.env.local
+
+# Runtime state
+/storage/logs/*
+/storage/cache/*
+/storage/backups/*
+/storage/updates/*
+/storage/tmp/*
+/storage/keys/*
+/storage/maintenance.flag
+!/storage/*/.gitkeep
+
+# User content
+/uploads/*
+!/uploads/.gitkeep
+
+# Installer lock
+/install/install.lock
+
+# Build output
+/services/*/bin/
+/services/*/dist/
+*.exe
+*.test
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

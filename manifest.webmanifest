@@ -1,0 +1,14 @@
+{
+  "name": "AK Connect",
+  "short_name": "AK Connect",
+  "description": "Private overlay network management",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b1120",
+  "theme_color": "#2563eb",
+  "icons": [
+    { "src": "/assets/img/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "version": "1.0.0",
+  "released_at": "2026-09-20T00:00:00Z",
+  "min_php": "8.1.0",
+  "min_mysql": "8.0",
+  "breaking": false,
+  "notes": "Phase 1 foundation: installer, core framework, auth + 2FA + RBAC, multi-tenancy, networks/devices CRUD, audit logs, GitHub auto-update with backup, migration, health check and automatic rollback.",
+  "migrations": [],
+  "protected": [
+    ".env",
+    "config/config.php",
+    "uploads/",
+    "storage/",
+    "install/install.lock"
+  ],
+  "delete": [],
+  "post_update": [
+    "cli/tasks/rebuild_acl_cache.php"
+  ],
+  "checksums": {},
+  "signature": null
+}

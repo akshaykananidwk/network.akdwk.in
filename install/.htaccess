@@ -1,0 +1,9 @@
+# The installer must stay reachable before config/config.php exists, so this
+# directory is NOT denied outright. index.php refuses to run once
+# install.lock is present, and the lock file itself is never served.
+<Files "install.lock">
+    Require all denied
+</Files>
+<Files "*.log">
+    Require all denied
+</Files>

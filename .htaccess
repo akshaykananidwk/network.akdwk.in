@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# Front controller + hardening. Apache 2.4 + mod_rewrite required.
+# ---------------------------------------------------------------------------
+Options -Indexes -MultiViews
+DirectoryIndex index.php
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Installer probes this to confirm mod_rewrite is actually active.
+    RewriteRule ^__rewrite_probe$ install/probe.php [L]
+
+    # Block direct web access to non-public application directories. Defence in
+    # depth: each of these also ships its own "Deny from all" .htaccess.
+    RewriteRule ^(app|config|database|storage|cli|services|tests|vendor)(/|$) - [F,L]
+
+    # Never rewrite real files or directories (assets, installer, health check).
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    RewriteRule ^ index.php [L]
+</IfModule>
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "DENY"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always unset X-Powered-By
+</IfModule>
+
+<FilesMatch "^(\.env|\.env\..*|composer\.(json|lock)|update\.json|VERSION|.*\.sql|.*\.log)$">
+    Require all denied
+</FilesMatch>
+
+php_flag display_errors Off
+php_value upload_max_filesize 16M
+php_value post_max_size 20M
