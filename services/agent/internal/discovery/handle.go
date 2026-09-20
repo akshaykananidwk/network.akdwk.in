@@ -23,6 +23,10 @@ func (c *Client) handle(pkt []byte, from netip.AddrPort) {
 		c.handlePunch(header, from)
 	case disco.TypePunchAck:
 		c.handlePunchAck(header, from)
+	case disco.TypeRelayOffer:
+		c.handleRelayOffer(header, rest)
+	case disco.TypeRelayBindAck:
+		c.handleRelayBindAck(from, rest)
 	}
 }
 
@@ -85,30 +89,53 @@ func (c *Client) handlePeers(header disco.Header, sealed []byte) {
 // simultaneously, which is the only thing that makes it work.
 func (c *Client) probe(peer disco.PeerInfo) {
 	c.mu.Lock()
-	if established, ok := c.established[peer.PublicKey]; ok {
-		// Already talking. Keep the candidate list fresh in case the path
-		// dies, but do not disturb a working tunnel.
-		c.candidates[peer.PublicKey] = peer.Candidates
-		c.mu.Unlock()
-		_ = established
-
-		return
+	if _, seen := c.firstSeen[peer.PublicKey]; !seen {
+		c.firstSeen[peer.PublicKey] = time.Now()
 	}
 	c.candidates[peer.PublicKey] = peer.Candidates
+	current := c.pathOf(peer.PublicKey)
 	c.mu.Unlock()
+
+	// A peer already reached directly is left alone: there is nothing to gain
+	// and a working tunnel to disturb.
+	if current == pathDirect {
+		return
+	}
+
+	// A relayed peer is punched at again, here, because this message is the
+	// one moment both ends are known to act together.
+	//
+	// Hole punching needs the two sides to punch at roughly the same instant;
+	// that is the whole technique. Independent retry timers on each agent
+	// almost never line up, so a relayed pair would stay relayed even after
+	// the networks in front of them improved. The coordinator sends this
+	// message to both ends at once — when a peer appears, and when it moves —
+	// so acting on it is what makes the upgrade actually happen.
 
 	pkt, err := c.punchPacket(disco.TypePunch)
 	if err != nil {
 		return
 	}
 
+	var tried []netip.AddrPort
 	for _, candidate := range peer.Candidates {
 		if !c.usableCandidate(candidate) {
 			continue
 		}
 		if err := c.opts.Transport.SendTo(pkt, candidate); err != nil {
 			c.opts.Logf("discovery: punch to %s failed: %v", candidate, err)
+
+			continue
 		}
+		tried = append(tried, candidate)
+	}
+
+	// Logged because this is the line that matters when diagnosing a customer
+	// site that will not connect: it shows exactly which addresses were tried
+	// and what the path was at the time.
+	if len(tried) > 0 {
+		c.opts.Logf("discovery: punched %s… at %v (currently %s)",
+			base64Key(peer.PublicKey)[:12], tried, current)
 	}
 }
 
@@ -174,12 +201,22 @@ func (c *Client) adopt(peer [32]byte, at netip.AddrPort) {
 		c.mu.Unlock()
 		return
 	}
+	wasRelayed := c.pathOf(peer) == pathRelay
 	c.established[peer] = at
+	c.paths[peer] = pathDirect
 	c.mu.Unlock()
 
 	key := base64Key(peer)
 	if err := c.opts.Peers.SetPeerEndpoint(key, at.String()); err != nil {
 		c.opts.Logf("discovery: pointing peer at %s failed: %v", at, err)
+		return
+	}
+
+	if wasRelayed {
+		// The silent upgrade: the WireGuard session is untouched, only its
+		// destination changed, so nothing reconnects and no packet is lost.
+		c.opts.Logf("discovery: upgraded peer %s… from relay to direct via %s", key[:12], at)
+
 		return
 	}
 

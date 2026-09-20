@@ -192,6 +192,7 @@ func (s *session) applyConfig(priv wgPrivate, cfg *panel.Config) error {
 type peerNames struct {
 	name      string
 	virtualIP string
+	publicKey [32]byte
 }
 
 // rememberPeerNames indexes the configuration by the hex key the WireGuard
@@ -204,7 +205,7 @@ func (s *session) rememberPeerNames(cfg *panel.Config) {
 		if err != nil {
 			continue
 		}
-		s.peerMeta[key.Hex()] = peerNames{name: p.Name, virtualIP: p.VirtualIP}
+		s.peerMeta[key.Hex()] = peerNames{name: p.Name, virtualIP: p.VirtualIP, publicKey: [32]byte(key)}
 	}
 }
 

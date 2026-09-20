@@ -25,8 +25,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -75,6 +77,7 @@ func usage() {
     --listen ADDR   UDP address to bind (default :8443)
     --panel URL     panel base URL
     --ttl DURATION  how long a device stays introducible (default 2m)
+    --relays LIST   name:region:host:port, comma separated
 
   keygen   Generate an X25519 keypair. The private half goes in
            AKCONNECT_COORDINATOR_KEY; the public half goes in the panel's
@@ -84,6 +87,8 @@ Environment:
   AKCONNECT_COORDINATOR_KEY     base64 X25519 private key (required)
   AKCONNECT_COORDINATOR_SECRET  shared secret for the panel (required)
   AKCONNECT_PANEL_URL           panel base URL, if --panel is not given
+  AKCONNECT_RELAYS              relay list, if --relays is not given
+  AKCONNECT_RELAY_SECRET_<NAME> one per relay, matching what that relay runs with
 `)
 }
 
@@ -92,6 +97,8 @@ func runServe(args []string) error {
 	listen := fs.String("listen", ":8443", "UDP address to bind")
 	panelURL := fs.String("panel", os.Getenv("AKCONNECT_PANEL_URL"), "panel base URL")
 	ttl := fs.Duration("ttl", 2*time.Minute, "presence lifetime")
+	relays := fs.String("relays", os.Getenv("AKCONNECT_RELAYS"),
+		"comma-separated relays as name:region:host:port; secrets come from AKCONNECT_RELAY_SECRET_<NAME>")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -115,8 +122,17 @@ func runServe(args []string) error {
 
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 
+	relayTargets, err := parseRelays(*relays)
+	if err != nil {
+		return err
+	}
+	if len(relayTargets) == 0 {
+		logWarn("no relays configured: peers that cannot punch will not connect at all")
+	}
+
 	srv, err := server.New(server.Options{
 		Listen:      *listen,
+		Relays:      relayTargets,
 		PrivateKey:  privateKey,
 		Panel:       panelClient,
 		PresenceTTL: *ttl,
@@ -130,6 +146,52 @@ func runServe(args []string) error {
 	defer stop()
 
 	return srv.Run(ctx)
+}
+
+// parseRelays reads the relay list.
+//
+// Each relay's secret comes from its own environment variable rather than the
+// list, so the list itself can sit in a systemd unit or a config file without
+// carrying credentials.
+func parseRelays(spec string) ([]*server.RelayTarget, error) {
+	if strings.TrimSpace(spec) == "" {
+		return nil, nil
+	}
+
+	var out []*server.RelayTarget
+
+	for _, entry := range strings.Split(spec, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+
+		parts := strings.Split(entry, ":")
+		if len(parts) != 4 {
+			return nil, fmt.Errorf("relay %q must be name:region:host:port", entry)
+		}
+
+		name := parts[0]
+		envName := "AKCONNECT_RELAY_SECRET_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+
+		secret := os.Getenv(envName)
+		if secret == "" {
+			return nil, fmt.Errorf("%s is not set; it must match the secret relay %q runs with", envName, name)
+		}
+
+		out = append(out, &server.RelayTarget{
+			Name:     name,
+			Region:   parts[1],
+			Endpoint: net.JoinHostPort(parts[2], parts[3]),
+			Secret:   []byte(secret),
+		})
+	}
+
+	return out, nil
+}
+
+func logWarn(message string) {
+	fmt.Fprintf(os.Stderr, "  warning: %s\n", message)
 }
 
 func runKeygen() error {

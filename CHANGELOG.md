@@ -6,6 +6,75 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.2.0] — 2026-09-21
+
+Phase 3. Peers that cannot reach each other at all now connect, and stop
+relaying the moment they can do better.
+
+### Added
+
+**`services/relay`** — a UDP forwarder for pairs that cannot punch through.
+It carries already-encrypted WireGuard packets, is never a party to the peers'
+handshake, and holds no WireGuard key: a compromised relay yields volumes,
+timing and addresses, never plaintext. Each side of a pair gets its own
+allocated port, so every packet is unambiguously attributable without guessing
+from source addresses.
+
+**Tickets.** A relay forwards only for a pair the coordinator has authorised.
+The ticket names both ends, carries the tenant and an expiry, and is MAC'd with
+a secret the coordinator and relay share — so an agent carries it but cannot
+alter it, and a relay with no ticket is not an open reflector. Tested against
+forgery, alteration of every field, and expiry.
+
+**Relay allocation in the coordinator**, region-aware, with both ends offered
+the same relay at once rather than waiting for the second to give up
+independently.
+
+**Silent upgrade.** A relayed pair keeps trying for a direct path and switches
+without dropping a packet, because pointing WireGuard at a relay and pointing
+it at a peer are the same call.
+
+**Per-tenant byte accounting** in the relay, reported on a timer.
+
+**`services/lab/topology.sh symmetric`** — a lab mode where hole punching
+cannot work by construction.
+
+### Fixed
+
+Three faults found by running the relay, none visible by reading it:
+
+**The relay replied to the wrong mapping.** It forwarded to the address the
+bind arrived from, but under symmetric NAT the mapping used to reach the
+control port is not the one used to reach the data port, and the reply was
+dropped. The return address is now learned from the data socket, where the
+packet that just arrived proves the path.
+
+**Re-binding broke the path it was meant to keep alive.** A periodic re-bind
+arrives on the control flow and was overwriting the data-learned address —
+every twenty seconds, forever. A learned address now outranks a bind.
+
+**The upgrade never fired.** Candidate addresses were refreshed only on hello,
+and a settled agent only pings, so after a network change both ends punched at
+addresses that no longer existed. Worse, the retry timers were independent, and
+hole punching needs both ends to punch at the same instant. The coordinator now
+returns the peer list on every ping and tells peers when a device moves, and
+that message — which both ends receive together — is what triggers the punch.
+
+### Verified
+
+In the lab, under NAT that makes hole punching impossible: relayed tunnel at
+0% loss. Then, switching to a full-cone NAT with traffic flowing throughout,
+both ends upgraded to direct with **98 packets and zero loss**, and a handshake
+age proving the WireGuard session was never reconnected.
+
+### Not yet
+
+Relay selection is round-robin within a region, and `devices` has no region
+column yet, so today it picks the first configured relay. Latency-based
+selection needs the agents to measure and report, which they do not.
+
+---
+
 ## [1.1.2] — 2026-09-21
 
 ### Added

@@ -31,6 +31,8 @@ func (s *Server) handle(ctx context.Context, pkt []byte, from netip.AddrPort) {
 		s.handleHello(ctx, header, rest, from)
 	case disco.TypePing:
 		s.handlePing(header, rest, from)
+	case disco.TypeRelayRequest:
+		s.handleRelayRequest(header, rest, from)
 	default:
 		// Punch packets are peer to peer and never come here.
 	}
@@ -73,6 +75,8 @@ func (s *Server) handleHello(ctx context.Context, header disco.Header, sealed []
 		Local:     hello.LocalEndpoints,
 		Peers:     peerSet(result),
 		NetworkID: result.NetworkID,
+		TenantID:  result.TenantID,
+		Region:    result.Region,
 	}
 	s.reg.Upsert(entry)
 	s.queueEndpoint(hello.DeviceUID, from, hello.LocalEndpoints)
@@ -98,11 +102,34 @@ func (s *Server) handlePing(header disco.Header, sealed []byte, from netip.AddrP
 	// A ping refreshes the NAT mapping and the presence entry. A device the
 	// coordinator has never seen must say hello properly first: accepting a
 	// ping from an unknown key would let anyone keep an entry alive.
+	previous, known := s.reg.Get(header.Sender)
+	if !known {
+		return
+	}
+
+	moved := previous.Reflexive != from
+
 	if !s.reg.Touch(header.Sender, from) {
 		return
 	}
 
 	s.sendHelloAck(header.Sender, from)
+
+	// The peer list goes back on every ping, not only on hello.
+	//
+	// Addresses go stale: a laptop moves from 4G to wifi, a carrier reassigns,
+	// a router is replaced. An agent whose candidate list was frozen at its
+	// first hello would keep punching at addresses that no longer exist, and a
+	// relayed pair would never find its way back to a direct path. Refreshing
+	// here is what makes the silent upgrade possible at all.
+	s.sendPeers(header.Sender, from)
+
+	// And if this device itself moved, everyone allowed to see it needs the
+	// new address — otherwise they are the ones left punching at a ghost.
+	if moved {
+		s.opts.Logf("%s moved to %s; telling its peers", previous.DeviceUID, from)
+		s.notifyPeersOf(header.Sender)
+	}
 }
 
 func (s *Server) sendHelloAck(to [32]byte, at netip.AddrPort) {

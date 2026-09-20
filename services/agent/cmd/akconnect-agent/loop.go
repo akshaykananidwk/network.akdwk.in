@@ -201,6 +201,16 @@ func (s *session) peerStatus() []state.RuntimePeer {
 		if meta, ok := s.peerMeta[p.PublicKeyHex]; ok {
 			entry.Name = meta.name
 			entry.VirtualIP = meta.virtualIP
+
+			// Discovery knows whether the path is direct or relayed; the
+			// device only knows that a handshake happened. Prefer discovery's
+			// answer, because "connected" and "connected the expensive way"
+			// are different facts to a customer billed for relayed bytes.
+			if s.discovery != nil {
+				if path := s.discovery.Path(meta.publicKey); path != "connecting" {
+					entry.Path = path
+				}
+			}
 		}
 
 		out = append(out, entry)

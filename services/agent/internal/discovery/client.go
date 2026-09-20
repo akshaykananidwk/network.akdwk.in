@@ -70,6 +70,60 @@ type Client struct {
 	// established records the address that answered, so a later duplicate
 	// reply does not churn the WireGuard configuration.
 	established map[[32]byte]netip.AddrPort
+	// paths records how each peer is currently reached, which is what the
+	// status file and the panel's indicator report.
+	paths map[[32]byte]path
+	// firstSeen is when a peer was introduced, so the punch deadline can be
+	// measured from something real rather than from process start.
+	firstSeen map[[32]byte]time.Time
+	// relayControl and relayTicket hold what is needed to re-bind.
+	relayControl map[[32]byte]netip.AddrPort
+	relayTicket  map[[32]byte][]byte
+	repunchCount map[[32]byte]int
+	nextRepunch  map[[32]byte]time.Time
+}
+
+// path is how a peer is currently reached.
+type path string
+
+const (
+	pathConnecting path = "connecting"
+	pathDirect     path = "direct"
+	pathRelay      path = "relay"
+)
+
+// Path reports how a peer is reached, for the status file.
+func (c *Client) Path(peer [32]byte) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if p, ok := c.paths[peer]; ok {
+		return string(p)
+	}
+
+	return string(pathConnecting)
+}
+
+// Paths reports every peer's current path, keyed by base64 public key.
+func (c *Client) Paths() map[string]string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	out := make(map[string]string, len(c.paths))
+	for peer, p := range c.paths {
+		out[base64Key(peer)] = string(p)
+	}
+
+	return out
+}
+
+// pathOf reads the current path. The caller must hold the lock.
+func (c *Client) pathOf(peer [32]byte) path {
+	if p, ok := c.paths[peer]; ok {
+		return p
+	}
+
+	return pathConnecting
 }
 
 // New builds a Client.
@@ -85,9 +139,15 @@ func New(opts Options) (*Client, error) {
 	}
 
 	return &Client{
-		opts:        opts,
-		candidates:  make(map[[32]byte][]netip.AddrPort),
-		established: make(map[[32]byte]netip.AddrPort),
+		opts:         opts,
+		candidates:   make(map[[32]byte][]netip.AddrPort),
+		established:  make(map[[32]byte]netip.AddrPort),
+		paths:        make(map[[32]byte]path),
+		firstSeen:    make(map[[32]byte]time.Time),
+		relayControl: make(map[[32]byte]netip.AddrPort),
+		relayTicket:  make(map[[32]byte][]byte),
+		repunchCount: make(map[[32]byte]int),
+		nextRepunch:  make(map[[32]byte]time.Time),
 	}, nil
 }
 
@@ -103,16 +163,59 @@ func (c *Client) Run(ctx context.Context) {
 
 	c.announce(c.needsHello(keepalive))
 
-	ticker := time.NewTicker(keepalive)
-	defer ticker.Stop()
+	keepaliveTick := time.NewTicker(keepalive)
+	defer keepaliveTick.Stop()
+
+	// Faster than the keepalive, because the punch deadline is measured in
+	// seconds: a pair that cannot punch should be on a relay quickly, not at
+	// the next announcement.
+	workTick := time.NewTicker(time.Second)
+	defer workTick.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-keepaliveTick.C:
 			c.announce(c.needsHello(keepalive))
+			c.rebindRelays()
+		case <-workTick.C:
+			c.escalateStalledPeers()
+			c.repunch()
 		}
+	}
+}
+
+// escalateStalledPeers asks for a relay for any peer that has not connected
+// directly within the punch deadline.
+func (c *Client) escalateStalledPeers() {
+	c.mu.Lock()
+
+	var stalled [][32]byte
+	now := time.Now()
+
+	for peer, since := range c.firstSeen {
+		if c.pathOf(peer) != pathConnecting {
+			continue
+		}
+		if now.Sub(since) < punchDeadline {
+			continue
+		}
+		if _, asked := c.relayControl[peer]; asked {
+			continue
+		}
+
+		// Marked before the request so a slow coordinator does not produce a
+		// request per second.
+		c.relayControl[peer] = netip.AddrPort{}
+		stalled = append(stalled, peer)
+	}
+	c.mu.Unlock()
+
+	for _, peer := range stalled {
+		c.opts.Logf("discovery: no direct path to %s… after %s; asking for a relay",
+			base64Key(peer)[:12], punchDeadline)
+		c.requestRelay(peer)
 	}
 }
 

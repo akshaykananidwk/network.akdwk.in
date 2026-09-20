@@ -50,6 +50,8 @@ type VerifyResult struct {
 	Reason     string `json:"reason"`
 	DeviceUID  string `json:"device_uid"`
 	NetworkID  int    `json:"network_id"`
+	TenantID   int    `json:"tenant_id"`
+	Region     string `json:"region"`
 	VirtualIP  string `json:"virtual_ip"`
 	Peers      []struct {
 		DeviceUID string `json:"device_uid"`

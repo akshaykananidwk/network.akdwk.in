@@ -28,6 +28,10 @@ type Entry struct {
 	Peers     map[[32]byte]struct{}
 	LastSeen  time.Time
 	NetworkID int
+	TenantID  int
+	// Region is where the panel says this device is, used to pick a relay
+	// near it rather than near us.
+	Region string
 }
 
 // Online reports whether the entry is fresh enough to introduce to others.

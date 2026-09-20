@@ -85,6 +85,9 @@ final class CoordinatorController
             'authorized' => true,
             'device_uid' => $device['device_uid'],
             'network_id' => $networkId,
+            'tenant_id'  => $tenantId,
+            // The coordinator picks a relay near the device, not near itself.
+            'region'     => (string) ($device['region'] ?? ''),
             'virtual_ip' => $device['virtual_ip'],
             // Only the peers the ACL already allows. The coordinator never
             // learns about devices this one may not talk to, so it cannot leak

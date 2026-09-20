@@ -31,6 +31,8 @@ type Options struct {
 	Panel *panelapi.Client
 	// PresenceTTL is how long a device stays introducible without contact.
 	PresenceTTL time.Duration
+	// Relays the coordinator may hand out when hole punching fails.
+	Relays []*RelayTarget
 	// Logf receives log lines.
 	Logf func(string, ...any)
 }
