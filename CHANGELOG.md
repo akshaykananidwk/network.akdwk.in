@@ -6,6 +6,20 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.0.5] — 2026-09-20
+
+### Fixed
+
+The list of copied migration files is recorded after the migration runner
+rather than before it. The column it is written to was itself added by a
+migration, so on the very update that introduces it the write would have come
+first and failed. It is written from a `finally` block, because a migration
+that fails still has to be rolled back and the rollback needs the list — and a
+failure to record it is logged rather than allowed to abort an otherwise good
+update, since the cost is a rollback that leaves two files behind.
+
+---
+
 ## [1.0.4] — 2026-09-20
 
 ### Fixed

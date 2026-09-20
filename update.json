@@ -1,13 +1,11 @@
 {
-  "version": "1.0.4",
-  "released_at": "2026-09-20T20:00:00Z",
+  "version": "1.0.5",
+  "released_at": "2026-09-20T21:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "A rollback now removes the migration files it added, so a reversed migration does not come back as pending. Transactions also unwind safely when a statement inside them commits implicitly.",
-  "migrations": [
-    "2026_09_20_193000_add_update_copied_migrations.php"
-  ],
+  "notes": "Records the copied migration files after the runner, not before, so the column added by that very update exists by the time it is written to.",
+  "migrations": [],
   "protected": [
     ".env",
     "config/config.php",

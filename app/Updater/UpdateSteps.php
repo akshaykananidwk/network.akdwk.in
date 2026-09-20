@@ -371,12 +371,18 @@ final class UpdateSteps
             }
         }
 
-        if ($copied !== []) {
-            AppUpdate::recordCopiedMigrations((int) $update['id'], $copied);
-        }
-
         $runner = new MigrationRunner($liveMigrations, DB::prefix());
-        $result = $runner->run($named === [] ? null : $named);
+
+        try {
+            $result = $runner->run($named === [] ? null : $named);
+        } finally {
+            // After the runner, not before: the column this list goes into was
+            // itself added by a migration, so writing to it first would fail on
+            // the very update that introduces it. In a finally block because a
+            // failed migration still needs rolling back, and the rollback needs
+            // to know which files to remove.
+            $this->recordCopied($update, $copied, $log);
+        }
 
         if ($result['applied'] === []) {
             $message = 'No pending migrations.';
@@ -401,6 +407,26 @@ final class UpdateSteps
         $log->info($message);
 
         return $message;
+    }
+
+    /**
+     * @param array<string,mixed> $update
+     * @param list<string>        $copied
+     */
+    private function recordCopied(array $update, array $copied, UpdateLog $log): void
+    {
+        if ($copied === []) {
+            return;
+        }
+
+        try {
+            AppUpdate::recordCopiedMigrations((int) $update['id'], $copied);
+        } catch (\Throwable $e) {
+            // Worth saying, never worth failing an otherwise-good update over:
+            // the cost is a rollback that leaves these files behind, which is
+            // untidy rather than dangerous.
+            $log->info('Could not record the copied migration files: ' . $e->getMessage());
+        }
     }
 
     /** @param array<string,mixed> $update */
