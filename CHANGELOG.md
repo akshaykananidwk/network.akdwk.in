@@ -6,6 +6,22 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.0.6] — 2026-09-20
+
+### Fixed
+
+*Roll back to this point* was offered for any successful update whose
+`journal_path` column was set. That column stays set for the life of the row,
+while the journal itself is pruned with the backups and discarded once a
+rollback has consumed it — so the button could still appear for an update whose
+undo list was long gone, and pressing it would reverse migrations and restore
+the database while putting no files back. That is the exact failure retaining
+the journal was meant to prevent. Availability is now decided by whether the
+journal is actually on disk, and the history and detail pages say plainly when
+it has been pruned and a backup is the way to recover instead.
+
+---
+
 ## [1.0.5] — 2026-09-20
 
 ### Fixed

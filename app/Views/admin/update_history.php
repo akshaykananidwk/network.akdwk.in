@@ -53,9 +53,11 @@ declare(strict_types=1);
                         <td class="text-muted"><?= e($row['started_by_email'] ?? 'system') ?></td>
                         <td class="col-actions">
                             <a class="btn btn-sm btn-ghost" href="<?= e(url('admin/updates/' . $row['id'])) ?>">View log</a>
-                            <?php if ($row['status'] === 'success' && !empty($row['journal_path'])): ?>
+                            <?php if (!empty($row['rollback_available'])): ?>
                                 <button type="button" class="btn btn-sm btn-danger" data-action="rollback"
                                         data-update-id="<?= e($row['id']) ?>">Roll back</button>
+                            <?php elseif ($row['status'] === 'success'): ?>
+                                <span class="text-muted" title="The per-file undo list for this update has been pruned, so a rollback could no longer restore its files.">No undo list</span>
                             <?php endif; ?>
                         </td>
                     </tr>

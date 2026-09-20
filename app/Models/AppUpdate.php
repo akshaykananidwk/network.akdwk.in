@@ -202,6 +202,34 @@ final class AppUpdate extends Model
             }
         }
 
+        $row['rollback_available'] = self::journalExists($row);
+
         return $row;
+    }
+
+    /**
+     * Is the per-file undo list still on disk?
+     *
+     * journal_path stays set for the life of the row, but the journal itself
+     * is pruned with the backups and discarded once a rollback has consumed
+     * it. Offering "roll back to this point" on the strength of the column
+     * alone would present a button that reverses migrations and restores the
+     * database while putting no files back — the exact failure this column was
+     * meant to prevent.
+     *
+     * @param array<string,mixed> $row
+     */
+    private static function journalExists(array $row): bool
+    {
+        if (($row['status'] ?? '') !== 'success') {
+            return false;
+        }
+
+        $relative = (string) ($row['journal_path'] ?? '');
+        if ($relative === '' || !defined('APP_ROOT')) {
+            return false;
+        }
+
+        return is_file(APP_ROOT . '/' . ltrim($relative, '/'));
     }
 }
