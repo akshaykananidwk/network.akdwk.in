@@ -1,10 +1,10 @@
 {
-  "version": "1.0.8",
-  "released_at": "2026-09-21T00:00:00Z",
+  "version": "1.0.9",
+  "released_at": "2026-09-21T01:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Adds the verification report and the scale drill. No behaviour changes.",
+  "notes": "Corrects the verification report against the record the panel kept of itself, and stops BACKUP_DB describing its own check as checksums only.",
   "migrations": [],
   "protected": [
     ".env",

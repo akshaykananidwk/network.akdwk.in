@@ -6,6 +6,25 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.0.9] — 2026-09-20
+
+### Fixed
+
+`BACKUP_DB` described its own work as *"files and database both match their
+checksums"*. Since 1.0.7 it also opens the archive and re-reads the dump, and
+saying only what a checksum proves is precisely how a zero-byte archive came to
+be reported as verified. The summary now says both artefacts were read back;
+the per-check lines beneath it already carried the specifics.
+
+`VERIFICATION_REPORT.md` is corrected against the record the panel kept of
+itself: nine update runs, six rolled back, not four and four. The count came
+from memory of the drills rather than from `app_updates`, which is the wrong
+source for a document whose whole claim is that it reports what was run. It now
+prints that table. Also added: a final drill in which 1.0.8 — the build the
+report describes — performs the rollback itself and restores 215 of 215 files.
+
+---
+
 ## [1.0.8] — 2026-09-20
 
 ### Added

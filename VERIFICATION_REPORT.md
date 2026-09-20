@@ -1,15 +1,17 @@
 # Verification report
 
-**Version 1.0.7 · 20 September 2026**
+**Version 1.0.8 · 20 September 2026**
 
 What follows is what was actually run and what it actually produced. Where a
 requirement is met, the evidence is the command and its output. Where it is
 not met, it says so and why. Nothing here is inferred from reading the code.
 
 Everything was exercised against a real installation — PHP 8.4.19, MariaDB
-10.11.14 — and against the real GitHub repository, not a mock. Seven releases
-(1.0.1 through 1.0.7) were published and installed through the panel's own
-update pipeline during this verification; four of them were then rolled back.
+10.11.14 — and against the real GitHub repository, not a mock. Eight releases
+(1.0.1 through 1.0.8) were published during this verification and installed
+through the panel's own update pipeline. Nine update runs were performed in
+all: **three left in place, six rolled back** — five on request and one
+automatically, after a failure forced at APPLY.
 
 **The headline caveat, stated first because it is the largest:** Phase 1, the
 control plane, is built and verified. Phase 2, the data plane, is not written.
@@ -24,7 +26,7 @@ real networking is a failure"* — this is not yet a finished product. See
 | §   | Area                | Result | Note |
 |-----|---------------------|--------|------|
 | A   | Installer           | **Pass** | Clean install on an empty database; re-installation refused |
-| B   | Auto-update         | **Pass** | 4 updates and 4 rollbacks against live GitHub; 8 defects found and fixed |
+| B   | Auto-update         | **Pass** | 9 runs against live GitHub, 6 rolled back; 8 defects found and fixed |
 | C   | Multi-tenancy (R3)  | **Pass** | Fails closed; holds at 1,000 devices |
 | D   | Networking (R1, R4, R5) | **Partial** | Server-side guarantees hold; **no data plane exists** (R7 unmet) |
 | E   | Security            | **Pass** | With the open items listed under [Known limitations](#known-limitations) |
@@ -83,8 +85,23 @@ software modifies itself.
 
 ### The pipeline, end to end
 
-Four complete updates were applied from the live GitHub repository, each
-followed by a rollback:
+Nine update runs against the live GitHub repository. The record the panel kept
+of itself:
+
+```
+ id  from    to      status
+  1  1.0.1   1.0.2   rolled_back
+  2  1.0.1   1.0.3   rolled_back
+  3  1.0.1   1.0.4   rolled_back
+  4  1.0.1   1.0.5   success
+  5  1.0.5   1.0.6   rolled_back
+  6  1.0.5   1.0.6   rolled_back     <- the forced failure at APPLY
+  7  1.0.5   1.0.6   success
+  8  1.0.6   1.0.8   rolled_back
+  9  1.0.6   1.0.8   success
+```
+
+A representative run:
 
 ```
 $ php cli/update.php --apply --yes
@@ -103,8 +120,10 @@ $ php cli/update.php --apply --yes
 
 ### Rollback
 
-The fourth drill is the one that matters, because by then every fix was in the
-*installed* code rather than only in the repository:
+Run 5 is the one that matters most, because by then every fix was in the
+*installed* code rather than only in the repository — an update pipeline can
+only be fixed for the update after next, so a fix is not proven until the code
+performing the rollback is the fixed code:
 
 ```
 $ php cli/update.php --rollback=5 --yes
@@ -124,13 +143,22 @@ table:
 | Database restored | **20 of 20 tables identical**, except two noted below |
 | Migration reversed and its file removed | Pass — `migrate.php --status`: 2 applied, 0 pending |
 | `VERSION` restored byte-exactly | Pass — including the absence of a trailing newline |
-| Protected paths untouched | Pass — `config/config.php`, `config/.env`, `install/install.lock` unchanged across all four drills |
+| Protected paths untouched | Pass — `config/config.php`, `config/.env`, `install/install.lock` unchanged across all nine runs |
 | Maintenance mode cleared | Pass |
 
 The two tables that differ are `notifications` (the rollback notifies
 super-admins) and `update_settings` (last-check time and current commit). Both
 are written *by* the rollback, after the restore, and so cannot match a
 snapshot taken before it.
+
+Run 8 repeated the drill with 1.0.8 — the build this report describes — doing
+all of the work, and restored **215 of 215** files byte-identically. Backup #12
+from that run, verified by the shipped code:
+
+```
+  files     332.1 KB, 230 files, archive reads back cleanly
+  database   11.2 KB, dump ends with its completion marker
+```
 
 ### Forced failure at APPLY
 

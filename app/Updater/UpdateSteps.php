@@ -236,7 +236,11 @@ final class UpdateSteps
             throw new UpdateException('The pre-update backup failed verification; refusing to continue.', 'BACKUP_DB');
         }
 
-        $message = 'Backup verified — files and database both match their checksums.';
+        // Not "both match their checksums": since 1.0.7 the archive is opened
+        // and the dump re-read, and saying only what a checksum proves is how
+        // a zero-byte archive came to be reported as verified in the first
+        // place. The per-check details above carry the specifics.
+        $message = 'Backup verified — both artefacts were read back, not just checksummed.';
         $log->info($message);
 
         return $message;

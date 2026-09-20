@@ -13,7 +13,7 @@ Last updated: 2026-09-20 · version 1.0.8
 installation and the real GitHub repository. The short version:
 
 * 469 automated assertions, all passing, repeatable across consecutive runs.
-* Four updates applied and four rolled back through the panel's own pipeline.
+* Nine update runs through the panel's own pipeline, six of them rolled back.
 * A rollback that restores 213 of 213 files byte-for-byte and 20 of 20 tables.
 * Byte-exact recovery from damage severe enough that the panel could not boot.
 * **Eight defects found and fixed during verification**, every one of them
