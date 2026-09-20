@@ -73,12 +73,63 @@ final class DatabaseDumper
             throw new UpdateException('Database dump is implausibly small; refusing to treat it as a backup.', 'BACKUP_DB');
         }
 
+        // Read it back before calling it a backup. A dump truncated by a full
+        // disk is still valid gzip and still hashes consistently with itself,
+        // so size and checksum cannot tell the difference — only the end
+        // marker can.
+        if (!self::isComplete($destination)) {
+            throw new UpdateException(
+                'The database dump is incomplete — it has no end marker, so it was truncated as it was written'
+                . ' (a full disk is the usual cause). Refusing to treat it as a backup.',
+                'BACKUP_DB'
+            );
+        }
+
         Logger::info('backup', 'Database dumped', ['bytes' => $bytes, 'method' => $method, 'tables' => $tables]);
 
         return ['path' => $destination, 'bytes' => $bytes, 'sha256' => $sha256, 'method' => $method, 'tables' => $tables];
     }
 
     /**
+     * Does this dump end where a complete one would?
+     *
+     * The marker is the last line SqlDumpWriter writes. A dump cut short —
+     * by a full disk, a killed process, a truncated copy — will not have it.
+     * mysqldump writes its own "Dump completed" footer, which is honoured too
+     * so that dumps taken by either path can be checked the same way.
+     */
+    public static function isComplete(string $path): bool
+    {
+        if (!is_file($path)) {
+            return false;
+        }
+
+        $handle = str_ends_with($path, '.gz') ? @gzopen($path, 'rb') : @fopen($path, 'rb');
+        if ($handle === false) {
+            return false;
+        }
+
+        // Only the tail matters, and a dump can be gigabytes, so the last few
+        // lines are kept in a ring rather than the whole file in memory.
+        $tail = '';
+        try {
+            while (!feof($handle)) {
+                $chunk = str_ends_with($path, '.gz') ? gzread($handle, 8192) : fread($handle, 8192);
+                if ($chunk === false || $chunk === '') {
+                    break;
+                }
+                $tail = substr($tail . $chunk, -512);
+            }
+        } finally {
+            str_ends_with($path, '.gz') ? gzclose($handle) : fclose($handle);
+        }
+
+        return str_contains($tail, SqlDumpWriter::END_MARKER)
+            || str_contains($tail, 'Dump completed');
+    }
+
+    /**
+     * Pick the dumper.    /**
      * Pick the dumper.
      *
      * mysqldump is much faster, but MariaDB's writes STORED generated columns

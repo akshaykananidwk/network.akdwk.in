@@ -127,13 +127,20 @@ final class AppUpdate extends Model
         );
     }
 
-    public static function markRolledBack(int $id, string $error): void
+    /**
+     * @param string $step the step the run had reached, restated because a
+     *                     database restore rewinds this row to its
+     *                     pre-update contents and would otherwise leave the
+     *                     history showing whichever step the backup caught
+     */
+    public static function markRolledBack(int $id, string $error, string $step = 'ROLLBACK'): void
     {
         DB::execute(
             'UPDATE ' . self::tableName() . '
-             SET status = \'rolled_back\', error_text = :e, finished_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP()
+             SET status = \'rolled_back\', step = :step, error_text = :e,
+                 finished_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP()
              WHERE id = :id',
-            ['id' => $id, 'e' => \App\Core\Logger::redactString($error)]
+            ['id' => $id, 'step' => $step, 'e' => \App\Core\Logger::redactString($error)]
         );
     }
 

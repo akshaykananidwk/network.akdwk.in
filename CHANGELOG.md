@@ -6,6 +6,43 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.0.7] — 2026-09-20
+
+### Fixed
+
+**A backup is read back before it is called a backup.** Running an update
+against a deliberately full disk produced a zero-byte `files.tar.gz` and a
+truncated database dump, and the pipeline reported *"Backup #7 written
+(10.2 KB)"* followed by *"Backup verified — files and database both match their
+checksums"*, then applied the update. The verification was tautological: it
+hashed the file it had just written and compared that to the hash it had just
+computed. A truncated backup is still valid gzip, still has a plausible size,
+and still hashes consistently with itself — so nothing a checksum can see
+distinguishes it from a complete one.
+
+Three changes close it. `gzwrite` is now checked for a *short* write, not only
+for `false`, since on a full disk it returns a positive number smaller than
+asked for. Every dump ends with an explicit completion marker, and the dump is
+re-read after writing to confirm the marker arrived. Every archive is opened
+after writing and its entries counted against the number of files that went in.
+`verify()` performs both of those readbacks in addition to the checksum, and
+reports what it found — *"228 files, archive reads back cleanly"*, *"dump ends
+with its completion marker"* — rather than the unfalsifiable *"sha256 matches"*.
+
+**A rolled-back update no longer reports the wrong step.** Restoring the
+database rewinds `app_updates` to whatever the backup caught, so the history
+showed the step the run had reached when the backup was taken rather than where
+it actually stopped. The step is captured before the restore and written back
+with the status.
+
+### Changed
+
+Archive writing, readback and extraction move to `ArchiveStore`, which brings
+`BackupManager` back within the file-size budget and gives the readback rule a
+single home.
+
+---
+
 ## [1.0.6] — 2026-09-20
 
 ### Fixed

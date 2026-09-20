@@ -1,10 +1,10 @@
 {
-  "version": "1.0.6",
-  "released_at": "2026-09-20T22:00:00Z",
+  "version": "1.0.7",
+  "released_at": "2026-09-20T23:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Roll back to this point is now offered only while the per-file undo list still exists on disk.",
+  "notes": "A backup is now read back before it is called a backup. A disk that filled mid-write previously produced a zero-byte archive that the pipeline reported as verified.",
   "migrations": [],
   "protected": [
     ".env",

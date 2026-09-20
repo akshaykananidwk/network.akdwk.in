@@ -24,6 +24,9 @@ use PDO;
  */
 final class SqlDumpWriter
 {
+    /** The last line of a complete dump. See writeTo(). */
+    public const END_MARKER = '-- BACKUP COMPLETE, TABLES:';
+
     private const ROWS_PER_INSERT = 200;
     private const ROWS_PER_FLUSH = 5000;
 
@@ -89,6 +92,12 @@ final class SqlDumpWriter
             $this->dumpRoutines($handle);
 
             $this->put($handle, "\nSET FOREIGN_KEY_CHECKS = 1;\n");
+
+            // An unambiguous end marker. Without one, a dump truncated by a
+            // full disk is indistinguishable from a complete one: it is still
+            // valid gzip, it still hashes consistently with itself, and the
+            // missing tail only shows up when someone tries to restore it.
+            $this->put($handle, sprintf("%s %d\n", self::END_MARKER, count($tables)));
 
             return count($tables);
         } finally {
@@ -322,7 +331,13 @@ final class SqlDumpWriter
     /** @param resource $handle */
     private function put($handle, string $data): void
     {
-        if (gzwrite($handle, $data) === false) {
+        // A short write, not just false: gzwrite reports how much it managed,
+        // and on a full disk that is a positive number smaller than asked for.
+        // Treating only false as failure is how a truncated dump gets written
+        // and then reported as a successful backup.
+        $written = gzwrite($handle, $data);
+
+        if ($written === false || $written < strlen($data)) {
             throw new UpdateException('Failed writing to the database dump (disk full?).', 'BACKUP_DB');
         }
     }

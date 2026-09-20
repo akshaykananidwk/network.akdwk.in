@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Tests;
 
 use App\Core\DB;
+use App\Models\AppBackup;
+use App\Updater\BackupManager;
 use App\Updater\DatabaseDumper;
 use App\Updater\SqlDumpWriter;
 
@@ -45,6 +47,7 @@ final class BackupTests
             $dump = self::dumpExcludesGeneratedColumns();
             self::dumpRestoresCleanly($dump);
             self::restoreReleasesTableLocks();
+            self::truncatedArtefactsAreRefused($dump);
         } finally {
             DB::write()->exec('DROP TABLE IF EXISTS `' . self::$probe . '`');
             foreach (glob(sys_get_temp_dir() . '/backup-probe-*') ?: [] as $leftover) {
@@ -216,6 +219,78 @@ final class BackupTests
             'an unrelated table is queryable after the failure', $error);
         TestCase::assertNotContains('was not locked', $error,
             'and no lock is still held');
+    }
+
+    /**
+     * A backup cut short is refused rather than reported as good.
+     *
+     * A dump truncated by a full disk is still valid gzip, still has a
+     * plausible size, and still hashes consistently with itself — so size and
+     * checksum cannot tell it apart from a complete one. A live run against a
+     * 256 KB disk produced a zero-byte archive and a truncated dump that the
+     * pipeline reported as "Backup verified". Only reading the artefacts back
+     * catches it.
+     */
+    private static function truncatedArtefactsAreRefused(string $dumpPath): void
+    {
+        TestCase::group('Backup — a truncated backup is refused, not reported as good');
+
+        TestCase::assert(DatabaseDumper::isComplete($dumpPath),
+            'a complete dump carries its end marker');
+
+        // Chop the tail, exactly as a disk filling up would. It lives under
+        // storage/backups because a backup record stores paths relative to the
+        // application root, and verify() resolves them there.
+        $raw = (string) file_get_contents($dumpPath);
+        $directory = APP_ROOT . '/storage/backups';
+        if (!is_dir($directory)) {
+            mkdir($directory, 0750, true);
+        }
+        $short = $directory . '/verify-probe-' . bin2hex(random_bytes(4)) . '.sql.gz';
+        file_put_contents($short, substr($raw, 0, max(1, (int) (strlen($raw) * 0.6))));
+
+        TestCase::assert(!DatabaseDumper::isComplete($short),
+            'a truncated dump is recognised as incomplete',
+            sprintf('%d of %d bytes', filesize($short), strlen($raw)));
+
+        // Size and checksum, the properties the old check looked at, are
+        // perfectly self-consistent on the truncated file. That is the point.
+        TestCase::assert(filesize($short) > 100,
+            'and it is large enough to pass a size check');
+        TestCase::assertSame(hash_file('sha256', $short), hash_file('sha256', $short),
+            'and hashes consistently with itself');
+
+        // The same question asked through the backup record, which is what the
+        // update pipeline and the restore path actually consult.
+        $backupId = AppBackup::create([
+            'type'         => 'manual',
+            'db_path'      => self::relativeTo($short),
+            'db_sha256'    => (string) hash_file('sha256', $short),
+            'files_path'   => self::relativeTo($short),
+            'files_sha256' => (string) hash_file('sha256', $short),
+            'status'       => 'complete',
+        ]);
+
+        try {
+            $result = BackupManager::make()->verify($backupId);
+            TestCase::assert(!$result['ok'],
+                'verify() rejects a backup whose artefacts cannot be read back');
+
+            $details = implode(' | ', array_column($result['checks'], 'detail'));
+            TestCase::assertContains('truncated', $details,
+                'and says truncation is why');
+        } finally {
+            AppBackup::forceDelete($backupId);
+            @unlink($short);
+        }
+    }
+
+    /** A path expressed the way a backup record stores it: relative to APP_ROOT. */
+    private static function relativeTo(string $absolute): string
+    {
+        return str_starts_with($absolute, APP_ROOT . '/')
+            ? substr($absolute, strlen(APP_ROOT) + 1)
+            : $absolute;
     }
 
     /**

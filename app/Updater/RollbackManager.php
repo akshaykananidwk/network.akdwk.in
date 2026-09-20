@@ -52,6 +52,11 @@ final class RollbackManager
         $log = UpdateLog::forUpdate($updateId);
         $log->step('ROLLBACK', $reason);
 
+        // Captured now: restoreDatabase() rewinds this row to whatever the
+        // backup caught, so by the time the status is written the column would
+        // otherwise report a step the run had long since passed.
+        $reachedStep = (string) ($update['step'] ?? 'ROLLBACK');
+
         $this->maintenance->enable('Rolling back update #' . $updateId, [], 600);
 
         $steps = [];
@@ -73,7 +78,7 @@ final class RollbackManager
 
         if ($ok) {
             $this->maintenance->disable();
-            AppUpdate::markRolledBack($updateId, $reason);
+            AppUpdate::markRolledBack($updateId, $reason, $reachedStep);
             // The undo list has been consumed: the tree is back at its
             // pre-APPLY state, so replaying it again could only confuse a
             // later operator. It is kept on failure, where a second attempt
