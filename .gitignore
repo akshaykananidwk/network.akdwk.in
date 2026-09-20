@@ -34,3 +34,6 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# Field kit build output — binaries are built on demand, never committed.
+/services/kit/dist/

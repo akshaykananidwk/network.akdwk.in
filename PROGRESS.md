@@ -3,7 +3,7 @@
 What is built, what is stubbed, what is next. Kept honest — a plan that
 overstates itself is worse than no plan.
 
-Last updated: 2026-09-21 · version 1.1.0
+Last updated: 2026-09-21 · version 1.1.1
 
 ---
 
@@ -36,6 +36,17 @@ revoked device cut off in 7.7 seconds, and an established tunnel surviving the
 panel and the coordinator both being killed. All of it in Linux network
 namespaces on one machine — **not on Windows, and not across two real ISPs**,
 which the Phase 2 acceptance criteria both require.
+
+**Windows cannot be tested from this environment.** There is no Windows host,
+no hypervisor and no nested virtualisation, and Wine would give false results
+for every item that matters (DPAPI, Wintun, the service manager, the firewall,
+Defender). The Windows agent is written, cross-compiles, and has never
+executed. `services/kit/` is the way it gets tested: binaries, a runbook, and
+an evidence collector for someone with real Windows machines to run.
+
+One Windows defect was found by inspection: `wintun.dll` was never being
+shipped, and the agent would have died on first run inside a driver load. It
+now checks for it and says where to get it.
 
 ---
 

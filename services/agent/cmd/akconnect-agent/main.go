@@ -19,6 +19,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/winsvc"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=1.2.3".
@@ -28,6 +30,18 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
+	}
+
+	// Started by the Windows service control manager rather than a person:
+	// hand straight over, because the SCM expects a status report within
+	// seconds and will kill a process that parses flags instead.
+	if winsvc.IsService() {
+		if err := winsvc.Run(func(ctx context.Context) error { return runUp(ctx, nil) }); err != nil {
+			fmt.Fprintf(os.Stderr, "service failed: %v\n", err)
+			os.Exit(1)
+		}
+
+		return
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -42,6 +56,8 @@ func main() {
 		err = runUp(ctx, os.Args[2:])
 	case "status":
 		err = runStatus(ctx, os.Args[2:])
+	case "service":
+		err = runService(ctx, os.Args[2:])
 	case "reset":
 		err = runReset(os.Args[2:])
 	case "version", "--version", "-v":
@@ -82,6 +98,13 @@ func usage() {
   reset    Forget this enrolment.
 
     --keep-key         re-enrol with the same identity instead of a new one
+
+  service  Manage the Windows service (Windows only).
+
+    install [--port N]   register it, start automatically, open the firewall
+    uninstall            remove it and its firewall rule
+    start | stop         control it
+    status               report its state
 
 Requires root on Linux and Administrator on Windows to create the interface.
 `)

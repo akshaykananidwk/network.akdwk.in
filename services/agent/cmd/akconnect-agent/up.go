@@ -15,6 +15,7 @@ import (
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/state"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/tunnel"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/wgkey"
 )
 
 func runUp(ctx context.Context, args []string) error {
@@ -23,6 +24,13 @@ func runUp(ctx context.Context, args []string) error {
 	iface := fs.String("iface", "", "interface name")
 	port := fs.Int("port", tunnel.DefaultListenPort, "UDP listen port")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Checked before anything is created, so a missing driver or a
+	// non-elevated prompt is reported as itself rather than as a failure deep
+	// inside the tunnel.
+	if err := checkEnvironment(); err != nil {
 		return err
 	}
 
@@ -48,6 +56,9 @@ type session struct {
 	tun       *tunnel.Tunnel
 	plan      *netcfg.Plan
 	discovery *discovery.Client
+	// peerMeta maps a peer's hex public key to the names the panel gave it,
+	// which the WireGuard device itself does not carry.
+	peerMeta  map[string]peerNames
 	logf      func(string, ...any)
 	iface     string
 	port      int
@@ -169,10 +180,32 @@ func (s *session) applyConfig(priv wgPrivate, cfg *panel.Config) error {
 
 	s.plan = plan
 	s.applied = true
+	s.rememberPeerNames(cfg)
 	s.st.Revision = cfg.Revision
 	s.st.VirtualIP = cfg.Device.VirtualIP
 
 	return s.stateSt.Save(s.st)
+}
+
+// peerNames is the descriptive half of a peer, kept so the status file can
+// say "shop-till-2" rather than only a base64 key.
+type peerNames struct {
+	name      string
+	virtualIP string
+}
+
+// rememberPeerNames indexes the configuration by the hex key the WireGuard
+// device reports, so the two can be joined when status is written.
+func (s *session) rememberPeerNames(cfg *panel.Config) {
+	s.peerMeta = make(map[string]peerNames, len(cfg.Peers))
+
+	for _, p := range cfg.Peers {
+		key, err := wgkey.ParsePublic(p.PublicKey)
+		if err != nil {
+			continue
+		}
+		s.peerMeta[key.Hex()] = peerNames{name: p.Name, virtualIP: p.VirtualIP}
+	}
 }
 
 // explain turns an API failure into something an operator can act on.

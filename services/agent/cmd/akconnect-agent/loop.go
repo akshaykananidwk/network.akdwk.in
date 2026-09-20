@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/state"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/tunnel"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/wgkey"
 )
@@ -35,9 +36,13 @@ func (s *session) loop(ctx context.Context, priv wgPrivate, pollAfter int) error
 		select {
 		case <-ctx.Done():
 			s.logf("shutting down; taking the interface back down")
+			s.stateSt.ClearRuntime()
+
 			return nil
 		case <-time.After(interval):
 		}
+
+		s.publishRuntime(true)
 
 		if err := s.heartbeat(ctx); err != nil {
 			if revoked(err) {
@@ -123,6 +128,85 @@ func connectionType(peers []tunnel.PeerStatus) string {
 	}
 
 	return "pending"
+}
+
+// publishRuntime writes what a support script needs to collect, so the
+// question "is this device connected, and how" has an answer that does not
+// depend on reading a log or being the process that holds the tunnel.
+func (s *session) publishRuntime(controlPlaneUp bool) {
+	rt := &state.Runtime{
+		VirtualIP:      s.st.VirtualIP,
+		Revision:       s.st.Revision,
+		ControlPlaneUp: controlPlaneUp,
+	}
+
+	if s.tun != nil {
+		rt.Interface = s.tun.Name()
+		rt.ListenPort = s.tun.ListenPort()
+	}
+	if s.plan != nil && len(s.plan.Routes) > 0 {
+		rt.OverlayCIDR = s.plan.Routes[0].String()
+	}
+	if s.discovery != nil {
+		if reflexive := s.discovery.Reflexive(); reflexive.IsValid() {
+			rt.Reflexive = reflexive.String()
+			rt.CoordinatorUp = true
+		}
+	}
+
+	rt.Peers = s.peerStatus()
+
+	if err := s.stateSt.SaveRuntime(rt); err != nil {
+		s.logf("could not write the status file: %v", err)
+	}
+}
+
+// peerStatus turns the device's own view of its peers into something a person
+// can read, including whether each path is actually carrying traffic.
+func (s *session) peerStatus() []state.RuntimePeer {
+	if s.tun == nil {
+		return nil
+	}
+
+	peers, err := s.tun.Status()
+	if err != nil {
+		return nil
+	}
+
+	out := make([]state.RuntimePeer, 0, len(peers))
+
+	for _, p := range peers {
+		entry := state.RuntimePeer{
+			PublicKey: p.PublicKeyHex,
+			Endpoint:  p.Endpoint,
+			RXBytes:   p.RXBytes,
+			TXBytes:   p.TXBytes,
+			Path:      "connecting",
+		}
+
+		if p.LastHandshake > 0 {
+			ago := time.Since(time.Unix(p.LastHandshake, 0))
+			entry.LastHandshakeAgo = ago.Truncate(time.Second).String()
+			// A handshake within the rekey window means this path is live.
+			// Anything older is a path that worked once and may not now.
+			if ago < 3*time.Minute {
+				entry.Path = "direct"
+			} else {
+				entry.Path = "stale"
+			}
+		}
+
+		// Names and overlay addresses come from the configuration, which the
+		// device does not keep, so they are filled in from the last config.
+		if meta, ok := s.peerMeta[p.PublicKeyHex]; ok {
+			entry.Name = meta.name
+			entry.VirtualIP = meta.virtualIP
+		}
+
+		out = append(out, entry)
+	}
+
+	return out
 }
 
 func revoked(err error) bool {

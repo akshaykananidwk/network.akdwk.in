@@ -6,6 +6,50 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.1.1] — 2026-09-21
+
+### Added
+
+**Windows service support** — `service install|uninstall|start|stop|status`.
+Installing registers the agent to start automatically as LocalSystem, sets
+restart-on-failure, registers an event log source, and creates the firewall
+rule itself. That last part is not a convenience: the Windows Firewall prompt
+appears on the interactive desktop, and a service running as LocalSystem has no
+desktop, so nobody would ever see it and the rule would never be created — the
+agent would look healthy while no peer could reach it.
+
+**Preflight checks.** The agent now refuses to start with an explanation rather
+than a driver error when it is not elevated, or when `wintun.dll` is missing.
+
+**A live status file.** The running agent publishes what it knows —
+interface, listen port, reflexive address, coordinator and panel reachability,
+and per-peer path, endpoint, handshake age and byte counters — so `status` and
+a support script can answer "is this connected, and how" without being the
+process that holds the tunnel. It carries no key and no device token.
+
+**`services/kit/`** — the field test kit: cross-built binaries, `SHA256SUMS`,
+a runbook, and evidence collectors for Windows and Linux.
+
+**`docs/RELAY-DESIGN.md`** — the Phase 3 relay, re-planned as a normal path
+rather than a rare fallback.
+
+### Fixed
+
+`wintun.dll` was never shipped and nothing checked for it. wireguard-go loads
+it from the application directory or System32, so the Windows agent would have
+failed on first run with a bare LoadLibrary error from inside a driver load.
+Found by reading the dependency, not by running it — which remains impossible
+here.
+
+### Still unverified
+
+The Windows agent has never executed. There is no Windows host, hypervisor or
+nested virtualisation in the build environment, and Wine would give false
+results for DPAPI, Wintun, the service manager, the firewall and Defender
+alike. See `VERIFICATION_REPORT.md`.
+
+---
+
 ## [1.1.0] — 2026-09-21
 
 Phase 2 begins. Packets now move between devices, which is the first time that

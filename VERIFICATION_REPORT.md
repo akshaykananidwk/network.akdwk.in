@@ -596,8 +596,8 @@ name conditions this environment cannot produce. Taking them one at a time:
 
 | Criterion | Status | Why |
 |---|---|---|
-| Two machines **on different ISPs**, one behind CGNAT or 4G | **Not met** | One container, one uplink. The NATs are `iptables MASQUERADE` between namespaces. |
-| `route print` on **Windows** showing no default route | **Not met** | No Windows host. The code cross-compiles and is reviewed, and has never run. |
+| Two machines **on different ISPs**, one behind CGNAT or 4G | **Not met** | One container, one uplink. The NATs are `iptables MASQUERADE` between namespaces. Field kit prepared. |
+| `route print` on **Windows** showing no default route | **Not met** | No Windows host and no hypervisor in this environment. Cannot be tested from here at all. Field kit prepared. |
 | `ip route` on Linux showing no default route | **Met** | Shown above, under NAT. |
 | Traceroute missing our infrastructure | **Met** | Shown above. |
 | Revoked device loses traffic within 10s | **Met** | 7.7s. |
@@ -616,12 +616,35 @@ and adoption of the address that answered. What it does not prove is that it
 will work from a 4G connection, and I would expect a meaningful fraction of
 real CGNAT paths to need the Phase 3 relay.
 
-**Windows is compiled, not tested.** `keystore_windows.go` calls DPAPI through
-`syscall` and sets an ACL; `apply_windows.go` drives `netsh`. Both build, and
-neither has been executed. Treat the Windows agent as unwritten until it has
-run on Windows — the DPAPI blob format, the ACL inheritance behaviour and the
-Wintun adapter lifecycle are all places where code that compiles can still be
-wrong.
+**Windows is compiled, not tested, and I cannot test it.** The environment I
+build in has no Windows host, no hypervisor and no nested virtualisation
+(`/dev/kvm` absent, no `vmx`/`svm` flags), so the agent cannot be run on
+Windows from here at all. Wine is installable and would be worse than useless:
+its DPAPI is a stub, there is no Wintun driver, no service control manager with
+Windows' semantics, no Windows Firewall and no Defender — a green result under
+Wine would be a lie about every item in the Windows checklist.
+
+So the Windows agent is **unverified, and will stay unverified until someone
+runs it on Windows.** `services/kit/` exists for exactly that: binaries, a
+runbook, and a script that collects the evidence.
+
+One Windows defect was found by inspection rather than execution, and it would
+have been the first thing to break:
+
+> wireguard-go loads `wintun.dll` with `LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+> LOAD_LIBRARY_SEARCH_SYSTEM32`. That DLL is a separate artefact from
+> wintun.net, is not vendored by any Go module, and **was not being shipped**.
+> The agent would have failed on first run with a bare LoadLibrary error from
+> inside a driver load. It now checks for it at startup and says where to get
+> it and where to put it.
+
+The remaining Windows risk is concentrated in three places, all of which
+compile cleanly and none of which has executed: the **DPAPI blob** round trip
+(including across a reboot and a user password change), **ACL inheritance** on
+`C:\ProgramData\AKConnect` (`PROTECTED_DACL_SECURITY_INFORMATION` is meant to
+strip inherited entries — untested), and the **Wintun adapter lifecycle**,
+especially whether a hard kill leaves a stale adapter that blocks the next
+start.
 
 ---
 

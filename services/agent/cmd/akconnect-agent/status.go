@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"time"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/keystore"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/state"
@@ -70,7 +71,82 @@ func runStatus(ctx context.Context, args []string) error {
 
 	fmt.Printf("  State file : %s\n", stateStore.Path())
 
+	return printRuntime(stateStore)
+}
+
+// printRuntime reports what the running agent knows, or says plainly that
+// nothing is running rather than showing a stale picture as if it were live.
+func printRuntime(stateStore *state.Store) error {
+	rt, err := stateStore.LoadRuntime()
+	if err != nil {
+		return err
+	}
+
+	if rt == nil {
+		fmt.Printf("\n  Tunnel     : not running\n")
+		return nil
+	}
+
+	if !rt.Fresh() {
+		fmt.Printf("\n  Tunnel     : not running (last status %s old, from pid %d)\n",
+			time.Since(rt.UpdatedAt).Truncate(time.Second), rt.PID)
+
+		return nil
+	}
+
+	fmt.Printf("\n  Tunnel     : up on %s, port %d (pid %d)\n", rt.Interface, rt.ListenPort, rt.PID)
+	fmt.Printf("  Overlay    : %s via %s\n", orDash(rt.VirtualIP), orDash(rt.OverlayCIDR))
+	fmt.Printf("  Public addr: %s\n", orDash(rt.Reflexive))
+	fmt.Printf("  Coordinator: %s\n", reachable(rt.CoordinatorUp))
+	fmt.Printf("  Panel      : %s\n", reachable(rt.ControlPlaneUp))
+
+	if len(rt.Peers) == 0 {
+		fmt.Printf("\n  No peers.\n")
+		return nil
+	}
+
+	fmt.Printf("\n  Peers:\n")
+	for _, p := range rt.Peers {
+		fmt.Printf("    %-20s %-14s %-11s %s\n",
+			truncate(orDash(p.Name), 20), orDash(p.VirtualIP), p.Path, orDash(p.Endpoint))
+		if p.LastHandshakeAgo != "" {
+			fmt.Printf("      handshake %s ago, rx %s, tx %s\n",
+				p.LastHandshakeAgo, humanBytes(p.RXBytes), humanBytes(p.TXBytes))
+		}
+	}
+
 	return nil
+}
+
+func reachable(ok bool) string {
+	if ok {
+		return "reachable"
+	}
+
+	return "not reachable"
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+
+	return s[:n-1] + "…"
+}
+
+func humanBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGT"[exp])
 }
 
 func runReset(args []string) error {
