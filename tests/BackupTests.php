@@ -28,10 +28,17 @@ use App\Updater\SqlDumpWriter;
  */
 final class BackupTests
 {
-    private const PROBE = 'zz_backup_probe';
+    /**
+     * Unique per run: two suites running at once against the same database
+     * must not collide on the probe table, or one drops the other's out from
+     * under it and the failure looks like a dumper bug.
+     */
+    private static string $probe = '';
 
     public static function run(): void
     {
+        self::$probe = 'zz_backup_probe_' . bin2hex(random_bytes(4));
+
         self::createProbe();
 
         try {
@@ -39,7 +46,7 @@ final class BackupTests
             self::dumpRestoresCleanly($dump);
             self::restoreReleasesTableLocks();
         } finally {
-            DB::write()->exec('DROP TABLE IF EXISTS `' . self::PROBE . '`');
+            DB::write()->exec('DROP TABLE IF EXISTS `' . self::$probe . '`');
             foreach (glob(sys_get_temp_dir() . '/backup-probe-*') ?: [] as $leftover) {
                 @unlink($leftover);
             }
@@ -53,9 +60,9 @@ final class BackupTests
     private static function createProbe(): void
     {
         $pdo = DB::write();
-        $pdo->exec('DROP TABLE IF EXISTS `' . self::PROBE . '`');
+        $pdo->exec('DROP TABLE IF EXISTS `' . self::$probe . '`');
         $pdo->exec(
-            'CREATE TABLE `' . self::PROBE . '` (
+            'CREATE TABLE `' . self::$probe . '` (
                 `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
                 `tenant_id` INT UNSIGNED NULL,
                 `key_name` VARCHAR(100) NOT NULL,
@@ -68,7 +75,7 @@ final class BackupTests
         );
 
         $insert = $pdo->prepare(
-            'INSERT INTO `' . self::PROBE . '` (`tenant_id`, `key_name`, `payload`) VALUES (?, ?, ?)'
+            'INSERT INTO `' . self::$probe . '` (`tenant_id`, `key_name`, `payload`) VALUES (?, ?, ?)'
         );
 
         // NULL tenant_id is the case the generated column exists to handle.
@@ -90,7 +97,7 @@ final class BackupTests
 
         $generated = $writer->generatedColumns();
         TestCase::assert(
-            in_array(self::PROBE . '.tenant_key', $generated, true),
+            in_array(self::$probe . '.tenant_key', $generated, true),
             'the dumper sees the probe\'s generated column',
             count($generated) . ' generated column(s) in this schema'
         );
@@ -100,7 +107,7 @@ final class BackupTests
 
         $sql = (string) gzdecode((string) file_get_contents($path));
 
-        $inserts = self::insertsFor($sql, self::PROBE);
+        $inserts = self::insertsFor($sql, self::$probe);
         TestCase::assert($inserts !== [], 'the probe\'s rows were dumped', count($inserts) . ' INSERT statement(s)');
 
         $listsGenerated = false;
@@ -143,20 +150,20 @@ final class BackupTests
         TestCase::group('Backup — a dump restores without losing a row');
 
         $sql = (string) gzdecode((string) file_get_contents($dumpPath));
-        $section = self::sectionFor($sql, self::PROBE);
+        $section = self::sectionFor($sql, self::$probe);
         TestCase::assert($section !== '', 'the probe\'s section was found in the dump');
 
-        $before = DB::select('SELECT * FROM `' . self::PROBE . '` ORDER BY id');
+        $before = DB::select('SELECT * FROM `' . self::$probe . '` ORDER BY id');
 
         $sectionPath = tempnam(sys_get_temp_dir(), 'backup-probe-') . '.sql';
         file_put_contents($sectionPath, $section);
 
-        DB::write()->exec('DROP TABLE `' . self::PROBE . '`');
+        DB::write()->exec('DROP TABLE `' . self::$probe . '`');
 
         $executed = DatabaseDumper::fromConfig()->restore($sectionPath);
         TestCase::assert($executed > 0, 'the restore ran', $executed . ' statement(s)');
 
-        $after = DB::select('SELECT * FROM `' . self::PROBE . '` ORDER BY id');
+        $after = DB::select('SELECT * FROM `' . self::$probe . '` ORDER BY id');
 
         TestCase::assertSame(count($before), count($after), 'every row came back');
         TestCase::assertSame($before, $after, 'and every value, generated column included, is identical');
@@ -164,7 +171,7 @@ final class BackupTests
         // The generated column was recomputed by the server, not restored from
         // the dump — which is precisely why it must not be in the INSERT.
         $platform = DB::selectOne(
-            'SELECT tenant_key FROM `' . self::PROBE . '` WHERE key_name = :k',
+            'SELECT tenant_key FROM `' . self::$probe . '` WHERE key_name = :k',
             ['k' => 'platform.setting']
         );
         TestCase::assertSame('0:platform.setting', $platform['tenant_key'] ?? null,
@@ -184,10 +191,10 @@ final class BackupTests
 
         $path = tempnam(sys_get_temp_dir(), 'backup-probe-') . '.sql';
         file_put_contents($path, implode("\n", [
-            'LOCK TABLES `' . self::PROBE . '` WRITE;',
-            'INSERT INTO `' . self::PROBE . '` (`id`, `key_name`) VALUES (900, \'locked\');',
+            'LOCK TABLES `' . self::$probe . '` WRITE;',
+            'INSERT INTO `' . self::$probe . '` (`id`, `key_name`) VALUES (900, \'locked\');',
             // A statement the restore cannot survive, thrown while locks are held.
-            'INSERT INTO `' . self::PROBE . '` (`no_such_column`) VALUES (1);',
+            'INSERT INTO `' . self::$probe . '` (`no_such_column`) VALUES (1);',
             'UNLOCK TABLES;',
         ]) . "\n");
 

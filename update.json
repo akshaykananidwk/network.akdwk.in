@@ -1,11 +1,13 @@
 {
-  "version": "1.0.2",
-  "released_at": "2026-09-20T18:00:00Z",
+  "version": "1.0.3",
+  "released_at": "2026-09-20T19:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Fixes three faults that made a backup unrestorable and a rollback unable to put files back. Found by running a real rollback against a live MariaDB, not by inspection.",
-  "migrations": [],
+  "notes": "Records which dumper wrote each backup, so the recovery instructions can warn when a dump predates the generated-column fix and cannot be replayed. Also stops a rollback from reconstructing VERSION with a trailing newline the original did not have.",
+  "migrations": [
+    "2026_09_20_180000_add_backup_db_method.php"
+  ],
   "protected": [
     ".env",
     "config/config.php",
@@ -14,9 +16,7 @@
     "install/install.lock",
     "*.local.php"
   ],
-  "delete": [
-    ".env.sample"
-  ],
+  "delete": [],
   "post_update": [
     "cli/tasks/rebuild_acl_cache.php"
   ],

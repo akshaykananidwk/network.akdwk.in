@@ -6,6 +6,28 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.0.3] — 2026-09-20
+
+### Added
+
+`app_backups.db_method` records which dumper wrote a backup's database dump.
+A dump `mysqldump` produced for a schema with stored generated columns cannot
+be replayed at all, and until 1.0.2 the panel could produce one. Those backups
+are still on disk and look no different from good ones, so the recovery
+instructions on an update's detail page now say plainly when the dump in front
+of an operator is one that will fail, and point at a newer backup instead.
+
+### Fixed
+
+A rollback rewrote `VERSION` from the recorded previous version rather than
+letting the journal's byte-exact copy stand, appending a trailing newline the
+original did not have. Everything reads the file through `trim()`, so nothing
+misbehaved — but the next update saw the file as locally modified. The rewrite
+is now a fallback, for a rollback that never reached `APPLY` and so has no
+journal entry to restore.
+
+---
+
 ## [1.0.2] — 2026-09-20
 
 Three fixes to the update system, each found by running a real rollback

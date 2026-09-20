@@ -230,9 +230,19 @@ final class RollbackManager
     private function restoreVersionMarker(array $update, array &$failures): void
     {
         try {
-            if ($update['from_version'] !== null && $update['from_version'] !== '') {
-                file_put_contents($this->appRoot . '/VERSION', $update['from_version'] . "\n");
-                Config::set('app.version', (string) $update['from_version']);
+            $fromVersion = (string) ($update['from_version'] ?? '');
+            if ($fromVersion !== '') {
+                // The journal usually restored VERSION already, byte for byte.
+                // Rewriting it here would reconstruct the file rather than
+                // restore it — a trailing newline the original did not have is
+                // enough to make the next update see it as locally modified.
+                // So this is a fallback, for a rollback that never reached
+                // APPLY and therefore has no journal entry for it.
+                $marker = $this->appRoot . '/VERSION';
+                if (trim((string) @file_get_contents($marker)) !== $fromVersion) {
+                    file_put_contents($marker, $fromVersion . "\n");
+                }
+                Config::set('app.version', $fromVersion);
             }
             if (!empty($update['from_commit'])) {
                 UpdateSetting::setCurrentCommit((string) $update['from_commit']);
@@ -257,10 +267,24 @@ final class RollbackManager
         $filesPath = $backup['files_path'] ?? 'storage/backups/<timestamp>/files.tar.gz';
         $dbPath = $backup['db_path'] ?? 'storage/backups/<timestamp>/db.sql.gz';
 
+        $note = 'config/config.php, .env and uploads/ were never touched by the update and do not need restoring.';
+
+        // Backups taken before 1.0.2 could be written by mysqldump even on a
+        // schema with stored generated columns, and those cannot be replayed
+        // at all — the server rejects the explicit value with error 1906.
+        // Saying so here is the difference between an operator recovering and
+        // an operator discovering it at the worst possible moment.
+        if (($backup['db_method'] ?? null) === 'mysqldump' && $this->schemaHasGeneratedColumns()) {
+            $note .= ' Warning: this dump was written by mysqldump while the schema has generated columns,'
+                . ' so it may fail to restore with error 1906. Use a backup taken by version 1.0.2 or later'
+                . ' if one is available.';
+        }
+
         return [
             'backup_id'    => $backupId,
             'files_path'   => $filesPath,
             'db_path'      => $dbPath,
+            'db_method'    => $backup['db_method'] ?? null,
             'app_root'     => $this->appRoot,
             'manual_steps' => [
                 'cd ' . $this->appRoot,
@@ -268,8 +292,19 @@ final class RollbackManager
                 'gunzip -c ' . $dbPath . ' | mysql -u <db_user> -p <db_name>',
                 'rm storage/maintenance.flag   # brings the site back online',
             ],
-            'note' => 'config/config.php, .env and uploads/ were never touched by the update and do not need restoring.',
+            'note' => $note,
         ];
+    }
+
+    private function schemaHasGeneratedColumns(): bool
+    {
+        try {
+            return (new SqlDumpWriter((string) Config::get('db.name')))->generatedColumns() !== [];
+        } catch (\Throwable) {
+            // Never let a warning lookup be the reason recovery advice is
+            // withheld from someone who needs it right now.
+            return false;
+        }
     }
 
     /** @param list<string> $failures */

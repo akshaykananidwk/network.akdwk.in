@@ -81,6 +81,7 @@ final class BackupManager
                 'db_path'                => $this->relative($database['path']),
                 'files_sha256'           => $files['sha256'],
                 'db_sha256'              => $database['sha256'],
+                'db_method'              => $database['method'],
                 'size_bytes'             => $files['bytes'] + $database['bytes'],
                 'uploads_included'       => $files['uploads_included'] ? 1 : 0,
                 'uploads_skipped_reason' => $files['uploads_skipped_reason'],

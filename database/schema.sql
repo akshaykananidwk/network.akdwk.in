@@ -563,6 +563,10 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__app_backups` (
   `db_path` VARCHAR(255) NULL,
   `files_sha256` CHAR(64) NULL,
   `db_sha256` CHAR(64) NULL,
+  -- Which dumper wrote db_path. A dump mysqldump produced for a schema
+  -- with generated columns cannot be replayed (error 1906), so the
+  -- recovery instructions need to know which one it was.
+  `db_method` VARCHAR(20) NULL DEFAULT NULL,
   `size_bytes` BIGINT UNSIGNED NOT NULL DEFAULT 0,
   `app_version` VARCHAR(32) NULL,
   `app_commit` VARCHAR(40) NULL,
