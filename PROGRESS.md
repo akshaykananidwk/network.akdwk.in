@@ -3,7 +3,7 @@
 What is built, what is stubbed, what is next. Kept honest — a plan that
 overstates itself is worse than no plan.
 
-Last updated: 2026-09-20 · version 1.0.8
+Last updated: 2026-09-21 · version 1.1.0
 
 ---
 
@@ -24,9 +24,18 @@ installation and the real GitHub repository. The short version:
 * One open finding: address allocation costs a fixed toll proportional to the
   size of the network's CIDR rather than to the number of devices.
 
-The reason Phase 2 is still not started is in that list. A control plane that
-cannot survive its own update is not a foundation worth building a data plane
-on, and until this week it could not.
+Phase 2 is now under way, and it repeated the lesson on its first live run:
+two defects, neither visible by reading the code — an agent that could never
+recover from a lost first announcement, and one that advertised its own tunnel
+address as a way to reach it, asking WireGuard to carry its own traffic through
+the tunnel it was building.
+
+Two hosts behind separate NATs now ping each other by virtual IP over a real
+WireGuard tunnel, with both default routes still on the physical interface, a
+revoked device cut off in 7.7 seconds, and an established tunnel surviving the
+panel and the coordinator both being killed. All of it in Linux network
+namespaces on one machine — **not on Windows, and not across two real ISPs**,
+which the Phase 2 acceptance criteria both require.
 
 ---
 
@@ -35,7 +44,7 @@ on, and until this week it could not.
 | Phase | Scope | State |
 |---|---|---|
 | **P1 Foundation** | Installer, framework, auth, multi-tenancy, CRUD, audit, **auto-update**, backups | **Complete and verified** |
-| P2 Networking | Go agent, enrolment-to-tunnel, IPAM wiring, WireGuard, split tunnel, coordinator, NAT traversal | **Not started** |
+| P2 Networking | Go agent, enrolment-to-tunnel, IPAM wiring, WireGuard, split tunnel, coordinator, NAT traversal | **Working in a Linux lab**; Windows compiles but is untested, real ISPs untested |
 | P3 Relay | Relay service, fallback and silent upgrade to direct, usage accounting | Not started |
 | P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | Control plane done, agent side not started |
 | P5 Commercial | Plans, limits, billing, invoices, API keys, OpenAPI, white-label | Mostly done (see below) |

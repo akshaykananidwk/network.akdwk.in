@@ -6,6 +6,63 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.1.0] — 2026-09-21
+
+Phase 2 begins. Packets now move between devices, which is the first time that
+sentence has been true.
+
+### Added
+
+**`services/agent`** — the device agent, in Go. It generates a Curve25519
+identity that never leaves the machine, enrols against the panel, waits to be
+approved, and brings up a WireGuard interface carrying only the overlay's own
+prefixes. The data plane is wireguard-go (MIT), in userspace: no kernel module,
+the same install on a stock Windows box and a locked-down Linux host, and a
+licence that permits closed-source distribution. The private key is stored in a
+0700/0600 file on Linux and sealed with DPAPI under an Administrators-only ACL
+on Windows.
+
+**`services/coordinator`** — peer rendezvous, in Go. It observes where each
+agent's packets come from, and tells the peers the panel's ACL allows. It never
+carries data: once two agents know where to find each other they talk directly,
+and stopping the coordinator does not disturb an established tunnel.
+
+**`services/shared/disco`** — the discovery protocol. It shares the agent's
+WireGuard UDP socket rather than opening its own, because a second socket gets
+a second NAT mapping and would teach peers an address that does not work. The
+two protocols are distinguishable on sight: WireGuard's first byte is 1 to 4,
+and a discovery packet starts with `A`. Announcements are sealed with NaCl box
+under the device's own key, so a packet authenticates its own sender and the
+device token never crosses the wire in cleartext.
+
+**`services/lab/topology.sh`** — two hosts on separate network stacks, and a
+mode that puts each behind its own NAT. Not a simulation: real namespaces, real
+routing tables, real packets.
+
+**Panel** — `POST /api/v1/coordinator/verify` and `/coordinator/endpoints`,
+authenticated by HMAC over the timestamp and body with the shared secret the
+installer already provisioned. The coordinator holds no database and no copy of
+the ACL: every decision about who may talk to whom comes from the panel, so a
+revocation cannot be stale in a second copy. `coordinator.public_key` is now
+published in the agent configuration.
+
+### Verified
+
+Two hosts behind separate NATs, unable to reach each other's addresses at all
+(100% packet loss before the tunnel), pinging each other by virtual IP with 0%
+loss after hole punching. Both routing tables keep their default route on the
+physical interface. A revoked device stopped passing traffic 7.7 seconds after
+revocation. With the panel *and* the coordinator killed, an established tunnel
+carried 112 consecutive pings without loss.
+
+### Not yet
+
+R1 and R2 are verified on Linux, in a lab, between namespaces. Not on Windows,
+not on two real ISPs, and not behind a real carrier-grade NAT. See
+`VERIFICATION_REPORT.md`, which says so at the top rather than the bottom.
+
+---
+
 ## [1.0.9] — 2026-09-20
 
 ### Fixed

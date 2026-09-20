@@ -1,6 +1,6 @@
 # Verification report
 
-**Version 1.0.8 · 20 September 2026**
+**Version 1.1.0 · 21 September 2026**
 
 What follows is what was actually run and what it actually produced. Where a
 requirement is met, the evidence is the command and its output. Where it is
@@ -13,11 +13,13 @@ through the panel's own update pipeline. Nine update runs were performed in
 all: **three left in place, six rolled back** — five on request and one
 automatically, after a failure forced at APPLY.
 
-**The headline caveat, stated first because it is the largest:** Phase 1, the
-control plane, is built and verified. Phase 2, the data plane, is not written.
-No packets move between devices. By the project's own rule R7 — *"a UI without
-real networking is a failure"* — this is not yet a finished product. See
-[Not implemented](#not-implemented-and-why).
+**The headline caveat, stated first because it is the largest.** Packets now
+move: two hosts behind separate NATs ping each other by virtual IP over a real
+WireGuard tunnel, and the section below shows the commands and their output.
+But every one of those results comes from **Linux network namespaces on a
+single machine**. Nothing here has run on Windows, on two real ISPs, or behind
+a real carrier-grade NAT. The acceptance criteria for Phase 2 name all three,
+and all three remain unmet. See [What Phase 2 has not shown](#what-phase-2-has-not-shown).
 
 ---
 
@@ -28,7 +30,7 @@ real networking is a failure"* — this is not yet a finished product. See
 | A   | Installer           | **Pass** | Clean install on an empty database; re-installation refused |
 | B   | Auto-update         | **Pass** | 9 runs against live GitHub, 6 rolled back; 8 defects found and fixed |
 | C   | Multi-tenancy (R3)  | **Pass** | Fails closed; holds at 1,000 devices |
-| D   | Networking (R1, R4, R5) | **Partial** | Server-side guarantees hold; **no data plane exists** (R7 unmet) |
+| D   | Networking (R1, R4, R5) | **Partial** | Real tunnels, including across NAT — but only in a Linux lab; Windows and real ISPs untested |
 | E   | Security            | **Pass** | With the open items listed under [Known limitations](#known-limitations) |
 | F   | Scale               | **Pass, with a finding** | 1,000 devices fine; address allocation scales with *pool* size |
 | G   | Recovery            | **Pass** | Byte-exact recovery from catastrophic damage |
@@ -253,7 +255,7 @@ opt out.
 
 ## D — Networking — **partial**
 
-What is verified holds at the server, where it must:
+### What the server guarantees
 
 | Check | Result |
 |---|---|
@@ -264,15 +266,161 @@ What is verified holds at the server, where it must:
 | R5 — no private key material in any response | Pass — the server stores public keys only |
 | A revoked device's token stops working immediately | Pass |
 
-**What is not verified, because it does not exist:** there is no agent, no
-coordinator and no relay. `services/` is empty. No tunnel has ever been
-established, no packet has ever been forwarded, and R1 has therefore never been
-tested where it ultimately matters — in a real routing table on a real machine.
+### What the agent now does about it
 
-R7 says a UI without real networking is a failure. On R7 this build fails, and
-no amount of green in the table above changes that.
+R1 is enforced twice, independently. The server strips a default route before a
+configuration leaves it; the agent refuses one on arrival. Both are needed,
+because they fail separately: a compromised or simply buggy panel must not be
+able to route a customer's entire internet through the overlay, and "the server
+promised" is not something the machine whose traffic it is should take on
+trust.
 
----
+The agent's refusal is tested against every way a default route can arrive:
+
+```
+$ go test ./internal/netcfg/ -v
+--- PASS: TestRefusesADefaultRouteFromEverySource/in_the_routes_list
+--- PASS: TestRefusesADefaultRouteFromEverySource/in_a_peer's_allowed_ips
+--- PASS: TestRefusesADefaultRouteFromEverySource/as_the_network_CIDR_itself
+--- PASS: TestRefusesADefaultRouteFromEverySource/as_an_IPv6_default_route
+--- PASS: TestRefusesADefaultRouteFromEverySource/as_a_pair_of_/1_routes
+```
+
+The last one matters: two `/1` routes cover the whole address space exactly as
+a `/0` does, and slip past any check that only looks for `0.0.0.0/0`.
+
+### Enrolment, approval and key custody
+
+Enrolling a real agent against the running panel:
+
+```
+$ akconnect-agent enroll --panel http://10.0.0.1:8099 --join-code ********
+  Generated a new device identity.
+  Private key: /tmp/agent-alpha/device.key (owner-only file, mode 0600) — it does not leave this machine.
+  Public key : BjKpTJIPAGsyUWC3pPeeKLK4zIdVFXiDrQSALHmp6UI=
+  Enrolled as dev_08289edb00f467f03c88
+  Status     : pending
+
+  This device is waiting for an administrator to approve it.
+  Nothing connects until they do.
+```
+
+| Check | Result |
+|---|---|
+| R4 — enrolment yields `pending`, no token, no address | Pass — `virtual_ip` and `token_hash` both NULL in the panel |
+| R5 — the panel holds only the public key | Pass — searching `devices` for the private key returns 0 rows |
+| Key file permissions | Pass — `0600` in a `0700` directory; the agent refuses to start if either is loosened |
+
+### A tunnel, across two NATs
+
+The lab puts each host behind its own NAT gateway, sharing only the segment the
+coordinator sits on. They provably cannot reach each other first:
+
+```
+$ ip netns exec alpha ping -c1 -W2 192.168.20.2
+1 packets transmitted, 0 received, 100% packet loss
+```
+
+Both agents then announce themselves, learn their own translated addresses, and
+punch towards each other:
+
+```
+alpha: discovery: our public address is 10.0.0.10:51820
+alpha: discovery: direct path to peer bQZJ2RM4mqPm… via 10.0.0.11:51820
+beta : discovery: our public address is 10.0.0.11:51820
+beta : discovery: direct path to peer BjKpTJIPAGsy… via 10.0.0.10:51820
+```
+
+```
+$ ip netns exec alpha ping -c 5 -W 3 10.99.0.3
+5 packets transmitted, 5 received, 0% packet loss
+rtt min/avg/max/mdev = 0.807/0.980/1.416/0.223 ms
+```
+
+| Criterion | Result |
+|---|---|
+| Two hosts ping by virtual IP | **Pass in the lab** — across two independent NATs |
+| No default route through the tunnel | **Pass** — see below |
+| Traceroute to a public IP misses our infrastructure | **Pass** — see below |
+| A revoked device loses traffic within 10s | **Pass** — 7.7s |
+| Controller stopped, tunnel survives | **Pass** — 112 pings with panel and coordinator both dead |
+
+### R1 on a real routing table
+
+Not a claim about the config — the kernel's own answer, under NAT:
+
+```
+$ ip netns exec alpha ip route
+default via 192.168.10.1 dev veth-alpha
+10.99.0.0/24 dev akc0 scope link
+192.168.10.0/24 dev veth-alpha proto kernel scope link src 192.168.10.2
+```
+
+The default route is on the physical interface. Only the overlay prefix is on
+`akc0`. And the kernel agrees per destination:
+
+```
+$ ip netns exec alpha ip route get 1.1.1.1
+1.1.1.1 via 10.0.0.1 dev veth-alpha src 10.0.0.2
+
+$ ip netns exec alpha ip route get 10.99.0.3
+10.99.0.3 dev akc0 src 10.99.0.2
+```
+
+```
+$ ip netns exec alpha traceroute -n -m 4 -w 2 1.1.1.1
+ 1  10.0.0.1   0.199 ms
+ 2  192.0.2.1  0.849 ms
+ 3  21.4.2.135 0.634 ms
+```
+
+Internet traffic leaves by the physical path and never enters the overlay.
+
+### R6 — the data plane outlives the control plane
+
+Both the panel and the coordinator were killed, then traffic was run for a
+minute:
+
+```
+$ pgrep -c akconnect-coordinator ; ps -eo args | grep -c 'php -S 0.0.0.0:8099'
+0
+0
+$ ip netns exec alpha ping -D -i 1 -c 60 10.99.0.3
+[…] icmp_seq=112 ttl=64 time=0.985 ms
+```
+
+112 consecutive replies, no loss, while the agent logged exactly what it should:
+
+```
+heartbeat failed, tunnel left up: dial tcp 10.0.0.1:8099: connect: connection refused
+```
+
+This is also the proof that the path is direct rather than relayed: killing the
+coordinator would end a relayed session immediately, and did not.
+
+### R4 — revocation reaches the data plane
+
+```
+revoked dev_332cd8023927a64898d7 at 1789930533.125
+last reply              icmp_seq=24 at 1789930540.803
+agent log:  18:55:41 this device has been revoked; disconnecting
+```
+
+**7.7 seconds** from the administrator's click to the last packet, against a
+requirement of ten. The interface is then removed entirely — `Device "akc0"
+does not exist.`
+
+### Defects found while building this
+
+| # | Defect | Found by |
+|---|---|---|
+| 9 | The agent sent `Hello` once and then only keepalive `Ping`s, which the coordinator rejects from a device it does not know. A lost first `Hello`, or a coordinator restart, left the agent permanently undiscovered while looking healthy. | The first live run: the panel 500'd on one request and the agent never recovered |
+| 10 | The agent advertised its own overlay address as a way to reach it, so a peer adopted `10.99.0.3:51820` as an endpoint — asking WireGuard to carry its own encrypted traffic through the tunnel it was establishing. | Watching the log adopt a second, wrong endpoint six seconds after the right one |
+
+Both are fixed. The second is now refused twice: the agent does not advertise
+its tunnel interface, and it rejects any candidate inside the overlay prefix
+whoever offers it — including the coordinator, which is not something the data
+plane should take on faith.
 
 ## E — Security
 
@@ -427,9 +575,53 @@ three reported success**:
 
 Each of these was invisible to inspection. The code was straightforward and the
 tests were green. They surfaced only when a rollback was actually performed
-against a real database, and when a disk was actually filled. That is the
-argument for this kind of verification, and the reason the report leads with
-what was run rather than what was written.
+against a real database, and when a disk was actually filled.
+
+Phase 2 repeated the lesson immediately. Its two defects — an agent that could
+never recover from a lost first announcement, and one that advertised its own
+tunnel address as a way to reach it — were both found in the first live run,
+and neither would have been found by reading the code or by any unit test I
+would have thought to write. That is the argument for this kind of
+verification, and the reason the report leads with what was run rather than
+what was written.
+
+---
+
+## What Phase 2 has not shown
+
+Every networking result above came from Linux network namespaces on one
+machine. That is real networking — real interfaces, real routing tables, real
+NAT, real packets — and it is not the same as the acceptance criteria, which
+name conditions this environment cannot produce. Taking them one at a time:
+
+| Criterion | Status | Why |
+|---|---|---|
+| Two machines **on different ISPs**, one behind CGNAT or 4G | **Not met** | One container, one uplink. The NATs are `iptables MASQUERADE` between namespaces. |
+| `route print` on **Windows** showing no default route | **Not met** | No Windows host. The code cross-compiles and is reviewed, and has never run. |
+| `ip route` on Linux showing no default route | **Met** | Shown above, under NAT. |
+| Traceroute missing our infrastructure | **Met** | Shown above. |
+| Revoked device loses traffic within 10s | **Met** | 7.7s. |
+| Controller stopped, tunnel survives | **Met** | 112 pings, both services dead. |
+
+Two of these gaps deserve to be stated more plainly than a table can.
+
+**The NAT is not a carrier's NAT.** `MASQUERADE` on Linux preserves the source
+port where it can and gives an endpoint-independent mapping — which is the
+easy case, and the case hole punching is most likely to win. A carrier-grade
+NAT is frequently symmetric: a different external port per destination, which
+defeats the technique used here entirely. **The success above is therefore
+weak evidence for the case the criterion actually names.** What it does prove
+is that the machinery works: reflexive address discovery, simultaneous open,
+and adoption of the address that answered. What it does not prove is that it
+will work from a 4G connection, and I would expect a meaningful fraction of
+real CGNAT paths to need the Phase 3 relay.
+
+**Windows is compiled, not tested.** `keystore_windows.go` calls DPAPI through
+`syscall` and sets an ACL; `apply_windows.go` drives `netsh`. Both build, and
+neither has been executed. Treat the Windows agent as unwritten until it has
+run on Windows — the DPAPI blob format, the ACL inheritance behaviour and the
+Wintun adapter lifecycle are all places where code that compiles can still be
+wrong.
 
 ---
 
@@ -498,27 +690,34 @@ These are real and currently shipped.
 
 ## Not implemented, and why
 
-1. **The entire data plane.** No agent, no coordinator, no relay. `services/`
-   is empty. This is Phase 2 of the delivery plan and was deferred
-   deliberately, with the reasoning recorded in `PROGRESS.md` as the work
-   went: a control plane that cannot survive its own update is not a
-   foundation worth building a data plane on. That judgement was vindicated —
-   see [What this verification found](#what-this-verification-found) — but the
-   consequence stands: **R7 is unmet, and this is not a shippable product
-   yet.** Nothing in this report should be read as claiming otherwise.
+1. **The relay, and everything that depends on it.** There is an agent and a
+   coordinator; there is no relay. A pair of peers that cannot reach each
+   other directly currently stay unreachable — visibly, in the log, rather
+   than silently degrading. That is the honest behaviour for now, but it means
+   any NAT combination hole punching cannot beat is a pair of devices that
+   simply do not connect. This is Phase 3 and it is the next thing that
+   matters after Windows.
 
-   Concretely, this means R1 (split tunnel), R2 (direct peer-to-peer first)
-   and R6 (tunnels survive a panel outage) are verified only as far as the
-   control plane can express them. R2 and R6 are not verified at all, because
-   there is nothing yet that could hold a tunnel open.
+   **R7 is partially met.** Real networking exists and packets move, so the
+   panel is no longer a dashboard with nothing behind it. But a product whose
+   agent has never run on Windows and has never crossed two real ISPs is not
+   one I would put in front of a paying customer. Nothing in this report
+   should be read as claiming otherwise.
 
-2. **Billing and payment.** Plans and limits are enforced at the action; there
+2. **ACL enforcement on the agent.** The panel compiles per-peer filters and
+   sends them in the configuration; the agent currently applies the peer set
+   and the allowed_ips, which is coarse-grained allow/deny, and ignores the
+   port and protocol filters. A rule that says "only 443" is today enforced as
+   "that peer is reachable".
+
+3. **Billing and payment.** Plans and limits are enforced at the action; there
    is no payment provider, invoicing or dunning.
 
-3. **Agent release distribution.** The `agent_releases` table exists and is
-   empty, because there is no agent to release.
+4. **Agent release distribution.** The `agent_releases` table exists and is
+   empty. There is now an agent to release, so this has gone from "nothing to
+   serve" to "not built yet".
 
-4. **Horizontal scale testing.** The session store is in the database and the
+5. **Horizontal scale testing.** The session store is in the database and the
    web tier is stateless by design, so more than one node should work. It has
    never been run on more than one node.
 
@@ -540,19 +739,22 @@ In the order I would do them.
    restarting at once. Fifty parallel approvals into one pool, asserting that
    no address is issued twice.
 
-3. **Start the Go agent**, and with it the first end-to-end test that moves a
-   packet. Until a tunnel carries traffic between two machines, R1, R2 and R6
-   are claims rather than results. The agent configuration endpoint, the
-   enrolment and approval flow, and the split-tunnel assertion are all in place
-   and tested, so the control-plane side of that work is ready to be built
-   against.
+3. **Run the agent on Windows.** It cross-compiles and has never executed.
+   DPAPI, the ACL and the Wintun adapter are all places where code that
+   compiles can still be wrong, and `route print` on a real Windows host is
+   one of the acceptance criteria.
 
-4. **Split `UpdateSteps.php`** along the same lines as `BackupManager` — the
+4. **Test against a real CGNAT path** — a 4G connection is the cheapest way.
+   The lab's `MASQUERADE` is the easy case; a symmetric carrier NAT defeats
+   the technique entirely, and knowing what fraction of real paths fall back
+   is what sizes the relay work.
+
+5. **Split `UpdateSteps.php`** along the same lines as `BackupManager` — the
    step machine and the individual steps are two different things.
 
-5. **Sign a release and verify the signed path**, so the code that is already
+6. **Sign a release and verify the signed path**, so the code that is already
    written is also exercised.
 
-6. **Run the update pipeline once through the web UI**, not only the CLI. The
+7. **Run the update pipeline once through the web UI**, not only the CLI. The
    two share `UpdateManager` and the CLI path is thoroughly exercised, but the
    step-per-request path has been reasoned about rather than run.

@@ -97,6 +97,7 @@ return [
         'port'          => 8443,
         'internal_url'  => 'http://127.0.0.1:8080',
         'shared_secret' => '',               // HMAC secret for panel <-> coordinator
+        'public_key'    => '',               // coordinator's X25519 public key, from 'akconnect-coordinator keygen'
         'public_host'   => 'coord.net.akdwk.in',
     ],
 

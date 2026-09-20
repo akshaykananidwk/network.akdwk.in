@@ -340,6 +340,11 @@ final class DeviceService
             'coordinator' => [
                 'host' => Config::get('coordinator.public_host', Config::get('coordinator.host')),
                 'port' => (int) Config::get('coordinator.port', 8443),
+                // The agent seals its announcements to this key, so only the
+                // coordinator can read the device token inside them. Its
+                // absence is why an agent refuses to announce rather than
+                // falling back to sending one in the clear.
+                'public_key' => (string) Config::get('coordinator.public_key', ''),
             ],
             'policy'      => [
                 // Stated explicitly in the config the agent consumes so the

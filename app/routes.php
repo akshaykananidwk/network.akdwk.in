@@ -148,6 +148,12 @@ $router->group('/api/v1', ['maintenance'], static function (Router $router): voi
     $router->post('/enroll', 'Api\AgentController@enroll', ['throttle:enroll']);
     $router->post('/agent/claim', 'Api\AgentController@claim', ['throttle:enroll']);
 
+    // The coordinator service (§7.3). Not a user and not a device: it
+    // authenticates with the shared secret both halves were installed with,
+    // and it is the only caller allowed to ask about a device it does not own.
+    $router->post('/coordinator/verify', 'Api\CoordinatorController@verifyDevice', ['coordinator']);
+    $router->post('/coordinator/endpoints', 'Api\CoordinatorController@reportEndpoints', ['coordinator']);
+
     // Everything else an agent calls needs its device token.
     $router->get('/agent/config', 'Api\AgentController@config', ['device']);
     $router->post('/agent/heartbeat', 'Api\AgentController@heartbeat', ['device']);

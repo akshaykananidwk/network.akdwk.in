@@ -1,10 +1,10 @@
 {
-  "version": "1.0.9",
-  "released_at": "2026-09-21T01:00:00Z",
+  "version": "1.1.0",
+  "released_at": "2026-09-21T02:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Corrects the verification report against the record the panel kept of itself, and stops BACKUP_DB describing its own check as checksums only.",
+  "notes": "Phase 2 begins: a Go agent and coordinator that establish real WireGuard tunnels, including across separate NATs. The panel is no longer only a dashboard.",
   "migrations": [],
   "protected": [
     ".env",
