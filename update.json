@@ -1,10 +1,10 @@
 {
-  "version": "1.0.7",
-  "released_at": "2026-09-20T23:00:00Z",
+  "version": "1.0.8",
+  "released_at": "2026-09-21T00:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "A backup is now read back before it is called a backup. A disk that filled mid-write previously produced a zero-byte archive that the pipeline reported as verified.",
+  "notes": "Adds the verification report and the scale drill. No behaviour changes.",
   "migrations": [],
   "protected": [
     ".env",

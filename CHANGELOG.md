@@ -6,6 +6,30 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.0.8] — 2026-09-20
+
+### Added
+
+`VERIFICATION_REPORT.md` — what was actually run against a real installation
+and the real GitHub repository, section by section, with the output. It leads
+with the largest caveat rather than burying it: the control plane is built and
+verified, the data plane is not written, and by the project's own rule R7 this
+is therefore not yet a shippable product.
+
+`tests/scale.php` — the scale drill from §20.F. It builds a tenant of a given
+size through the real services and times the queries the panel runs against it,
+so a query that is fine with ten devices and quadratic with a thousand shows up
+before a customer finds it. Run on demand, not as part of the default suite:
+
+    php tests/scale.php --devices=1000
+
+It is what surfaced the one performance finding left open: address allocation
+costs a fixed toll proportional to the size of a network's CIDR rather than to
+the number of devices in it, because the claim query orders the whole free pool
+before taking one row from it.
+
+---
+
 ## [1.0.7] — 2026-09-20
 
 ### Fixed

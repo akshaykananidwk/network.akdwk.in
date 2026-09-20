@@ -3,7 +3,30 @@
 What is built, what is stubbed, what is next. Kept honest — a plan that
 overstates itself is worse than no plan.
 
-Last updated: 2026-09-20 · version 1.0.0
+Last updated: 2026-09-20 · version 1.0.8
+
+---
+
+## Verification
+
+`VERIFICATION_REPORT.md` records what was actually run, against a real
+installation and the real GitHub repository. The short version:
+
+* 469 automated assertions, all passing, repeatable across consecutive runs.
+* Four updates applied and four rolled back through the panel's own pipeline.
+* A rollback that restores 213 of 213 files byte-for-byte and 20 of 20 tables.
+* Byte-exact recovery from damage severe enough that the panel could not boot.
+* **Eight defects found and fixed during verification**, every one of them
+  invisible to inspection. Three separate mechanisms for surviving a bad
+  update — the database backup, the file rollback, and backup verification
+  itself — were broken at once, and all three reported success. They surfaced
+  only when a rollback was actually performed and a disk was actually filled.
+* One open finding: address allocation costs a fixed toll proportional to the
+  size of the network's CIDR rather than to the number of devices.
+
+The reason Phase 2 is still not started is in that list. A control plane that
+cannot survive its own update is not a foundation worth building a data plane
+on, and until this week it could not.
 
 ---
 
