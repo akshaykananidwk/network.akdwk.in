@@ -165,7 +165,7 @@ final class GithubClient
     public function fileAtRef(string $path, string $ref): ?string
     {
         try {
-            return $this->requestRaw('GET', sprintf(
+            $body = $this->requestRaw('GET', sprintf(
                 '/repos/%s/%s/contents/%s?ref=%s',
                 $this->owner,
                 $this->repo,
@@ -178,6 +178,18 @@ final class GithubClient
             }
             throw $e;
         }
+
+        // Belt and braces: if something along the way rewrote Accept and we
+        // got the metadata envelope, decode it rather than handing the caller
+        // JSON it will fail to parse as the file.
+        $decoded = json_decode($body, true);
+        if (is_array($decoded) && ($decoded['encoding'] ?? '') === 'base64' && isset($decoded['content'])) {
+            $raw = base64_decode((string) $decoded['content'], true);
+
+            return $raw === false ? $body : $raw;
+        }
+
+        return $body;
     }
 
     /**
@@ -299,7 +311,7 @@ final class GithubClient
             CURLOPT_MAXREDIRS      => 5,
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
-            CURLOPT_HTTPHEADER     => array_merge($this->headers(), $extraHeaders),
+            CURLOPT_HTTPHEADER     => self::mergeHeaders($this->headers(), $extraHeaders),
             CURLOPT_USERAGENT      => $this->userAgent,
         ]);
 
@@ -322,6 +334,32 @@ final class GithubClient
         }
 
         return $body;
+    }
+
+    /**
+     * Merge header lists so a caller's header replaces the default of the
+     * same name rather than being sent alongside it.
+     *
+     * This matters: fetching a file's raw contents needs
+     * "Accept: application/vnd.github.raw". Appending it to the default
+     * "Accept: application/vnd.github+json" makes GitHub answer with the
+     * metadata envelope — name, path, base64 content — instead of the file,
+     * and the manifest then parses as "missing a version".
+     *
+     * @param list<string> $defaults
+     * @param list<string> $overrides
+     * @return list<string>
+     */
+    private static function mergeHeaders(array $defaults, array $overrides): array
+    {
+        $byName = [];
+
+        foreach ([...$defaults, ...$overrides] as $header) {
+            $name = strtolower(trim(strtok($header, ':') ?: $header));
+            $byName[$name] = $header;
+        }
+
+        return array_values($byName);
     }
 
     /** @return list<string> */

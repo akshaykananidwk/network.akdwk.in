@@ -37,6 +37,7 @@ final class UnitTests
         self::pathGuard();
         self::archiveSafety();
         self::manifest();
+        self::githubClient();
         self::sqlSplitter();
         self::totp();
     }
@@ -476,6 +477,34 @@ final class UnitTests
         } else {
             TestCase::skip('manifest signatures', 'ext-sodium not loaded');
         }
+    }
+
+    private static function githubClient(): void
+    {
+        TestCase::group('GithubClient — header handling');
+
+        // A caller's Accept must REPLACE the default, not be sent alongside
+        // it. Appending "application/vnd.github.raw" to the default
+        // "application/vnd.github+json" makes GitHub answer with the metadata
+        // envelope instead of the file, and the manifest then parses as
+        // "missing a version" — which is exactly how this was found.
+        $method = new \ReflectionMethod(\App\Updater\GithubClient::class, 'mergeHeaders');
+        $method->setAccessible(true);
+
+        $merged = $method->invoke(null,
+            ['Accept: application/vnd.github+json', 'X-GitHub-Api-Version: 2022-11-28'],
+            ['Accept: application/vnd.github.raw']
+        );
+
+        $accepts = array_values(array_filter($merged, static fn (string $h): bool => stripos($h, 'Accept:') === 0));
+        TestCase::assertSame(1, count($accepts), 'exactly one Accept header survives the merge');
+        TestCase::assertSame('Accept: application/vnd.github.raw', $accepts[0],
+            'and it is the caller\'s, not the default');
+        TestCase::assert(in_array('X-GitHub-Api-Version: 2022-11-28', $merged, true),
+            'unrelated default headers are kept');
+
+        $merged = $method->invoke(null, ['Accept: application/vnd.github+json'], []);
+        TestCase::assertSame(1, count($merged), 'with no overrides the defaults pass through unchanged');
     }
 
     private static function sqlSplitter(): void
