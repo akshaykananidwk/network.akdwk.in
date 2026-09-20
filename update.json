@@ -1,19 +1,24 @@
 {
-  "version": "1.0.0",
-  "released_at": "2026-09-20T00:00:00Z",
+  "version": "1.0.1",
+  "released_at": "2026-09-21T09:00:00Z",
   "min_php": "8.1.0",
-  "min_mysql": "8.0",
+  "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Phase 1 foundation: installer, core framework, auth + 2FA + RBAC, multi-tenancy, networks/devices CRUD, audit logs, GitHub auto-update with backup, migration, health check and automatic rollback.",
-  "migrations": [],
+  "notes": "Records the WireGuard handshake time separately from the control-plane heartbeat, so the dashboard can tell \"the agent called us\" from \"the tunnel is up\".",
+  "migrations": [
+    "2026_09_21_090000_add_device_handshake.php"
+  ],
   "protected": [
     ".env",
     "config/config.php",
     "uploads/",
     "storage/",
-    "install/install.lock"
+    "install/install.lock",
+    "*.local.php"
   ],
-  "delete": [],
+  "delete": [
+    ".env.sample"
+  ],
   "post_update": [
     "cli/tasks/rebuild_acl_cache.php"
   ],

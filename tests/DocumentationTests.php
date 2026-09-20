@@ -107,7 +107,7 @@ final class DocumentationTests
             'VERIFICATION_REPORT.md'   => 'test results',
             'docs/openapi.yaml'        => 'machine-readable API spec',
             'update.json'              => 'release manifest',
-            '.env.sample'              => 'configuration reference',
+            'config/.env.sample'       => 'configuration reference',
             'config/config.sample.php' => 'configuration reference',
         ];
 

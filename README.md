@@ -77,7 +77,7 @@ php cli/install.php --answers=answers.json
 | File | Purpose |
 |---|---|
 | `config/config.php` | Everything. Authoritative, `0640`, never overwritten by an update. |
-| `config/.env` | Database settings for tooling that reads the environment. |
+| `config/.env` | Database settings for tooling that reads the environment. See `config/.env.sample`. |
 | `install/install.lock` | Blocks the wizard from being run again. |
 
 `config/.env` is inside `config/` on purpose. A `.env` in the web root is
