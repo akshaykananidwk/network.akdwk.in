@@ -114,13 +114,19 @@ func (c *Client) FetchConfig(ctx context.Context, knownRevision int) (*Config, i
 }
 
 // Heartbeat is what the agent reports on each cycle.
+//
+// The byte fields are deltas since the last heartbeat, not totals. The panel
+// accumulates them into usage counters, so sending totals would make every
+// heartbeat re-add the whole session and the numbers would be nonsense.
 type Heartbeat struct {
-	Endpoint       string `json:"endpoint,omitempty"`
-	LANEndpoint    string `json:"lan_endpoint,omitempty"`
+	Endpoint    string `json:"endpoint,omitempty"`
+	LANEndpoint string `json:"lan_endpoint,omitempty"`
+	// ConnectionType is "direct", "relay" or "offline" — the panel accepts
+	// nothing else, and anything else becomes "offline".
 	ConnectionType string `json:"connection_type,omitempty"`
 	LatencyMS      int    `json:"latency_ms,omitempty"`
-	RXBytes        int64  `json:"rx_bytes,omitempty"`
-	TXBytes        int64  `json:"tx_bytes,omitempty"`
+	RXDelta        int64  `json:"rx_delta,omitempty"`
+	TXDelta        int64  `json:"tx_delta,omitempty"`
 	Revision       int    `json:"revision,omitempty"`
 }
 

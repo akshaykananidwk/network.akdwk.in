@@ -56,7 +56,7 @@ now checks for it and says where to get it.
 |---|---|---|
 | **P1 Foundation** | Installer, framework, auth, multi-tenancy, CRUD, audit, **auto-update**, backups | **Complete and verified** |
 | P2 Networking | Go agent, enrolment-to-tunnel, IPAM wiring, WireGuard, split tunnel, coordinator, NAT traversal | **Working in a Linux lab**; Windows compiles but is untested, real ISPs untested |
-| P3 Relay | Relay service, fallback and silent upgrade to direct, usage accounting | Not started |
+| P3 Relay | Relay service, fallback and silent upgrade to direct, usage accounting | **Working in the lab**; relay selection not yet latency-based |
 | P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | Control plane done, agent side not started |
 | P5 Commercial | Plans, limits, billing, invoices, API keys, OpenAPI, white-label | Mostly done (see below) |
 | P6 Enterprise | HA, multi-region relays, SSO/SAML, staged agent rollout | Not started |

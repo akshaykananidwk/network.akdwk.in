@@ -1,10 +1,10 @@
 {
-  "version": "1.2.0",
-  "released_at": "2026-09-21T08:00:00Z",
+  "version": "1.2.1",
+  "released_at": "2026-09-21T09:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Phase 3: the relay. Peers behind symmetric NAT now connect, and upgrade silently to a direct path when their networks allow it.",
+  "notes": "The connection indicator is wired to real agent state, and traffic counters are recorded for the first time.",
   "migrations": [],
   "protected": [
     ".env",

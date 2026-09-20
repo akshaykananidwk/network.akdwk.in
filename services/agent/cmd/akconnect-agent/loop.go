@@ -75,17 +75,50 @@ func (s *session) heartbeat(ctx context.Context) error {
 
 	if s.tun != nil {
 		if peers, err := s.tun.Status(); err == nil {
+			var rx, tx int64
 			for _, p := range peers {
-				hb.RXBytes += p.RXBytes
-				hb.TXBytes += p.TXBytes
+				rx += p.RXBytes
+				tx += p.TXBytes
 			}
-			hb.ConnectionType = connectionType(peers)
+
+			// Deltas, because the panel accumulates them. Counters only go up
+			// while the device runs, so a restart shows as a drop; clamping at
+			// zero reports nothing rather than a negative.
+			hb.RXDelta = max64(0, rx-s.lastRX)
+			hb.TXDelta = max64(0, tx-s.lastTX)
+			s.lastRX, s.lastTX = rx, tx
+
+			hb.ConnectionType = s.connectionType(peers)
 		}
+	}
+
+	if endpoint := s.reflexive(); endpoint != "" {
+		hb.Endpoint = endpoint
 	}
 
 	_, err := s.client.SendHeartbeat(ctx, hb)
 
 	return err
+}
+
+func (s *session) reflexive() string {
+	if s.discovery == nil {
+		return ""
+	}
+
+	if addr := s.discovery.Reflexive(); addr.IsValid() {
+		return addr.String()
+	}
+
+	return ""
+}
+
+func max64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+
+	return b
 }
 
 // refresh asks for configuration and re-applies it if the revision moved.
@@ -108,26 +141,45 @@ func (s *session) refresh(ctx context.Context, priv wgPrivate) (int, error) {
 	return pollAfter, nil
 }
 
-// connectionType reports how the tunnel is carrying traffic, which the panel
-// shows in the device list.
+// connectionType reports how the tunnel is carrying traffic, which is what the
+// panel's green, amber and red indicator shows.
 //
-// A completed handshake is the only evidence that counts: a peer can be
-// configured, reachable on paper and still not passing anything. "direct"
-// therefore means at least one peer has handshaked recently, not that one is
-// listed.
-func connectionType(peers []tunnel.PeerStatus) string {
-	if len(peers) == 0 {
-		return "none"
-	}
-
+// Two things must both be true to claim "direct": a peer has handshaked
+// recently, and discovery says that peer is reached directly rather than
+// through a relay. A handshake alone proves traffic flows, not how — and the
+// difference is what a customer is billed for.
+//
+// The panel accepts only "direct", "relay" and "offline", so those are the
+// only values produced here.
+func (s *session) connectionType(peers []tunnel.PeerStatus) string {
 	cutoff := time.Now().Add(-3 * time.Minute).Unix()
+	live := false
+	relayed := false
+
 	for _, p := range peers {
-		if p.LastHandshake > cutoff {
-			return "direct"
+		if p.LastHandshake <= cutoff {
+			continue
+		}
+		live = true
+
+		if meta, ok := s.peerMeta[p.PublicKeyHex]; ok && s.discovery != nil {
+			if s.discovery.Path(meta.publicKey) == "relay" {
+				relayed = true
+			}
 		}
 	}
 
-	return "pending"
+	switch {
+	case !live:
+		return "offline"
+	case relayed:
+		// Amber if any peer is relayed: the operator needs to know some of
+		// this device's traffic is going through our servers, not that all of
+		// it is.
+		return "relay"
+	default:
+		return "direct"
+	}
 }
 
 // publishRuntime writes what a support script needs to collect, so the

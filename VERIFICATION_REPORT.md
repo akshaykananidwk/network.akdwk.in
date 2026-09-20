@@ -1,6 +1,6 @@
 # Verification report
 
-**Version 1.1.0 · 21 September 2026**
+**Version 1.2.1 · 21 September 2026**
 
 What follows is what was actually run and what it actually produced. Where a
 requirement is met, the evidence is the command and its output. Where it is
@@ -30,7 +30,7 @@ and all three remain unmet. See [What Phase 2 has not shown](#what-phase-2-has-n
 | A   | Installer           | **Pass** | Clean install on an empty database; re-installation refused |
 | B   | Auto-update         | **Pass** | 9 runs against live GitHub, 6 rolled back; 8 defects found and fixed |
 | C   | Multi-tenancy (R3)  | **Pass** | Fails closed; holds at 1,000 devices |
-| D   | Networking (R1, R4, R5) | **Partial** | Real tunnels, including across NAT — but only in a Linux lab; Windows and real ISPs untested |
+| D   | Networking (R1, R4, R5) | **Partial** | Real tunnels direct and relayed, including where punching cannot work — but only in a Linux lab; Windows and real ISPs untested |
 | E   | Security            | **Pass** | With the open items listed under [Known limitations](#known-limitations) |
 | F   | Scale               | **Pass, with a finding** | 1,000 devices fine; address allocation scales with *pool* size |
 | G   | Recovery            | **Pass** | Byte-exact recovery from catastrophic damage |
@@ -422,6 +422,67 @@ its tunnel interface, and it rejects any candidate inside the overlay prefix
 whoever offers it — including the coordinator, which is not something the data
 plane should take on faith.
 
+### The relay, and the case hole punching cannot win
+
+A symmetric NAT allocates a different external port per destination, so the
+address the coordinator observes is useless to a peer. This is not a tuning
+problem — it defeats hole punching by construction, and it is common on Indian
+broadband and mobile. The lab has a mode for it.
+
+Under that NAT, the agents try, fail, and fall back within the punch deadline:
+
+```
+discovery: no direct path to bQZJ2RM4mqPm… after 5s; asking for a relay
+discovery: relaying to peer bQZJ2RM4mqPm… via 10.0.0.1:54770 (still trying for a direct path)
+```
+
+```
+$ ip netns exec alpha ping -c 8 -W 3 10.99.0.3
+8 packets transmitted, 8 received, 0% packet loss
+```
+
+The relay then carries the traffic, and the panel records it as relayed:
+
+```
+name        connection_type  last_endpoint
+lab-alpha   relay            10.0.0.10:9650
+lab-beta    relay            10.0.0.11:54712
+```
+
+**The silent upgrade.** With traffic flowing continuously, the NAT was replaced
+with a full-cone one — as if a customer had replaced their router:
+
+```
+discovery: upgraded peer bQZJ2RM4mqPm… from relay to direct via 10.0.0.11:51820
+```
+
+| Check | Result |
+|---|---|
+| Packets lost during the switch | **0**, of 98 sent |
+| WireGuard session | **Not reconnected** — handshake age kept increasing across the switch |
+| Panel indicator | 🟡 relay → 🟢 direct, from real agent state |
+
+Nothing is torn down because pointing WireGuard at a relay and pointing it at a
+peer are the same call.
+
+### Defects found while building the relay
+
+| # | Defect | Found by |
+|---|---|---|
+| 11 | The relay replied to the address the bind arrived from. Under symmetric NAT that is a different mapping from the data port's, so every reply was dropped. | The first relayed run: bytes forwarded, handshake never completed |
+| 12 | The periodic re-bind overwrote the data-learned return address, breaking the path every 20 seconds, forever. | `tx 692, rx 124` — sending fine, receiving almost nothing |
+| 13 | The silent upgrade never fired: candidates refreshed only on hello, and a settled agent only pings, so both ends punched at addresses that no longer existed — and their retry timers were independent, while hole punching needs both ends to punch at the same instant. | Watching 170 pings cross a relay that should have been abandoned |
+| 14 | The agent sent `rx_bytes`/`tx_bytes`; the panel reads `rx_delta`/`tx_delta`. Traffic counters were never recorded at all. | Reading the controller while wiring the indicator |
+
+A fifth was in the lab rather than the product, and is worth recording because
+it would have produced a false pass: **plain `MASQUERADE` is not a reliable
+cone NAT.** Linux preserves a source port only while it is free, so once an
+agent has flows to the coordinator and the relay from the same port, a new flow
+to a peer gets a different one and the NAT behaves symmetrically. The lab's
+cone mode now uses an explicit SNAT/DNAT pair, so "cone" means cone.
+
+---
+
 ## E — Security
 
 | Check | Result | Evidence |
@@ -713,19 +774,18 @@ These are real and currently shipped.
 
 ## Not implemented, and why
 
-1. **The relay, and everything that depends on it.** There is an agent and a
-   coordinator; there is no relay. A pair of peers that cannot reach each
-   other directly currently stay unreachable — visibly, in the log, rather
-   than silently degrading. That is the honest behaviour for now, but it means
-   any NAT combination hole punching cannot beat is a pair of devices that
-   simply do not connect. This is Phase 3 and it is the next thing that
-   matters after Windows.
+1. **Relay selection is not yet intelligent.** The relay exists and works, but
+   selection is round-robin within a region and `devices` has no region
+   column, so in practice it picks the first configured relay. Latency-based
+   selection needs the agents to measure and report round-trip times to each
+   candidate relay, which they do not. A customer in Ahmedabad could today be
+   assigned a relay anywhere.
 
-   **R7 is partially met.** Real networking exists and packets move, so the
-   panel is no longer a dashboard with nothing behind it. But a product whose
-   agent has never run on Windows and has never crossed two real ISPs is not
-   one I would put in front of a paying customer. Nothing in this report
-   should be read as claiming otherwise.
+   **R7 is partially met.** Packets move, directly and relayed, so the panel
+   is no longer a dashboard with nothing behind it. But a product whose agent
+   has never run on Windows and has never crossed two real ISPs is not one I
+   would put in front of a paying customer. Nothing in this report should be
+   read as claiming otherwise.
 
 2. **ACL enforcement on the agent.** The panel compiles per-peer filters and
    sends them in the configuration; the agent currently applies the peer set

@@ -6,6 +6,25 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.2.1] — 2026-09-21
+
+### Fixed
+
+**Traffic counters were never recorded.** The agent sent `rx_bytes` and
+`tx_bytes`; the panel reads `rx_delta` and `tx_delta`. Every heartbeat was
+silently discarded for accounting purposes. The agent now sends deltas, which
+is what the panel accumulates — sending totals would have re-added the whole
+session on every beat even once the field names matched.
+
+**The connection indicator never showed amber.** The partial for 🟢 direct /
+🟡 relay / 🔴 offline has existed since Phase 1 and is rendered in three views,
+but the agent only ever reported "direct" or values the panel rejected. It now
+reports the real path from discovery, so a relayed device shows as relayed.
+Amber if *any* peer is relayed: an operator needs to know some of this device's
+traffic crosses our servers, not that all of it does.
+
+---
+
 ## [1.2.0] — 2026-09-21
 
 Phase 3. Peers that cannot reach each other at all now connect, and stop

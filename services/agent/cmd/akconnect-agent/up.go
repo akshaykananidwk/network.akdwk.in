@@ -64,6 +64,8 @@ type session struct {
 	port      int
 	verbose   bool
 	applied   bool
+	lastRX    int64
+	lastTX    int64
 	startedAt time.Time
 }
 
