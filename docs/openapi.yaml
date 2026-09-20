@@ -1,0 +1,720 @@
+openapi: 3.1.0
+
+info:
+  title: AK Connect API
+  version: "1.0.0"
+  description: |
+    REST API for the overlay network control plane.
+
+    Two kinds of bearer token are accepted and they are **not** interchangeable:
+
+    * A **tenant API key** (`ak_live_…` / `ak_test_…`) establishes the tenant
+      and is narrowed by the scopes it was issued with.
+    * A **device token**, issued when an administrator approves a device,
+      grants access to the agent endpoints for that device only.
+
+    Every response uses the same envelope, so a client can branch on `success`
+    alone. Every read is tenant-scoped: an id belonging to another customer
+    returns `404`, never `403` — a 403 would confirm the id exists.
+  contact:
+    name: Support
+    email: support@net.akdwk.in
+
+servers:
+  - url: https://net.akdwk.in/api/v1
+    description: Production
+
+security:
+  - apiKey: []
+
+tags:
+  - name: Networks
+  - name: Devices
+  - name: Access rules
+  - name: Platform
+  - name: Agent
+    description: |
+      Called by the agent, not by integrators. `/enroll` and `/agent/claim`
+      are the only unauthenticated endpoints; both are rate limited per IP and
+      `/enroll` additionally requires a short-lived join code.
+
+paths:
+  /networks:
+    get:
+      tags: [Networks]
+      summary: List networks
+      parameters:
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/perPage' }
+        - { $ref: '#/components/parameters/query' }
+      responses:
+        '200':
+          description: A page of networks
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Network' }
+                      meta: { $ref: '#/components/schemas/Pagination' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Networks]
+      summary: Create a network
+      description: |
+        The address range must be RFC 1918 private space between /16 and /30,
+        and must not overlap another network belonging to the same customer.
+        Creating a network materialises its whole address pool.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, cidr]
+              properties:
+                name:          { type: string, maxLength: 120, example: Head office }
+                cidr:          { type: string, example: 10.50.0.0/16 }
+                description:   { type: string, maxLength: 255 }
+                mtu:           { type: integer, minimum: 576, maximum: 1500, default: 1280 }
+                search_domain: { type: string, example: office.internal }
+                acl_default_action: { type: string, enum: [allow, deny], default: allow }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Network' }
+        '402': { $ref: '#/components/responses/LimitExceeded' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /networks/{id}:
+    parameters:
+      - { $ref: '#/components/parameters/id' }
+    get:
+      tags: [Networks]
+      summary: Get a network
+      responses:
+        '200':
+          description: The network
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Network' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Networks]
+      summary: Update a network
+      description: An address range may be widened, never narrowed — narrowing would strand devices already holding an address outside the new range.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:          { type: string, maxLength: 120 }
+                description:   { type: string, maxLength: 255 }
+                cidr:          { type: string }
+                mtu:           { type: integer }
+                search_domain: { type: string }
+                status:        { type: string, enum: [active, paused, archived] }
+      responses:
+        '200': { description: Updated }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+    delete:
+      tags: [Networks]
+      summary: Archive a network
+      description: Detaches and revokes its devices, releasing their addresses.
+      responses:
+        '204': { description: Archived }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /networks/{id}/members:
+    parameters: [{ $ref: '#/components/parameters/id' }]
+    get:
+      tags: [Networks]
+      summary: Devices on this network
+      responses:
+        '200':
+          description: Devices
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Device' }
+
+  /networks/{id}/routes:
+    parameters: [{ $ref: '#/components/parameters/id' }]
+    get:
+      tags: [Networks]
+      summary: Routes advertised into this network
+      description: |
+        `0.0.0.0/0` can never appear here. The tunnel carries only the network
+        range and explicit routes, so ordinary internet traffic always leaves
+        by the customer's own connection.
+      responses:
+        '200': { description: Routes }
+
+  /networks/{id}/acl:
+    parameters: [{ $ref: '#/components/parameters/id' }]
+    get:
+      tags: [Access rules]
+      summary: List access rules
+      responses:
+        '200': { description: Rules in evaluation order }
+    post:
+      tags: [Access rules]
+      summary: Add an access rule
+      description: |
+        Rules are evaluated in priority order, lowest number first; the first
+        match wins. They are compiled and enforced **on both devices**, not
+        only shown in the UI. A change reaches connected agents within about
+        ten seconds.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AclRule' }
+      responses:
+        '201': { description: Created }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /networks/{id}/acl/{ruleId}:
+    parameters:
+      - { $ref: '#/components/parameters/id' }
+      - name: ruleId
+        in: path
+        required: true
+        schema: { type: integer }
+    put:
+      tags: [Access rules]
+      summary: Replace an access rule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AclRule' }
+      responses:
+        '200': { description: Updated }
+    delete:
+      tags: [Access rules]
+      summary: Delete an access rule
+      responses:
+        '204': { description: Deleted }
+
+  /devices:
+    get:
+      tags: [Devices]
+      summary: List devices
+      parameters:
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/perPage' }
+        - { $ref: '#/components/parameters/query' }
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, authorized, disabled, revoked] }
+        - name: network_id
+          in: query
+          schema: { type: integer }
+      responses:
+        '200':
+          description: A page of devices
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Device' }
+                      meta: { $ref: '#/components/schemas/Pagination' }
+
+  /devices/{id}:
+    parameters: [{ $ref: '#/components/parameters/id' }]
+    get:
+      tags: [Devices]
+      summary: Get a device
+      responses:
+        '200': { description: The device }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Devices]
+      summary: Rename or re-tag a device
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:       { type: string, maxLength: 120 }
+                tags:       { type: array, items: { type: string } }
+                is_gateway: { type: boolean }
+      responses:
+        '200': { description: Updated }
+    delete:
+      tags: [Devices]
+      summary: Delete a device
+      description: Revokes first, so peers drop it and its address is released.
+      responses:
+        '204': { description: Deleted }
+
+  /devices/{id}/approve:
+    parameters: [{ $ref: '#/components/parameters/id' }]
+    post:
+      tags: [Devices]
+      summary: Approve a pending device
+      description: |
+        Assigns a private address and issues the device token. **The token is
+        returned exactly once** — only its hash is stored. An agent normally
+        collects it itself by polling `/agent/claim`; this response exists for
+        manual and air-gapped installs.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                virtual_ip:
+                  type: string
+                  description: Request a specific address, e.g. for a server that must keep a fixed IP. Omit to assign the lowest free one.
+      responses:
+        '200':
+          description: Approved
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          device:       { $ref: '#/components/schemas/Device' }
+                          virtual_ip:   { type: string, example: 10.50.0.7 }
+                          device_token: { type: string, description: Shown once and never again. }
+        '402': { $ref: '#/components/responses/LimitExceeded' }
+
+  /devices/{id}/revoke:
+    parameters: [{ $ref: '#/components/parameters/id' }]
+    post:
+      tags: [Devices]
+      summary: Revoke a device
+      description: Destroys its token, releases its address, and removes it from every peer within about ten seconds.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        '200': { description: Revoked }
+
+  /devices/{id}/disable:
+    parameters: [{ $ref: '#/components/parameters/id' }]
+    post:
+      tags: [Devices]
+      summary: Disable a device
+      description: Stops it connecting but keeps its address reserved.
+      responses:
+        '200': { description: Disabled }
+
+  /relays:
+    get:
+      tags: [Platform]
+      summary: Relays an agent may use
+      description: |
+        Only the connection fields are exposed. Hostnames and public keys are
+        not tenant secrets — every agent receives them — but capacity and
+        session counts are operational detail.
+      parameters:
+        - name: region
+          in: query
+          schema: { type: string, example: in }
+      responses:
+        '200': { description: Relays }
+
+  /audit-logs:
+    get:
+      tags: [Platform]
+      summary: Audit log
+      parameters:
+        - { $ref: '#/components/parameters/page' }
+        - { $ref: '#/components/parameters/perPage' }
+        - name: action
+          in: query
+          schema: { type: string, example: device.approve }
+        - name: result
+          in: query
+          schema: { type: string, enum: [success, failure] }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        '200': { description: Audit entries }
+
+  /usage:
+    get:
+      tags: [Platform]
+      summary: Usage for a billing period
+      description: |
+        Only relayed traffic is metered. Direct peer-to-peer bytes never touch
+        our infrastructure, so billing for them would be dishonest.
+      parameters:
+        - name: period
+          in: query
+          schema: { type: string, example: "2026-09" }
+      responses:
+        '200': { description: Usage and limits }
+
+  /enroll:
+    post:
+      tags: [Agent]
+      security: []
+      summary: Enrol a device
+      description: |
+        Public but rate limited, and gated by a short-lived join code.
+
+        The result is always `pending` unless the network has explicitly opted
+        into auto-approval: **no address, no token, no peer list** is returned
+        until an administrator approves. Re-enrolling with the same public key
+        returns the existing device rather than creating a duplicate.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [join_code, public_key]
+              properties:
+                join_code:      { type: string, example: 7KQ3M2XB9VTD }
+                public_key:     { type: string, description: Base64 Curve25519 public key. The private half never leaves the device. }
+                hostname:       { type: string }
+                os:             { type: string, example: windows }
+                os_version:     { type: string }
+                arch:           { type: string, example: amd64 }
+                agent_version:  { type: string }
+                hw_fingerprint: { type: string }
+      responses:
+        '201':
+          description: Enrolled, pending approval
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          device_uid:  { type: string }
+                          status:      { type: string, enum: [pending, authorized] }
+                          network_uid: { type: string }
+                          poll_after:  { type: integer }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /agent/claim:
+    post:
+      tags: [Agent]
+      security: []
+      summary: Collect the device token once approved
+      description: |
+        The public key is the proof of identity: only the machine holding the
+        matching private key could have produced it. Asking again rotates the
+        token, which is the intended recovery path for a lost one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_uid, public_key]
+              properties:
+                device_uid: { type: string }
+                public_key: { type: string }
+      responses:
+        '200': { description: Authorised (with a token) or still pending (without one) }
+        '404': { description: No matching enrolment }
+
+  /agent/config:
+    get:
+      tags: [Agent]
+      security: [{ deviceToken: [] }]
+      summary: Full configuration for this device
+      description: |
+        Send the last known `revision`; when it matches, the response is
+        `changed: false` and no peer list is rebuilt.
+
+        The configuration never contains `0.0.0.0/0`. The server strips it
+        before sending, so split tunnelling is a server refusal rather than an
+        agent convention.
+      parameters:
+        - name: revision
+          in: query
+          schema: { type: integer }
+      responses:
+        '200': { description: Configuration, or an unchanged marker }
+        '401': { description: Not authorised — re-enrol }
+        '409': { description: Not attached to a network }
+
+  /agent/heartbeat:
+    post:
+      tags: [Agent]
+      security: [{ deviceToken: [] }]
+      summary: Report liveness and traffic
+      description: Byte counts are deltas, applied in place, so two heartbeats racing cannot lose one another's increment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                endpoint:        { type: string, example: "203.0.113.9:51820" }
+                lan_endpoint:    { type: string }
+                connection_type: { type: string, enum: [direct, relay, offline] }
+                relay_id:        { type: integer }
+                latency_ms:      { type: integer }
+                rx_delta:        { type: integer }
+                tx_delta:        { type: integer }
+                agent_version:   { type: string }
+      responses:
+        '200': { description: Acknowledged, with the current config revision }
+
+  /agent/endpoint:
+    post:
+      tags: [Agent]
+      security: [{ deviceToken: [] }]
+      summary: Exchange endpoints for NAT traversal
+      description: |
+        The agent reports the reflexive address it learned from the
+        coordinator's probe; peers can then attempt a direct hole punch.
+        The punching itself happens in the Go coordinator — PHP cannot hold
+        the UDP socket that requires.
+      responses:
+        '200': { description: Peer endpoints and coordinator details }
+
+  /agent/version:
+    get:
+      tags: [Agent]
+      security: [{ deviceToken: [] }]
+      summary: Check for an agent update
+      description: |
+        Separate from the panel's own update channel. Every release carries a
+        sha256 **and** an ed25519 signature; the agent verifies both before
+        swapping its binary and reverts on failure.
+      parameters:
+        - name: channel
+          in: query
+          schema: { type: string, enum: [stable, beta, dev], default: stable }
+      responses:
+        '200': { description: Whether an update is available, with its hash and signature }
+
+  /stream:
+    get:
+      tags: [Platform]
+      security: []
+      summary: Live dashboard events (Server-Sent Events)
+      description: |
+        Requires a dashboard session, not an API key: a key would tie up a
+        worker for a minute at a time to no purpose.
+
+        PHP cannot host a WebSocket server, and pretending otherwise would be
+        dishonest. SSE is the right fit — one long-lived response,
+        server-to-client only. The connection recycles after about 60 seconds
+        by design; clients that cannot use SSE fall back to polling.
+
+        Events: `connected`, `snapshot`, `device.online`, `device.offline`,
+        `device.pending`, `conn.changed`, `reconnect`.
+      responses:
+        '200':
+          description: An event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: A tenant API key, `ak_live_…` or `ak_test_…`. Scopes narrow what it can do, and can never exceed what its creating user could do.
+    deviceToken:
+      type: http
+      scheme: bearer
+      description: Issued when a device is approved. Grants access to that device's own endpoints only.
+
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer }
+    page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    perPage:
+      name: per_page
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+    query:
+      name: q
+      in: query
+      description: Free-text search. Wildcards are treated literally.
+      schema: { type: string }
+
+  schemas:
+    Envelope:
+      type: object
+      required: [success, data, meta, error]
+      properties:
+        success: { type: boolean }
+        data:    { description: The payload, or null on failure. }
+        meta:    { type: object }
+        error:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Error'
+
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+          enum: [bad_request, unauthenticated, limit_exceeded, forbidden, not_found, conflict, validation_failed, rate_limited, maintenance, error]
+        message: { type: string, description: Safe to show a user. }
+        details: { type: object, description: Field errors for validation_failed. }
+
+    Pagination:
+      type: object
+      properties:
+        total:    { type: integer }
+        page:     { type: integer }
+        per_page: { type: integer }
+        pages:    { type: integer }
+
+    Network:
+      type: object
+      properties:
+        id:                 { type: integer }
+        uid:                { type: string, example: 7f3c9a2b18d4e6f0 }
+        name:               { type: string }
+        description:        { type: string, nullable: true }
+        cidr:               { type: string, example: 10.50.0.0/16 }
+        dns:                { type: array, items: { type: string } }
+        search_domain:      { type: string, nullable: true }
+        mtu:                { type: integer }
+        auto_assign_ip:     { type: boolean }
+        private:            { type: boolean }
+        acl_default_action: { type: string, enum: [allow, deny] }
+        status:             { type: string, enum: [active, paused, archived] }
+        revision:           { type: integer, description: Bumped whenever anything an agent needs changes. }
+        created_at:         { type: string, format: date-time }
+
+    Device:
+      type: object
+      properties:
+        id:              { type: integer }
+        uid:             { type: string, example: dev_a1b2c3d4e5f6 }
+        name:            { type: string }
+        hostname:        { type: string, nullable: true }
+        os:              { type: string, nullable: true }
+        os_version:      { type: string, nullable: true }
+        agent_version:   { type: string, nullable: true }
+        network_id:      { type: integer, nullable: true }
+        virtual_ip:      { type: string, nullable: true, example: 10.50.0.7 }
+        status:          { type: string, enum: [pending, authorized, disabled, revoked] }
+        connection_type: { type: string, enum: [direct, relay, offline] }
+        last_seen_at:    { type: string, format: date-time, nullable: true }
+        last_endpoint:   { type: string, nullable: true }
+        rx_bytes:        { type: integer }
+        tx_bytes:        { type: integer }
+        latency_ms:      { type: integer, nullable: true }
+        tags:            { type: array, items: { type: string } }
+        is_gateway:      { type: boolean }
+        approved_at:     { type: string, format: date-time, nullable: true }
+        public_key:
+          type: string
+          description: Not a secret — peers need it. The private half never existed on the server.
+
+    AclRule:
+      type: object
+      properties:
+        priority:    { type: integer, description: Lower is evaluated first. }
+        description: { type: string }
+        src_type:    { type: string, enum: [device, tag, cidr, any] }
+        src_value:   { type: string, nullable: true }
+        dst_type:    { type: string, enum: [device, tag, cidr, any] }
+        dst_value:   { type: string, nullable: true }
+        protocol:    { type: string, enum: [tcp, udp, icmp, any] }
+        port_from:   { type: integer, nullable: true }
+        port_to:     { type: integer, nullable: true }
+        action:      { type: string, enum: [allow, deny] }
+        enabled:     { type: boolean }
+
+  responses:
+    Unauthenticated:
+      description: No credential, or one that is invalid, expired or revoked.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+    Forbidden:
+      description: Authenticated, but the credential's scopes or the user's role do not permit this.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+    NotFound:
+      description: |
+        No such resource — including one that exists but belongs to another
+        customer. This is deliberately not a 403, which would confirm the id
+        exists.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+    LimitExceeded:
+      description: A plan limit was reached. The message names the limit and suggests an upgrade.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+    ValidationFailed:
+      description: Input rejected. `error.details` carries per-field messages.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }
+    RateLimited:
+      description: Too many requests. A `Retry-After` header says how long to wait.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Envelope' }

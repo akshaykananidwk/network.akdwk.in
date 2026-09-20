@@ -35,6 +35,7 @@ use App\Core\View;
 use Tests\DatabaseTests;
 use Tests\HttpTests;
 use Tests\TestCase;
+use Tests\DocumentationTests;
 use Tests\StaticAnalysisTests;
 use Tests\UnitTests;
 
@@ -66,6 +67,7 @@ echo '  PHP ' . PHP_VERSION . ' · ' . ($hasInstall ? 'installed configuration' 
 if ($runAll || isset($options['unit'])) {
     UnitTests::run();
     StaticAnalysisTests::run();
+    DocumentationTests::run();
 }
 
 if ($runAll || isset($options['db'])) {

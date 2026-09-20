@@ -49,7 +49,18 @@ final class GithubClient
         try {
             $repo = $this->request('GET', sprintf('/repos/%s/%s', $this->owner, $this->repo));
         } catch (UpdateException $e) {
-            return ['ok' => false, 'message' => $e->getMessage()];
+            $message = $e->getMessage();
+
+            // GitHub answers 404 rather than 403 for a private repository the
+            // caller cannot see, so "not found" usually means "no token".
+            if (str_contains($message, 'HTTP 404') && ($this->token === null || $this->token === '')) {
+                $message .= ' — if this repository is private, add an access token with the "repo" scope.';
+            }
+            if (str_contains($message, 'HTTP 401')) {
+                $message .= ' — the access token was rejected. Check it has not expired or been revoked.';
+            }
+
+            return ['ok' => false, 'message' => $message];
         }
 
         try {
