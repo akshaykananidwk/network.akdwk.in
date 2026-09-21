@@ -62,10 +62,23 @@ final class RollbackManager
         $steps = [];
         $failures = [];
 
-        $this->restoreFiles($update, $log, $steps, $failures);
-        $this->reverseMigrations($update, $log, $steps, $failures);
-        $this->restoreDatabase($update, $log, $steps, $failures);
-        $this->restoreVersionMarker($update, $failures);
+        // The order matters and so does stopping. If the files cannot be put
+        // back, rewinding the database and the version marker would leave new
+        // code against an old schema and stamp it with the old version number
+        // — a state that is worse than either version on its own, and one an
+        // operator would have no reason to suspect. Everything after the file
+        // restore is therefore conditional on it.
+        if ($this->restoreFiles($update, $log, $steps, $failures)) {
+            $this->reverseMigrations($update, $log, $steps, $failures);
+            $this->restoreDatabase($update, $log, $steps, $failures);
+            $this->restoreVersionMarker($update, $failures);
+        } else {
+            $log->error(
+                'Stopping here. The database and the version marker have been left alone: '
+                . 'rewinding them under files that are still on the new version would produce '
+                . 'a mixture of the two, which is harder to diagnose than either.'
+            );
+        }
 
         // A rollback that leaves the panel broken is not a rollback.
         $health = HealthChecker::make()->run();
@@ -148,7 +161,7 @@ final class RollbackManager
         return $reached >= $apply;
     }
 
-    private function restoreFiles(array $update, UpdateLog $log, array &$steps, array &$failures): void
+    private function restoreFiles(array $update, UpdateLog $log, array &$steps, array &$failures): bool
     {
         try {
             $journalRelative = (string) ($update['journal_path'] ?? '');
@@ -162,18 +175,18 @@ final class RollbackManager
                 // state than either version on its own, and worse than stopping.
                 if (self::reachedApply($update)) {
                     $failures[] = 'Files: the rollback journal is missing, so the files this update '
-                        . 'replaced cannot be restored. The database has NOT been rolled back either, '
-                        . 'because doing so would leave new code against an old schema. Restore from '
-                        . 'the file backup listed in History, then roll back the database separately.';
+                        . 'replaced cannot be restored. The database and version marker have been '
+                        . 'left alone deliberately — rewinding them under the new files would produce '
+                        . 'a mixture of two versions. Restore from the file backup listed in History.';
                     $log->error(end($failures));
 
-                    throw new UpdateException(end($failures), 'ROLLBACK');
+                    return false;
                 }
 
                 $steps[] = 'Files: nothing to undo (the update had not reached APPLY).';
                 $log->info(end($steps));
 
-                return;
+                return true;
             }
 
             $journal = new RollbackJournal(
@@ -190,10 +203,19 @@ final class RollbackManager
                 foreach (array_slice($replay['failed'], 0, 10) as $failure) {
                     $log->error('  ✗ ' . $failure['path'] . ': ' . $failure['error']);
                 }
+
+                // A partial file restore is the same problem in a smaller
+                // shape: some files old, some new. Rewinding the schema under
+                // that is not an improvement.
+                return false;
             }
+
+            return true;
         } catch (\Throwable $e) {
             $failures[] = 'File rollback failed: ' . $e->getMessage();
             $log->error(end($failures));
+
+            return false;
         }
     }
 

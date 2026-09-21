@@ -6,6 +6,31 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.3.3] — 2026-09-21
+
+### Fixed
+
+**A rollback that could not restore the files rewound the database anyway.**
+1.3.1 made a missing journal report a failure, which was necessary and not
+sufficient: the four rollback phases ran unconditionally, so after the file
+restore failed the rollback still reversed the migrations, restored the
+database and stamped the old version number onto an installation whose files
+were still on the new one. The failure was reported and the damage was done in
+the same breath.
+
+Everything after the file restore is now conditional on it. If the files
+cannot be put back — a missing journal, a partial replay, any error — the
+rollback stops, leaves the database and the version marker alone, and says
+why. The installation stays wholly on the new version, which is a coherent
+state an operator can reason about, and the recovery instructions name the
+file backup to restore from.
+
+Found by testing the 1.3.1 fix rather than trusting it: the refusal fired, and
+the database step ran directly afterwards because the `throw` was inside the
+method's own `try`.
+
+---
+
 ## [1.3.2] — 2026-09-21
 
 Documentation only.
