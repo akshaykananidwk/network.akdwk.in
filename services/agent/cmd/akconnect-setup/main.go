@@ -25,12 +25,29 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=1.2.3".
 var version = "dev"
+
+// defaultPanel is stamped at build time too, with
+// -ldflags "-X main.defaultPanel=https://network.akdwk.in".
+//
+// It has to be, because a join code does not carry the panel's address: it is
+// a code issued by one panel and means nothing without knowing which. A
+// production install found this the hard way — the installer copied its files
+// and then failed with "--panel and --join-code are both required", which is
+// an agent's error message arriving in front of a customer.
+//
+// Baked in rather than asked for, because §33 says one question and the join
+// code is the one worth asking. build-windows-pack.sh stamps it from the
+// panel's own configured URL, so the pack a customer downloads already knows
+// where it came from. When it is not stamped — somebody building by hand —
+// the installer asks, rather than failing after it has written files.
+var defaultPanel = ""
 
 const (
 	productName = "AKConnect"
@@ -88,6 +105,13 @@ func runSetup(ui *console, uninstall bool, code, panelURL, name string) error {
 		return err
 	}
 
+	// Everything that can fail is settled before a single file is written. A
+	// failure after the copy leaves a half-install that a customer cannot
+	// reason about and an uninstaller has to guess at.
+	if panelURL == "" {
+		panelURL = defaultPanel
+	}
+
 	if code == "" {
 		code, err = ui.askJoinCode()
 		if err != nil {
@@ -100,5 +124,50 @@ func runSetup(ui *console, uninstall bool, code, panelURL, name string) error {
 		return fmt.Errorf("no join code was entered, so nothing was installed")
 	}
 
+	panelURL = strings.TrimSpace(panelURL)
+	if panelURL == "" {
+		panelURL, err = ui.askPanelURL()
+		if err != nil {
+			return err
+		}
+		panelURL = strings.TrimSpace(panelURL)
+	}
+
+	if err := checkPanelURL(panelURL); err != nil {
+		return err
+	}
+
 	return runInstall(ui, code, panelURL, name)
+}
+
+// checkPanelURL refuses an address that cannot work, before anything is
+// written.
+func checkPanelURL(raw string) error {
+	if raw == "" {
+		return fmt.Errorf(
+			"this installer does not know which panel to join, and no address was given.\n\n" +
+				"Ask your supplier for the panel address and run:\n" +
+				"  akconnect-setup.exe -panel https://their-address -code YOUR-JOIN-CODE")
+	}
+
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return fmt.Errorf("%q is not a web address. It should look like https://network.example.com", raw)
+	}
+
+	// The agent sends a device token on every call after enrolment. Over plain
+	// HTTP that token is readable by anything between here and the panel, so
+	// the agent refuses it — and finding that out now beats finding it out
+	// after the service has been registered.
+	if parsed.Scheme != "https" {
+		if parsed.Scheme == "http" {
+			return fmt.Errorf(
+				"%s is not secure, and the agent will not send a device token over it.\n\n"+
+					"Use https:// — if the panel has no certificate yet, that has to be fixed first.", raw)
+		}
+
+		return fmt.Errorf("%q should start with https://", raw)
+	}
+
+	return nil
 }

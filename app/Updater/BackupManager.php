@@ -280,7 +280,7 @@ final class BackupManager
 
                 $relative = substr($file->getPathname(), $workspaceLength);
 
-                if ($guard->isProtected($relative) || !$guard->isSafe($relative)) {
+                if ($guard->isWriteBlocked($relative) || !$guard->isSafe($relative)) {
                     $skipped++;
                     continue;
                 }

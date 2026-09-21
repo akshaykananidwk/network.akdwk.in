@@ -355,13 +355,13 @@ final class DeviceService
                 Relay::availableFor((string) ($device['region'] ?? ''))
             ),
             'coordinator' => [
-                'host' => Config::get('coordinator.public_host', Config::get('coordinator.host')),
-                'port' => (int) Config::get('coordinator.port', 8443),
+                'host' => CoordinatorSettings::agentHost(),
+                'port' => (int) CoordinatorSettings::current()['port'],
                 // The agent seals its announcements to this key, so only the
                 // coordinator can read the device token inside them. Its
                 // absence is why an agent refuses to announce rather than
                 // falling back to sending one in the clear.
-                'public_key' => (string) Config::get('coordinator.public_key', ''),
+                'public_key' => (string) CoordinatorSettings::current()['public_key'],
             ],
             'policy'      => [
                 // Stated explicitly in the config the agent consumes so the

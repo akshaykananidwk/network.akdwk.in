@@ -17,7 +17,8 @@ Every response has the same shape, so a client can branch on `success` alone.
 | Status | `error.code` | Means |
 |---|---|---|
 | 400 | `bad_request` | Malformed request |
-| 401 | `unauthenticated` | No credential, or one that is invalid, expired or revoked |
+| 401 | `no_credential` | **No credential arrived at all.** Usually the web server is not passing the `Authorization` header to PHP — on Apache with PHP-FPM that needs `CGIPassAuth On`. Not a reason to re-enrol a device |
+| 401 | `unauthenticated` | A credential arrived and was rejected: invalid, expired or revoked |
 | 402 | `limit_exceeded` | A plan limit was reached; the message names it |
 | 403 | `forbidden` | Authenticated, but the scopes or role do not permit this |
 | 404 | `not_found` | No such resource — **including one belonging to another customer** |

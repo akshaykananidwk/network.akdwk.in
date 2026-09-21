@@ -9,6 +9,12 @@
 set -euo pipefail
 
 VERSION="${1:-dev}"
+# The panel this pack belongs to. A join code does not carry it — it is a code
+# issued by one panel and means nothing without knowing which — so the
+# installer is stamped with it and a customer is asked one question rather than
+# two. Passed as the second argument, or taken from the installed panel's own
+# configuration.
+PANEL_URL="${2:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WINTUN_ZIP="${WINTUN_ZIP:-/tmp/wintun-check/wintun.zip}"
 STAGE="$ROOT/services/kit/pack"
@@ -21,6 +27,22 @@ WINTUN_AMD64_SHA="e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220daf
 WINTUN_ARM64_SHA="f7ba89005544be9d85231a9e0d5f23b2d15b3311667e2dad0debd344918a3f80"
 
 die() { echo "  ✗ $*" >&2; exit 1; }
+
+if [ -z "$PANEL_URL" ] && [ -f "$ROOT/config/config.php" ]; then
+    PANEL_URL="$(php -r '
+        $c = require $argv[1];
+        echo rtrim((string) ($c["app"]["url"] ?? ""), "/");
+    ' "$ROOT/config/config.php" 2>/dev/null)"
+fi
+
+case "$PANEL_URL" in
+    https://*) ;;
+    "") die "no panel URL. Pass it: build-windows-pack.sh $VERSION https://network.akdwk.in
+    Without it the installer cannot know which panel a join code belongs to, and
+    a customer would be asked for the address as well as the code." ;;
+    *) die "the panel URL must be https, not \"$PANEL_URL\".
+    The agent will not send a device token over plain HTTP." ;;
+esac
 
 [ -f "$WINTUN_ZIP" ] || die "Wintun archive not found at $WINTUN_ZIP.
     Download it:  curl -sSLo $WINTUN_ZIP https://www.wintun.net/builds/wintun-0.14.1.zip"
@@ -55,7 +77,7 @@ cp "$TMP/wintun/LICENSE.txt"          "$STAGE/LICENSE-wintun.txt"
 echo "$WINTUN_AMD64_SHA  $STAGE/wintun.dll"       | sha256sum -c - >/dev/null || die "amd64 wintun.dll checksum mismatch"
 echo "$WINTUN_ARM64_SHA  $STAGE/arm64/wintun.dll" | sha256sum -c - >/dev/null || die "arm64 wintun.dll checksum mismatch"
 
-echo "  building the installer"
+echo "  building the installer for $PANEL_URL"
 #
 # The payload goes into the source tree, because Go embeds at compile time and
 # there is no way to hand it a file from outside. The placeholders are put back
@@ -75,7 +97,8 @@ cp "$STAGE/wintun.dll"          "$PAYLOAD/wintun.dll"
     # windowsgui: double-clicking the installer must not open a console
     # window. Everything a customer sees is a dialog.
     GOTOOLCHAIN=local GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-        go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$VERSION" \
+        go build -trimpath \
+        -ldflags "-s -w -H=windowsgui -X main.version=$VERSION -X main.defaultPanel=$PANEL_URL" \
         -o "$STAGE/akconnect-setup.exe" ./cmd/akconnect-setup
 ) || die "could not build the installer"
 
@@ -85,7 +108,8 @@ cp "$STAGE/arm64/wintun.dll"          "$PAYLOAD/wintun.dll"
 (
     cd "$ROOT/services/agent"
     GOTOOLCHAIN=local GOOS=windows GOARCH=arm64 CGO_ENABLED=0 \
-        go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$VERSION" \
+        go build -trimpath \
+        -ldflags "-s -w -H=windowsgui -X main.version=$VERSION -X main.defaultPanel=$PANEL_URL" \
         -o "$STAGE/arm64/akconnect-setup.exe" ./cmd/akconnect-setup
 ) || die "could not build the arm64 installer"
 
@@ -94,6 +118,11 @@ restore_payload
 # The installer carries the agent inside it, so a build where the embedding
 # silently did nothing would produce a file a few hundred kilobytes long that
 # fails on a customer's machine. The agent alone is several megabytes.
+grep -qa -- "$PANEL_URL" "$STAGE/akconnect-setup.exe" \
+    || die "the panel URL is not in the built installer; the -X stamp did not take"
+grep -qa -- "$PANEL_URL" "$STAGE/arm64/akconnect-setup.exe" \
+    || die "the panel URL is not in the arm64 installer"
+
 setup_size="$(stat -c%s "$STAGE/akconnect-setup.exe")"
 agent_size="$(stat -c%s "$STAGE/akconnect-agent.exe")"
 [ "$setup_size" -gt "$agent_size" ] \

@@ -3,7 +3,7 @@
 What is built, what is stubbed, what is next. Kept honest — a plan that
 overstates itself is worse than no plan.
 
-Last updated: 2026-09-21 · version 1.1.1
+Last updated: 2026-09-22 · version 1.9.1
 
 ---
 
@@ -40,13 +40,27 @@ which the Phase 2 acceptance criteria both require.
 **Windows cannot be tested from this environment.** There is no Windows host,
 no hypervisor and no nested virtualisation, and Wine would give false results
 for every item that matters (DPAPI, Wintun, the service manager, the firewall,
-Defender). The Windows agent is written, cross-compiles, and has never
-executed. `services/kit/` is the way it gets tested: binaries, a runbook, and
+Defender). `services/kit/` is the way it gets tested: binaries, a runbook, and
 an evidence collector for someone with real Windows machines to run.
 
-One Windows defect was found by inspection: `wintun.dll` was never being
-shipped, and the agent would have died on first run inside a driver load. It
-now checks for it and says where to get it.
+**It has now been run on one.** DPAPI key storage, Wintun adapter creation,
+service install, the firewall rule, NRPT split DNS, the split-tunnel default
+route and coordinator discovery over the real internet all work. Three
+defects came back from that run — an agent that refused to start while waiting
+for approval, a service that failed in silence because it has no console, and a
+clash check that refused the overlay because of the agent's own adapter — and
+all three are fixed in 1.9.1 with regression tests that fail on 1.9.0. Gateway
+mode (Stage 13) and the installer `.exe` end to end (Stage 15) are still
+untested on real hardware.
+
+**And the panel has been deployed.** 1.9.0 went onto a real aaPanel VPS —
+Ubuntu 24.04, Apache 2.4 with PHP-FPM 8.3, MariaDB 10.11 — and returned seven
+more defects in one evening, every one of them invisible to a lab that ran
+entirely on PHP's built-in web server. 1.9.1 adds two container gates that
+reproduce six of them (`services/lab/webtarget/`, `services/lab/argon2target/`)
+and the first of those immediately found a seventh nobody had reported: an
+installation using a table prefix installed successfully and then served 503 to
+everything.
 
 ---
 
@@ -250,14 +264,14 @@ Listed so nobody discovers them the hard way.
 
 ## Next
 
-1. **Windows, on real hardware.** The pack is built and committed; nothing has
-   run on Windows, and nearly every customer device is Windows. This is the
-   item that decides whether the product can be sold at all. **Stage 15 — the
-   installer — is now the first stage to run**: it is what a customer
-   experiences, and everything before it tests pieces rather than the product.
-2. **Deploy, and pilot.** `DEPLOY.md` is the checklist. The panel on aaPanel at
-   network.akdwk.in, the coordinator and one relay on an India VPS, and then
-   the shop / hotel / 4G test against *that* rather than against the lab.
+1. **Put 1.9.1 on the production box, through the updater.** The ten defects
+   above are fixed and gated; none of that is worth anything until the panel
+   that found them is running the release that fixes them. The checks in
+   `DEPLOY.md` stage 1b are the acceptance test.
+2. **Stage 15 — the installer `.exe`, end to end.** It is what a customer
+   experiences, and the one thing in the pack that has still never been run on
+   Windows from double-click to uninstall. Uninstall leaving nothing behind
+   matters as much as install working.
 3. **Two sites on real ISPs, one on 4G.** Everything in §D and §H is one
    machine's network namespaces. It is real networking and it is not two ISPs.
    Stage 5 of DEPLOY.md is this.

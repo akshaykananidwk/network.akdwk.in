@@ -43,15 +43,30 @@ final class DB
         return self::$read;
     }
 
+    /**
+     * The configured table prefix.
+     *
+     * Resolved from configuration when nothing has connected yet, which is not
+     * a detail: the prefix used to be set only as a side effect of connect(),
+     * and the session handler builds its SQL *before* the first query opens
+     * the connection. On an installation with a prefix, every request began
+     * with "Table 'sessions' doesn't exist" and ended as a 503 — an install
+     * that completed successfully and then served nothing. Found by the Apache
+     * target, which installs with a prefix the way the installer offers one.
+     */
     public static function prefix(): string
     {
+        if (self::$prefix === '' && self::$write === null && self::$read === null) {
+            self::$prefix = (string) (Config::get('db.prefix') ?? Config::env('DB_PREFIX', ''));
+        }
+
         return self::$prefix;
     }
 
     /** Apply the configured table prefix. Used by schema-level helpers only. */
     public static function table(string $name): string
     {
-        return self::$prefix . $name;
+        return self::prefix() . $name;
     }
 
     /**

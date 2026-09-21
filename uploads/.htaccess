@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# Nothing here is ever executed, and nothing here is ever served.
+#
+# This directory holds files people upload. A .php file landing in it and being
+# executed by the web server is the shortest path from "an upload form" to
+# "somebody else's shell on the box", and it does not need the upload
+# validation to be wrong — only for it to be wrong once.
+#
+# So this is belt and braces on purpose: the handlers are removed, the engine
+# is turned off where mod_php would run it, and then everything is denied
+# anyway. Uploads are served by the application, which reads the file and sends
+# it with a Content-Type it chose.
+# ---------------------------------------------------------------------------
+Options -Indexes -ExecCGI
+
+<IfModule mod_php.c>
+    php_flag engine off
+</IfModule>
+<IfModule mod_php7.c>
+    php_flag engine off
+</IfModule>
+<IfModule mod_php8.c>
+    php_flag engine off
+</IfModule>
+
+# Under PHP-FPM the engine directives above do nothing, because Apache hands
+# the file to a separate process. Removing the handler and the type is what
+# actually stops it there.
+RemoveHandler .php .phtml .php3 .php4 .php5 .php7 .php8 .phps
+RemoveType .php .phtml .php3 .php4 .php5 .php7 .php8 .phps
+AddType text/plain .php .phtml .php3 .php4 .php5 .php7 .php8 .phps
+
+<IfModule mod_proxy_fcgi.c>
+    # Belt and braces again: even if a handler survives, refuse to proxy it.
+    <FilesMatch "\.(php|phtml|php3|php4|php5|php7|php8|phps)$">
+        SetHandler none
+        Require all denied
+    </FilesMatch>
+</IfModule>
+
+Require all denied

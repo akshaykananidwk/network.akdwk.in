@@ -69,6 +69,23 @@ func (c *console) askJoinCode() (string, error) {
 			"It looks like ABCD-EFGH-JKLM and is the only thing this needs.")
 }
 
+// askPanelURL is the fallback when the installer was not stamped with one.
+//
+// A customer should never see this: the pack they download is built by the
+// panel it belongs to. It exists so that somebody building the installer by
+// hand gets a question rather than a failure after files have been written.
+func (c *console) askPanelURL() (string, error) {
+	if c.silent {
+		return "", fmt.Errorf(
+			"this installer was built without a panel address and -silent means one cannot be asked for; " +
+				"pass -panel https://…")
+	}
+
+	return prompt(productName,
+		"Enter the address of the panel this computer should join.\n\n"+
+			"It looks like https://network.example.com and your supplier will have given it to you.")
+}
+
 // runAgentIn runs the agent and ignores what it said.
 func runAgentIn(dir string, args ...string) error {
 	_, err := runAgentOutput(dir, args...)

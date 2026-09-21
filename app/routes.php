@@ -129,6 +129,10 @@ $router->group('/admin', ['maintenance', 'auth'], static function (Router $route
     $router->post('/relays/{id:int}/delete', 'Admin\RelayController@destroy', ['csrf', 'can:relay.manage']);
 
     // ----------------------------------------------------- System → Updates
+    // Settings → Coordinator. DEPLOY.md Stage 3a sends an operator here.
+    $router->get('/coordinator', 'Admin\CoordinatorController@index', ['can:platform.settings'], 'admin.coordinator');
+    $router->post('/coordinator', 'Admin\CoordinatorController@update', ['csrf', 'can:platform.settings']);
+
     $router->get('/updates', 'Admin\UpdateController@index', ['can:update.manage'], 'admin.updates');
     $router->post('/updates/settings', 'Admin\UpdateController@saveSettings', ['csrf', 'can:update.manage']);
     $router->post('/updates/test-connection', 'Admin\UpdateController@testConnection', ['csrf', 'can:update.manage']);

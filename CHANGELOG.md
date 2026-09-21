@@ -6,6 +6,124 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.1] — 2026-09-22
+
+Ten defects a real aaPanel deployment found in one evening, and the gate that
+would have found them.
+
+Nothing here is new capability. 1.9.0 passed 73 lab scenarios, a 15-check
+cross-version update drill and a 409-assertion suite, and then failed on the
+first real server — because every one of those ran against PHP's built-in
+server, which reads no `.htaccess`, has no `mod_php`, passes every header
+straight through, and is built against libargon2. The lab was testing a stack
+nobody deploys.
+
+### Fixed
+
+**Every page was HTTP 500 under PHP-FPM.** The root `.htaccess` set
+`php_flag display_errors Off` and two `php_value` lines. Those are `mod_php`
+directives; under PHP-FPM Apache does not know them and returns 500 for the
+whole site. Now guarded by `<IfModule mod_php.c>` and its 7 and 8 variants, so
+they apply where they work and are ignored where they do not.
+
+**The webroot served `deploy/`, `docs/`, `.git` and every `.md` and `.sh`.**
+`DEPLOY.md` said to point the document root at `public/`; there is no `public/`
+and never was. The repository root is the webroot, and the `.htaccess` is what
+keeps it closed — so it now closes all of it, and `DEPLOY.md` describes the
+layout the product actually has.
+
+**An uploaded `.php` executed.** `uploads/` shipped with no `.htaccess` at all.
+It now ships with one: `ExecCGI` off, the PHP handler removed, `SetHandler
+none` for FastCGI, and `Require all denied` over the lot. Because `uploads/` is
+a protected path, the updater would normally skip it — `PathGuard` now carves
+out exactly this one file (`SHIPPED_CONTROLS`), writable but never deletable,
+and a post-update task installs it on sites updating from an older release.
+
+**The installer died creating the administrator.** `password_hash()` threw
+`ValueError: A thread value other than 1 is not supported by this
+implementation` on a PHP whose Argon2 comes from libsodium, which is what
+aaPanel compiles. Argon2id is now always `p=1`: one shape of hash everywhere,
+rather than a hash that depends on which machine made it and wants rehashing on
+every login on the other. A provider that still refuses falls back to bcrypt
+with a warning instead of taking the installation down.
+
+**Apache never passed the `Authorization` header to PHP.** Every agent call
+arrived looking unauthenticated, the panel answered "provide the device token
+as a Bearer token", and the agent read that as a revoked device and told the
+customer to reset — a working install reporting itself as a broken one. The
+`.htaccess` now carries `CGIPassAuth On` and a `SetEnvIf` fallback for older
+Apache; `Request` reads `REDIRECT_HTTP_AUTHORIZATION` and its doubly-redirected
+form; and a request with no credential at all is answered as `no_credential`,
+which says what is wrong rather than blaming the token.
+
+**A table prefix broke every request.** Found by the new Apache gate, not by
+the field: `DB::table()` was called by the session handler before anything had
+connected, and the prefix was only set as a side effect of connecting. An
+install with a prefix completed successfully and then served 503 to everything.
+
+**Registering a relay demanded a key relays do not have.** The form required a
+Curve25519 public key — a relay authenticates with `AKCONNECT_RELAY_SECRET` and
+has no such key — plus a TCP fallback port for a fallback that does not exist,
+and defaulted the port to 51820 when the control port is 9000. The two fields
+are gone, `relays.public_key` is nullable, and the port field says what it is.
+
+**A super admin could not create a network.** "Please correct the highlighted
+fields", with nothing highlighted: the actor has no tenant of their own, the
+form had no field to name one, and a validation error on a field that is not on
+the form was replaced by that generic sentence. There is now a customer
+selector, and a single validation error is shown as itself.
+
+**The agent refused to start while waiting for approval.** `up` — and therefore
+the service — exited immediately when local state said pending. The customer
+approved the device five minutes later and nothing happened, because the only
+thing that would have noticed had already stopped. The agent now waits and
+picks the approval up on its own. Transient panel failures do not end the wait;
+a device the panel has forgotten does, with the command that fixes it.
+
+**The Windows service failed silently.** A service has no console, so
+everything the agent printed went to a handle pointing at nothing. It now
+writes to `service.log` beside the state file, `status` prints where that is,
+and the Event Log source registers itself if it is missing.
+
+**Windows refused the overlay because of its own adapter.** "This machine is
+already on that network" — and the only 10.x route in the table was
+`10.50.0.2/32` on the AKConnect adapter the agent had just created. Our
+interface is now excluded by index and by alias, and a check that cannot run
+answers "free" rather than bricking the tunnel.
+
+**`akconnect-setup.exe` stopped after copying its files.** "--panel and
+--join-code are both required": the join code does not carry the panel address,
+and the customer had no way to know one was missing. The pack script stamps the
+address into the binary and verifies it is there; a build without one asks,
+before it writes anything.
+
+### Added
+
+**`services/lab/webtarget/`** — Apache 2.4 + PHP-FPM + MariaDB in a container,
+with the browser installer driven end to end by `curl` exactly as a customer
+would drive it, then signed in as the administrator it created — through
+mandatory two-factor enrolment — to render the pages the deployment needed.
+36 checks. Against 1.9.0 it fails 27 of them.
+
+**`services/lab/argon2target/`** — a PHP compiled without libargon2, so its
+Argon2 comes from libsodium, running the real `Crypto` class. It reproduces the
+production `ValueError` exactly. Against 1.9.0 it fails 4 of 6.
+
+**Settings → Coordinator** (`/admin/coordinator`) — host, port, public key and
+shared secret, validated, stored in the settings table so an update cannot lose
+them, secrets encrypted at rest. `DEPLOY.md` had been sending operators to a
+page that did not exist. The installer now asks for the public key too, and no
+longer defaults the coordinator to `127.0.0.1`.
+
+### Changed
+
+`DEPLOY.md`: the document root is the repository root; the worker cron uses
+`/www/server/php/83/bin/php` and runs as `www`, not root, or `storage/` fills
+with root-owned files; and the nginx equivalents of the `.htaccess` rules are
+spelled out for anyone not on Apache.
+
+---
+
 ## [1.9.0] — 2026-09-21
 
 The release the pilot runs on. An installer a customer can use, a deployment

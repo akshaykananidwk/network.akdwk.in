@@ -107,6 +107,9 @@ platform.
 | `segno` (Python) | Cross-checking the QR encoder against a reference | BSD 3-Clause |
 | `zxing-cpp` (Python) | Decoding generated QR codes to prove they scan | Apache 2.0 |
 | MariaDB | Running the database tests | GPL 2.0 — a *server* the platform talks to over a protocol, not a linked library |
+| Apache httpd, in a container | The web gate: the panel has to be tested on the stack it is deployed on | Apache 2.0 |
+| PHP, built from source in a container | The Argon2 gate needs a build whose Argon2 comes from libsodium; no packaged PHP has one | PHP Licence 3.01 |
+| Debian base images | Both gate containers | Individual package licences; nothing is redistributed — the images are built locally and thrown away |
 
 ---
 

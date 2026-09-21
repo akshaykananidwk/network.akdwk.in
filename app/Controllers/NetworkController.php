@@ -10,6 +10,7 @@ use App\Core\Response;
 use App\Core\Validator;
 use App\Models\JoinCode;
 use App\Models\Network;
+use App\Models\Tenant;
 use App\Services\AclService;
 use App\Services\AuditService;
 use App\Services\IpamService;
@@ -55,6 +56,13 @@ final class NetworkController extends Controller
         return $this->view('networks.form', [
             'title'   => 'New network',
             'network' => null,
+            // Only a platform administrator sees this: they have no tenant of
+            // their own, so the form has to ask which customer the network is
+            // for. Shown even when the list is empty, because "no selector"
+            // and "no customers" look identical from the other side of the
+            // screen and only one of them is fixable by the person looking.
+            'is_platform' => Auth::tenantId() === null,
+            'tenants'     => Auth::tenantId() === null ? Tenant::allActive() : [],
         ]);
     }
 
@@ -71,7 +79,8 @@ final class NetworkController extends Controller
             'auto_assign_ip'       => 'nullable|bool',
             'auto_approve_devices' => 'nullable|bool',
             'acl_default_action'   => 'nullable|in:allow,deny',
-        ], ['cidr' => 'Address range', 'mtu' => 'MTU']);
+            'tenant_id'            => 'nullable|int',
+        ], ['cidr' => 'Address range', 'mtu' => 'MTU', 'tenant_id' => 'Customer']);
 
         $data['dns'] = $this->parseDnsList((string) $request->input('dns', ''));
 
@@ -107,6 +116,9 @@ final class NetworkController extends Controller
         return $this->view('networks.form', [
             'title'   => 'Edit network',
             'network' => Network::findOrFail((int) $params['id']),
+            // A network never changes customer, so the selector is create-only.
+            'is_platform' => false,
+            'tenants'     => [],
         ]);
     }
 

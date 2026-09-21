@@ -4,16 +4,16 @@ declare(strict_types=1);
 
 namespace App\Controllers\Api;
 
-use App\Core\Config;
 use App\Core\Crypto;
 use App\Core\Logger;
-use App\Middleware\RateLimitMiddleware;
 use App\Core\Request;
 use App\Core\Response;
+use App\Middleware\RateLimitMiddleware;
 use App\Models\AgentRelease;
 use App\Models\Device;
 use App\Models\Network;
 use App\Models\UsageCounter;
+use App\Services\CoordinatorSettings;
 use App\Services\DeviceService;
 
 /**
@@ -314,8 +314,8 @@ final class AgentController
                 'virtual_ip'   => $peer['virtual_ip'],
             ], $peers),
             'coordinator' => [
-                'host' => Config::get('coordinator.public_host', Config::get('coordinator.host')),
-                'port' => (int) Config::get('coordinator.port', 8443),
+                'host' => CoordinatorSettings::agentHost(),
+                'port' => (int) CoordinatorSettings::current()['port'],
             ],
         ]);
     }
@@ -368,7 +368,7 @@ final class AgentController
      */
     private function signConfig(array $config): ?string
     {
-        $secret = (string) Config::get('coordinator.signing_key', '');
+        $secret = (string) CoordinatorSettings::current()['signing_key'];
         if ($secret === '') {
             return null;
         }

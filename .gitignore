@@ -18,6 +18,9 @@
 # User content
 /uploads/*
 !/uploads/.gitkeep
+# The rule that stops an uploaded .php from executing. It belongs in the
+# repository and in the update manifest, not on each operator's server.
+!/uploads/.htaccess
 
 # Installer lock
 /install/install.lock

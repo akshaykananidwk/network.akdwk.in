@@ -4,10 +4,10 @@ declare(strict_types=1);
 
 namespace App\Middleware;
 
-use App\Core\Config;
 use App\Core\Logger;
 use App\Core\Request;
 use App\Core\Response;
+use App\Services\CoordinatorSettings;
 
 /**
  * Authenticates the coordinator service to the panel (§7.3).
@@ -28,7 +28,7 @@ final class CoordinatorMiddleware
 
     public static function handle(Request $request): ?Response
     {
-        $secret = (string) Config::get('coordinator.shared_secret', '');
+        $secret = (string) CoordinatorSettings::current()['shared_secret'];
         if ($secret === '') {
             // Refusing is the safe default: an unconfigured secret must not
             // silently become an unauthenticated endpoint.

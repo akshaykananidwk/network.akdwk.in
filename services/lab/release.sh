@@ -2,17 +2,33 @@
 #
 # Everything that has to be true before a release ships, in one command.
 #
-# Three gates, in the order that fails cheapest first:
+# Five gates, in the order that fails cheapest first:
 #
 #   1. the test suites — PHP and Go, including -race
-#   2. the networking gate — run-all.sh, every scenario
-#   3. the update gate — dogfood.sh, a real cross-version install,
+#   2. the web gate — Apache + PHP-FPM + MariaDB, installed through the
+#      browser installer exactly as a customer would
+#   3. the Argon2 gate — a PHP whose Argon2 comes from libsodium
+#   4. the networking gate — run-all.sh, every scenario
+#   5. the update gate — dogfood.sh, a real cross-version install,
 #      update and rollback in a scratch database
 #
-# Any one of them red means the release does not ship. The third is the newest
-# and exists because 1.6.0's dogfood wrote zero files: the release was built on
-# the machine it was installed on, so the tree already matched and the
-# file-writing path — where the 1.3.x P1 lived — was never entered.
+# plus the Windows pack build, which is the part of the customer installer that
+# can be checked without a Windows machine.
+#
+# Any one of them red means the release does not ship.
+#
+# The update gate exists because 1.6.0's dogfood wrote zero files: the release
+# was built on the machine it was installed on, so the tree already matched and
+# the file-writing path — where the 1.3.x P1 lived — was never entered.
+#
+# The web and Argon2 gates exist because 1.9.0 shipped ten defects that a real
+# aaPanel deployment found in one evening and that this lab could not have
+# found at all: everything here ran on PHP's built-in server, which reads no
+# .htaccess, has no mod_php, passes every header through, and is built against
+# libargon2. Between them those two gates would have caught six of the ten.
+#
+# Both need Docker. Without it they are skipped, loudly — a gate that quietly
+# does nothing is worse than no gate.
 #
 #   ./services/lab/release.sh
 set -uo pipefail
@@ -21,6 +37,7 @@ LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$LAB/../.." && pwd)"
 
 FAILED=()
+SKIPPED=()
 run_gate() {
     local name=$1
     shift
@@ -53,6 +70,40 @@ go_suites() {
 
 run_gate "test suites (PHP)"        php_suite "$@"
 run_gate "test suites (Go, -race)"  go_suites
+web_gate() {
+    if ! docker info >/dev/null 2>&1; then
+        printf '  \033[33mSKIPPED\033[0m — docker is not running, so Apache and PHP-FPM cannot be built.\n'
+        printf '  This gate covers six of the ten defects 1.9.0 shipped. Do not ship without it.\n'
+        SKIPPED+=("web gate")
+
+        return 0
+    fi
+
+    "$LAB/webtarget/run.sh"
+}
+
+argon2_gate() {
+    if ! docker info >/dev/null 2>&1; then
+        printf '  \033[33mSKIPPED\033[0m — docker is not running.\n'
+        SKIPPED+=("Argon2 gate")
+
+        return 0
+    fi
+
+    "$LAB/argon2target/run.sh"
+}
+
+# The Windows installer's own build. Running the .exe needs Windows, which
+# this lab does not have; what can be checked here is the half that failed in
+# the field — a build that did not know which panel to join, and stopped after
+# it had already copied its files.
+windows_pack() {
+    "$REPO/services/kit/build-windows-pack.sh" >/dev/null
+}
+
+run_gate "Windows pack builds and is stamped" windows_pack
+run_gate "web gate (Apache + PHP-FPM)" web_gate
+run_gate "Argon2 gate (libsodium)"     argon2_gate
 run_gate "networking gate"          "$LAB/run-all.sh"
 run_gate "update gate"              "$LAB/dogfood.sh"
 
@@ -63,4 +114,10 @@ if [ ${#FAILED[@]} -gt 0 ]; then
     exit 1
 fi
 
-printf '  \033[32mAll four gates clean.\033[0m This build may ship.\n\n'
+if [ ${#SKIPPED[@]} -gt 0 ]; then
+    printf '  \033[33m%d gate(s) SKIPPED: %s\033[0m\n' "${#SKIPPED[@]}" "${SKIPPED[*]}"
+    printf '  Nothing failed, but this is not a clean run. Start Docker and do it again.\n\n'
+    exit 1
+fi
+
+printf '  \033[32mAll gates clean.\033[0m This build may ship.\n\n'

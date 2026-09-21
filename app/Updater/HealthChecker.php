@@ -7,6 +7,7 @@ namespace App\Updater;
 use App\Core\Config;
 use App\Core\DB;
 use App\Core\Logger;
+use App\Services\CoordinatorSettings;
 
 /**
  * Post-update verification (§9.4 step 10).
@@ -200,8 +201,9 @@ final class HealthChecker
         });
 
         $this->check('Coordinator reachable', false, function (): string {
-            $host = (string) Config::get('coordinator.host', '');
-            $port = (int) Config::get('coordinator.port', 0);
+            $coordinator = CoordinatorSettings::current();
+            $host = (string) $coordinator['host'];
+            $port = (int) $coordinator['port'];
             if ($host === '' || $port === 0) {
                 return 'skipped (not configured)';
             }

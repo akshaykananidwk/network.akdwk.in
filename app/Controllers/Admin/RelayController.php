@@ -25,27 +25,28 @@ final class RelayController extends Controller
 
     public function store(Request $request): Response
     {
+        // No public key and no TCP port.
+        //
+        // A relay authorises sessions from the coordinator's HMAC ticket and
+        // has no keypair at all; the field used to be required, so registering
+        // a real relay meant inventing one, which a production deployment did.
+        // TCP fallback is not implemented, so a port for it is a number with
+        // nothing behind it.
         $data = Validator::validate($request->all(), [
             'name'          => 'required|string|max:120',
             'region'        => 'required|string|max:32',
             'host'          => 'required|hostname',
             'port'          => 'required|port',
-            'tcp_port'      => 'nullable|port',
-            'public_key'    => 'required|string|max:64',
             'capacity_mbps' => 'nullable|int|min:1',
-        ], ['public_key' => 'Relay public key', 'host' => 'Hostname']);
-
-        if (!Crypto::isValidCurve25519PublicKey((string) $data['public_key'])) {
-            return $this->back($request, '', 'The relay public key must be a base64-encoded 32-byte Curve25519 key.');
-        }
+        ], ['host' => 'Hostname', 'port' => 'Control port']);
 
         $relayId = Relay::create([
             'name'          => $data['name'],
             'region'        => strtolower((string) $data['region']),
             'host'          => $data['host'],
             'port'          => (int) $data['port'],
-            'tcp_port'      => (int) ($data['tcp_port'] ?? 443),
-            'public_key'    => $data['public_key'],
+            'tcp_port'      => 0,
+            'public_key'    => null,
             'capacity_mbps' => (int) ($data['capacity_mbps'] ?? 100),
             'status'        => 'active',
         ]);

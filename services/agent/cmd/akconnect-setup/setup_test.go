@@ -79,3 +79,54 @@ func TestOutputIsTrimmedForADialog(t *testing.T) {
 type errNotWindowsForTest struct{}
 
 func (errNotWindowsForTest) Error() string { return "boom" }
+
+// ---------------------------------------------------------------- 1.9.1
+
+// Defect 7. The first real customer run of akconnect-setup.exe copied its
+// files and then stopped with "--panel and --join-code are both required".
+// The join code does not carry the panel address, and a customer holding a
+// join code has no way to know one is missing — so the pack script stamps the
+// address into the binary at build time, and the installer asks for it when
+// the stamp is empty rather than failing after it has written files.
+func TestThePanelAddressIsCheckedBeforeAnythingIsWritten(t *testing.T) {
+	if err := checkPanelURL(""); err == nil {
+		t.Fatal("an empty panel address was accepted")
+	} else {
+		// Whoever sees this is holding a build that should have been stamped.
+		for _, want := range []string{"-panel", "-code"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("the refusal does not say how to supply it (%q missing): %s", want, err)
+			}
+		}
+	}
+
+	if err := checkPanelURL("http://panel.example.com"); err == nil {
+		t.Fatal("a plain-HTTP panel was accepted; the agent will not send a token over it")
+	} else if !strings.Contains(err.Error(), "https://") {
+		t.Fatalf("the refusal does not name the fix: %s", err)
+	}
+
+	for _, bad := range []string{"panel.example.com", "not a url at all", "ftp://panel.example.com"} {
+		if err := checkPanelURL(bad); err == nil {
+			t.Fatalf("checkPanelURL accepted %q", bad)
+		}
+	}
+
+	if err := checkPanelURL("https://net.example.com"); err != nil {
+		t.Fatalf("a good address was refused: %v", err)
+	}
+}
+
+// The stamp itself. A build with an empty defaultPanel is the one that shipped
+// and failed; the pack script sets it with -X and verifies the string is in
+// the binary, and this is the compile-time half of that contract.
+func TestTheDefaultPanelIsAStampableVariable(t *testing.T) {
+	// Assigning to it is what -ldflags -X does; a constant would not compile.
+	saved := defaultPanel
+	defer func() { defaultPanel = saved }()
+
+	defaultPanel = "https://net.example.com"
+	if err := checkPanelURL(defaultPanel); err != nil {
+		t.Fatalf("a stamped address is not usable: %v", err)
+	}
+}

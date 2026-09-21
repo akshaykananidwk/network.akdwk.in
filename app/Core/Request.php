@@ -154,6 +154,21 @@ final class Request
         return is_array($file) ? $file : null;
     }
 
+    /**
+     * One value out of the server environment.
+     *
+     * Exposed because the auth middleware needs SERVER_SOFTWARE to tell an
+     * Apache-with-FastCGI deployment — the one that drops the Authorization
+     * header — apart from everything else, and reaching into $_SERVER from a
+     * middleware would put a second source of request state in the codebase.
+     */
+    public function server(string $key): ?string
+    {
+        $value = $this->server[$key] ?? null;
+
+        return is_scalar($value) ? (string) $value : null;
+    }
+
     public function header(string $name): ?string
     {
         $key = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
@@ -165,9 +180,51 @@ final class Request
         return is_scalar($value) ? (string) $value : null;
     }
 
+    /**
+     * The Authorization header, wherever this web server left it.
+     *
+     * Apache does not pass it to FastCGI unless it is told to. Told to with
+     * `CGIPassAuth`, it arrives as HTTP_AUTHORIZATION. Told to with the older
+     * `SetEnvIf` trick, or moved by a rewrite, it arrives as
+     * REDIRECT_HTTP_AUTHORIZATION — sometimes with a REDIRECT_ prefix for
+     * every internal redirect the request went through, which is why this
+     * walks a list rather than checking one alternative.
+     *
+     * A production deployment on Apache + PHP-FPM had every agent call arrive
+     * with no credentials because of this. From the panel's side the requests
+     * simply looked unauthenticated, and the agent read that as a revoked
+     * device and told the customer to run `reset` — which would have destroyed
+     * a working device's identity to fix a web server setting.
+     */
+    public function authorizationHeader(): ?string
+    {
+        foreach ([
+            'HTTP_AUTHORIZATION',
+            'REDIRECT_HTTP_AUTHORIZATION',
+            'REDIRECT_REDIRECT_HTTP_AUTHORIZATION',
+        ] as $key) {
+            $value = $this->server[$key] ?? null;
+            if (is_scalar($value) && (string) $value !== '') {
+                return (string) $value;
+            }
+        }
+
+        // Last resort, and only where the server offers it: some SAPIs expose
+        // the original headers when the environment does not.
+        if (function_exists('apache_request_headers')) {
+            foreach (apache_request_headers() as $name => $value) {
+                if (strcasecmp($name, 'Authorization') === 0 && is_scalar($value) && (string) $value !== '') {
+                    return (string) $value;
+                }
+            }
+        }
+
+        return null;
+    }
+
     public function bearerToken(): ?string
     {
-        $header = $this->header('Authorization');
+        $header = $this->authorizationHeader();
         if ($header !== null && preg_match('/^Bearer\s+(\S+)$/i', $header, $m) === 1) {
             return $m[1];
         }

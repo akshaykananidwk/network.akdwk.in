@@ -671,7 +671,10 @@ Copy `akconnect-setup.exe` to the desktop. Double-click it. Nothing else.
 - **SmartScreen blocks it** with "Windows protected your PC". Expected while
   unsigned — click More info → Run anyway, and tell me it happened, because it
   is the single strongest argument for buying a certificate.
-- **The box asks for anything except the join code.** It must not.
+- **The box asks for anything except the join code.** It must not — in
+  particular not for the panel address, which the installer is stamped with at
+  build time. If it does ask, the pack was built without one and I need to
+  know, because that is what failed the first time.
 
 ```powershell
 .\collect.ps1 -Stage 15a-after-install
@@ -687,6 +690,48 @@ Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "*Wintun*" }
 .\collect.ps1 -Stage 15b-installed
 ```
 
+### 15c — The service says what it is doing
+
+A service has no console, so until 1.9.1 everything the agent printed went
+nowhere and a service that started and stopped did it in silence. Two places
+now say why:
+
+```powershell
+.\akconnect-agent.exe status
+Get-Content "$env:ProgramData\AKConnect\service.log" -Tail 30
+Get-EventLog -LogName Application -Source AKConnectAgent -Newest 10 |
+    Format-List TimeGenerated, EntryType, Message
+```
+
+**Expect:** `status` prints a `Service log:` line; the log itself has the
+agent's own output; and the Event Log has at least one `AKConnect agent
+started` entry.
+
+**The failure to report:** the service shows as Stopped and *neither* of those
+has anything in it. That is the 1.9.0 behaviour and it should not be possible
+any more.
+
+### 15d — Waiting for approval does not stop the service
+
+Install on a machine whose device the panel has **not** approved yet, then:
+
+```powershell
+Get-Service AKConnectAgent
+```
+
+**Expect:** `Running`. It is waiting, not failing. Now approve the device in
+the panel and wait up to a minute without touching the machine:
+
+```powershell
+.\akconnect-agent.exe status
+.\collect.ps1 -Stage 15d-approved-while-waiting
+```
+
+**Expect:** the agent has picked the approval up on its own, has an overlay
+address, and the adapter is up. **Nobody should have had to restart anything.**
+On 1.9.0 the service exited within a second of starting and approving the
+device changed nothing.
+
 **Expect:** the service Running and StartType Automatic; `akconnect-agent.exe`,
 `wintun.dll` and `uninstall.txt` in the folder and nothing else; one firewall
 rule; one adapter.
@@ -695,20 +740,20 @@ rule; one adapter.
 beside the agent. It is carried inside the installer precisely so a customer
 never downloads a driver themselves.
 
-### 15c — Approve it, and check it works
+### 15e — Approve it, and check it works
 
 Approve the device on the panel, wait 30 seconds, then:
 
 ```powershell
 .kconnect-agent.exe status
 ping -n 4 <a peer's overlay address>
-.\collect.ps1 -Stage 15c-connected
+.\collect.ps1 -Stage 15e-connected
 ```
 
 **Expect:** a peer, a handshake, and a reply. This is the whole product working
 from a customer's point of view: one file, one code, one approval.
 
-### 15d — Uninstall, and prove nothing is left
+### 15f — Uninstall, and prove nothing is left
 
 ```powershell
 .kconnect-setup.exe -uninstall
@@ -727,7 +772,7 @@ netsh advfirewall firewall show rule name="AKConnect Agent (WireGuard UDP)"
 Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "*Wintun*" }
 Get-DnsClientNrptRule | Format-Table -AutoSize Namespace, NameServers, Comment
 Get-PnpDevice -Class Net | Where-Object { $_.FriendlyName -like "*Wintun*" } | Format-Table -AutoSize FriendlyName, Status
-.\collect.ps1 -Stage 15d-after-uninstall
+.\collect.ps1 -Stage 15f-after-uninstall
 ```
 
 **Expect every one of these to come back empty**: no service, neither folder,
@@ -743,7 +788,7 @@ are the ones that get noticed months later by somebody else's IT person:
   software from is not acceptable, and I would treat it as a security finding
   rather than a tidiness one.
 
-### 15e — Install again over the top
+### 15g — Install again over the top
 
 ```powershell
 .kconnect-setup.exe
@@ -756,7 +801,7 @@ firewall rules or a file it could not replace because it was in use.
 ```powershell
 Get-Service AKConnectAgent | Format-List Name, Status
 netsh advfirewall firewall show rule name="AKConnect Agent (WireGuard UDP)" | Select-String "Rule Name"
-.\collect.ps1 -Stage 15e-reinstall
+.\collect.ps1 -Stage 15g-reinstall
 ```
 
 **Expect:** one service, one rule.

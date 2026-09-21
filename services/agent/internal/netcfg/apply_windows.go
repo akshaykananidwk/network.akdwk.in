@@ -5,7 +5,6 @@ package netcfg
 import (
 	"fmt"
 	"net/netip"
-	"strings"
 )
 
 // On Windows the address and routes go on through netsh, which is present on
@@ -94,31 +93,23 @@ func hostMask(plan *Plan) string {
 }
 
 // occupiedElsewhere reports whether this exact prefix is already routed out of
-// some other adapter.
-//
-// Get-NetRoute rather than `netsh interface ipv4 show route`, because netsh
-// prints localised column headings and the agent has to work on a Hindi or
-// Gujarati Windows install as well as an English one. Get-NetRoute returns
-// objects, so nothing is parsed out of translated text.
+// some other adapter. The statement it runs and the reading of the answer live
+// in clash.go, where they can be tested away from Windows.
 func occupiedElsewhere(ifaceName string, prefix netip.Prefix) bool {
-	if strings.ContainsAny(ifaceName, "'`$") {
-		// Our own interface name, so this should not happen; refusing to build
-		// a statement out of it is cheaper than reasoning about whether it
-		// can.
-		return true
-	}
+	occupied, _ := inspectRoute(ifaceName, prefix)
 
-	statement := fmt.Sprintf(
-		`$r = Get-NetRoute -DestinationPrefix '%s' -ErrorAction SilentlyContinue | `+
-			`Where-Object { $_.InterfaceAlias -ne '%s' }; if ($r) { Write-Output 'occupied' }`,
-		prefix.String(), ifaceName)
+	return occupied
+}
+
+// inspectRoute returns the verdict and what the operating system actually
+// said, so a refusal can be explained.
+func inspectRoute(ifaceName string, prefix netip.Prefix) (bool, string) {
+	statement, ok := routeQueryStatement(ifaceName, prefix.String())
+	if !ok {
+		return false, "the interface name is not one a statement can be built from"
+	}
 
 	out, err := outputPowerShell(statement)
-	if err != nil {
-		// Same reasoning as on Linux: a routing table we cannot read is one we
-		// do not overwrite.
-		return true
-	}
 
-	return strings.Contains(out, "occupied")
+	return interpretRouteQuery(out, err)
 }

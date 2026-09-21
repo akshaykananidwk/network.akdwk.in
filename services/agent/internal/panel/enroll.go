@@ -58,6 +58,19 @@ type ClaimResponse struct {
 	PollAfter int `json:"-"`
 }
 
+// PollAfterOrDefault is how long to wait before asking again.
+//
+// Fifteen seconds when the panel says nothing, which it does on an error — and
+// an error is exactly when a caller must not fall through to a zero delay and
+// spin against a panel that is already struggling.
+func (c *ClaimResponse) PollAfterOrDefault() int {
+	if c == nil || c.PollAfter <= 0 {
+		return 15
+	}
+
+	return c.PollAfter
+}
+
 // ErrNotEnrolled means the panel has no record of this public key. Re-enrolling
 // is the only way forward, so it is distinguished from a transient failure.
 var ErrNotEnrolled = errors.New("the panel has no enrolment for this device key")
@@ -81,7 +94,12 @@ func (c *Client) Claim(ctx context.Context, deviceUID, publicKey string) (*Claim
 			return nil, ErrNotEnrolled
 		}
 
-		return nil, err
+		// The response is not usable, but the panel's retry hint is: a panel
+		// in maintenance says when to come back, and a device waiting for
+		// approval should honour that rather than fall back to a fixed
+		// interval it invented. The error still says not to trust anything
+		// else in here.
+		return &ClaimResponse{PollAfter: pollAfter}, err
 	}
 
 	out.PollAfter = pollAfter

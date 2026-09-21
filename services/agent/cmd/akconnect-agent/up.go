@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/netip"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/state"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/tunnel"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/wgkey"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/winsvc"
 )
 
 func runUp(ctx context.Context, args []string) error {
@@ -39,7 +41,20 @@ func runUp(ctx context.Context, args []string) error {
 		return err
 	}
 
-	logger := log.New(os.Stdout, "", log.LstdFlags)
+	// Under the service control manager there is no console, so anything
+	// written to stdout is written to a handle pointing at nothing. That is
+	// how the first real Windows install presented: the service started,
+	// failed and stopped, in silence. A service writes to a file instead.
+	out := io.Writer(os.Stdout)
+	if winsvc.IsService() {
+		file, _, err := state.OpenServiceLog()
+		if err == nil {
+			defer file.Close()
+			out = file
+		}
+	}
+
+	logger := log.New(out, "", log.LstdFlags)
 	logf := func(format string, a ...any) { logger.Printf(format, a...) }
 
 	session, err := newSession(*iface, *port, *verbose, logf)
@@ -111,9 +126,13 @@ func newSession(iface string, port int, verbose bool, logf func(string, ...any))
 	if !st.Enrolled() {
 		return nil, errors.New("this device is not enrolled; run 'akconnect-agent enroll' first")
 	}
-	if !st.Approved() {
-		return nil, errors.New("this device has not been approved yet; an administrator must authorise it (R4)")
-	}
+
+	// Deliberately *not* refused when the device is enrolled and waiting for
+	// approval. It used to be, and the consequence on Windows was that the
+	// service started, exited within a second and left the machine looking
+	// broken: an administrator approving the device five minutes later changed
+	// nothing, because the only thing that would have noticed had already
+	// stopped. run() waits instead — see awaitApproval.
 
 	keyStore, err := keystore.Open()
 	if err != nil {
@@ -155,9 +174,23 @@ func (s *session) close() {
 
 // run fetches configuration, brings the tunnel up, then keeps both current.
 func (s *session) run(ctx context.Context) error {
-	priv, _, _, err := keystore.LoadOrCreate(s.keyStore)
+	priv, pub, _, err := keystore.LoadOrCreate(s.keyStore)
 	if err != nil {
 		return err
+	}
+
+	// R4 says no device is trusted until an administrator approves it, and
+	// this is the waiting room. A service that exited here instead left a
+	// customer's machine looking broken for as long as it took somebody to
+	// click Approve — and then still broken, because nothing was left running
+	// to notice.
+	if !s.st.Approved() {
+		if err := s.awaitApproval(ctx, pub.Base64()); err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
 	}
 
 	cfg, pollAfter, err := s.client.FetchConfig(ctx, 0)
@@ -382,11 +415,93 @@ func (s *session) rememberPeerNames(cfg *panel.Config) {
 // explain turns an API failure into something an operator can act on.
 func (s *session) explain(err error) error {
 	var apiErr *panel.APIError
-	if errors.As(err, &apiErr) && apiErr.Unauthorized() {
+	if !errors.As(err, &apiErr) {
+		return err
+	}
+
+	// The panel received no credential at all. The token is almost certainly
+	// fine and the request never carried it — Apache drops the Authorization
+	// header on its way to PHP-FPM unless it is configured not to. Telling a
+	// customer to reset here destroys a working enrolment and changes nothing.
+	if apiErr.NoCredential() {
+		return fmt.Errorf(
+			"the panel received no credential from this device, which usually means the web server "+
+				"is not passing the Authorization header to PHP.\n"+
+				"On Apache with PHP-FPM that is 'CGIPassAuth On' in the panel's .htaccess. "+
+				"Do NOT run 'reset' — the token on this machine is probably fine.\n"+
+				"The panel said: %s", apiErr.Message)
+	}
+
+	if apiErr.Unauthorized() {
 		return fmt.Errorf(
 			"the panel rejected this device's token (%s) — it has most likely been revoked; "+
 				"run 'akconnect-agent reset' and enrol again if that is unexpected", apiErr.Message)
 	}
 
 	return err
+}
+
+// awaitApproval polls the panel until an administrator lets this device in.
+//
+// It honours the interval the panel asks for rather than choosing one, and it
+// keeps going: a device left pending overnight has to be connected in the
+// morning without anybody touching it.
+//
+// The panel client is rebuilt afterwards, because it was constructed without a
+// device token — there was none — and every call after this needs one.
+func (s *session) awaitApproval(ctx context.Context, publicKey string) error {
+	s.logf("waiting for an administrator to approve this device; nothing is reachable until they do (R4)")
+
+	attempts := 0
+
+	for {
+		claim, err := s.client.Claim(ctx, s.st.DeviceUID, publicKey)
+		switch {
+		case errors.Is(err, panel.ErrNotEnrolled):
+			// The panel has no record of this key. Re-enrolling is the only
+			// way forward, and it needs a person, so saying so and stopping is
+			// the honest outcome.
+			return fmt.Errorf("the panel no longer recognises this device; run 'akconnect-agent reset' and enrol again")
+		case err != nil:
+			// Everything else is transient until proven otherwise: a panel
+			// being restarted, a certificate being renewed, a laptop on a
+			// train. Reported at a decreasing rate so an overnight wait does
+			// not fill the log.
+			if attempts < 3 || attempts%20 == 0 {
+				s.logf("could not reach the panel while waiting for approval: %v", s.explain(err))
+			}
+		case claim.Authorized:
+			s.st.DeviceToken = claim.DeviceToken
+			s.st.VirtualIP = claim.VirtualIP
+			if err := s.stateSt.Save(s.st); err != nil {
+				return err
+			}
+
+			client, err := panel.New(panel.Options{
+				BaseURL:   s.st.PanelURL,
+				Token:     s.st.DeviceToken,
+				UserAgent: "akconnect-agent/" + version,
+			})
+			if err != nil {
+				return err
+			}
+			s.client = client
+
+			s.logf("approved; address on the overlay is %s", claim.VirtualIP)
+
+			return nil
+		case attempts == 0:
+			s.logf("still waiting for approval")
+		}
+
+		attempts++
+
+		delay := time.Duration(claim.PollAfterOrDefault()) * time.Second
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(delay):
+		}
+	}
 }

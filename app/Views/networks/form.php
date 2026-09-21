@@ -1,5 +1,7 @@
 <?php
 /** @var array<string,mixed>|null $network */
+/** @var list<array<string,mixed>> $tenants */
+/** @var bool $is_platform */
 declare(strict_types=1);
 \App\Core\View::layout('layouts.app');
 
@@ -14,6 +16,30 @@ $dns = $isEdit && is_array($network['dns_json'] ?? null) ? implode(', ', $networ
 
     <form method="post" action="<?= e($action) ?>" class="form">
         <?= csrf_field() ?>
+
+<?php if (!$isEdit && ($is_platform ?? false)): ?>
+        <div class="field">
+            <label for="tenant_id">Customer</label>
+            <select id="tenant_id" name="tenant_id" required <?= ($tenants ?? []) === [] ? 'disabled' : '' ?>>
+                <option value="">Choose a customer&hellip;</option>
+                <?php foreach (($tenants ?? []) as $tenant): ?>
+                    <option value="<?= (int) $tenant['id'] ?>"
+                        <?= old('tenant_id', '') === (string) $tenant['id'] ? 'selected' : '' ?>>
+                        <?= e((string) $tenant['company_name']) ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+            <?php if (($tenants ?? []) === []): ?>
+                <p class="field-hint">
+                    There are no active customers yet. <a href="<?= e(url('admin/tenants')) ?>">Add one</a>
+                    first — a network has to belong to somebody.
+                </p>
+            <?php else: ?>
+                <p class="field-hint">You are signed in as a platform administrator, so the network needs an owner.</p>
+            <?php endif; ?>
+            <?php if (field_error('tenant_id') !== ''): ?><p class="field-error"><?= e(field_error('tenant_id')) ?></p><?php endif; ?>
+        </div>
+<?php endif; ?>
 
         <div class="field">
             <label for="name">Name</label>

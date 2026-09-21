@@ -81,17 +81,26 @@ func removePlan(ifaceName string, plan *Plan) error {
 func occupiedElsewhere(ifaceName string, prefix netip.Prefix) bool {
 	out, err := exec.Command("ip", "-o", "route", "show", "exact", prefix.String()).Output()
 	if err != nil {
-		// If the routing table cannot be read, the safe answer is to leave it
-		// alone. Guessing "nothing is there" is how a support laptop loses
-		// the LAN it is sitting on.
-		return true
+		// A prefix is occupied only when a route for it was positively
+		// observed somewhere else. This used to answer "occupied" on any
+		// failure, on the reasoning that a routing table we cannot read is one
+		// we do not overwrite — and the consequence of that is worse than the
+		// risk: refusing the overlay leaves a device that reaches nothing,
+		// with a message blaming the customer's network for a fault that is
+		// ours. A machine genuinely on the range keeps working and can be
+		// fixed by changing the network's CIDR.
+		return false
 	}
 
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
 		}
-		if dev := fieldAfter(line, "dev"); dev != "" && dev != ifaceName {
+		// Our own interface is not somebody else's. Compared case-insensitively
+		// and against the whole line's device field, because the adapter we
+		// just configured carries a route for its own address and counting
+		// that as a clash is what blocked every peer on Windows.
+		if dev := fieldAfter(line, "dev"); dev != "" && !strings.EqualFold(dev, ifaceName) {
 			return true
 		}
 	}

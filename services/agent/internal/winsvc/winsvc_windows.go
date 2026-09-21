@@ -15,6 +15,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/state"
+
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -45,16 +47,40 @@ func IsService() bool {
 
 // Run hands control to the SCM and runs fn as the service body.
 func Run(fn RunFunc) error {
-	elog, err := eventlog.Open(Name)
-	if err != nil {
-		// Not fatal: losing the event log should not stop the service.
-		elog = nil
-	}
+	elog := openEventLog()
 	if elog != nil {
 		defer elog.Close()
 	}
 
 	return svc.Run(Name, &handler{fn: fn, elog: elog})
+}
+
+// openEventLog returns a handle to our event source, registering it first if
+// it is not there.
+//
+// A service installed before the source was registered — or one whose source
+// was removed — opens nothing, and then every failure it reports goes nowhere.
+// That is half of how "the service starts and silently stops" happened: the
+// other half was a console the service does not have. Registration needs
+// administrator rights, which a service running as LocalSystem has, so the
+// second attempt normally succeeds.
+//
+// Still not fatal: losing the event log must not stop the agent working.
+func openEventLog() *eventlog.Log {
+	if elog, err := eventlog.Open(Name); err == nil {
+		return elog
+	}
+
+	if err := eventlog.InstallAsEventCreate(Name, eventlog.Error|eventlog.Warning|eventlog.Info); err != nil {
+		return nil
+	}
+
+	elog, err := eventlog.Open(Name)
+	if err != nil {
+		return nil
+	}
+
+	return elog
 }
 
 type handler struct {
@@ -74,7 +100,7 @@ func (h *handler) Execute(args []string, r <-chan svc.ChangeRequest, s chan<- sv
 	go func() { errc <- h.fn(ctx) }()
 
 	s <- svc.Status{State: svc.Running, Accepts: accepted}
-	h.log(eventlog.Info, "AKConnect agent started")
+	h.log(eventlog.Info, "AKConnect agent started; output goes to "+state.ServiceLogPath())
 
 	for {
 		select {
@@ -104,7 +130,11 @@ func (h *handler) Execute(args []string, r <-chan svc.ChangeRequest, s chan<- sv
 
 		case err := <-errc:
 			if err != nil {
-				h.log(eventlog.Error, "AKConnect agent failed: "+err.Error())
+				// The log path goes in the message because the Event Viewer
+				// entry is what a technician finds first, and the detail of
+				// what the agent was doing is in the file.
+				h.log(eventlog.Error, "AKConnect agent failed: "+err.Error()+
+					"\r\nFull output: "+state.ServiceLogPath())
 				s <- svc.Status{State: svc.Stopped}
 
 				return false, 1

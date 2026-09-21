@@ -22,9 +22,31 @@ use App\Core\UpdateException;
  *   2. Protection — a path matching the protected list is never written,
  *      deleted or restored over, even when a manifest explicitly asks.
  *      config/config.php, .env, uploads/ and storage/ survive every update.
+ *      The one exception is a shipped control (SHIPPED_CONTROLS below), which
+ *      the product may write but no release may delete.
  */
 final class PathGuard
 {
+    /**
+     * Paths the product owns even though they sit inside a protected
+     * directory.
+     *
+     * uploads/ is protected because it holds customer content, and that must
+     * survive every update. But uploads/.htaccess is not customer content: it
+     * is the rule that stops an uploaded .php from being executed. A
+     * production install found the directory shipping without it, and if the
+     * updater cannot write it, every existing install stays exposed no matter
+     * how many releases go out.
+     *
+     * Writable, never deletable: a manifest that asks to remove one of these
+     * is still refused, so a release cannot strip a security control.
+     *
+     * @var list<string>
+     */
+    public const SHIPPED_CONTROLS = [
+        'uploads/.htaccess',
+    ];
+
     /** @param list<string> $protectedPatterns */
     public function __construct(
         private readonly string $appRoot,
@@ -154,6 +176,34 @@ final class PathGuard
     }
 
     /**
+     * A path the product owns and may therefore write, protected or not.
+     *
+     * Matched exactly, against the path relative to the root. No globbing and
+     * no suffix matching: a carve-out from the protection rules is only ever
+     * as wide as the literal list above.
+     */
+    public function isShippedControl(string $relativePath): bool
+    {
+        $path = str_replace('\\', '/', trim($relativePath));
+        while (str_starts_with($path, './')) {
+            $path = substr($path, 2);
+        }
+
+        return in_array(ltrim($path, '/'), self::SHIPPED_CONTROLS, true);
+    }
+
+    /**
+     * May the updater write this path?
+     *
+     * Protection minus the shipped-controls carve-out. Deletion still consults
+     * isProtected(), so nothing here makes a protected path removable.
+     */
+    public function isWriteBlocked(string $relativePath): bool
+    {
+        return $this->isProtected($relativePath) && !$this->isShippedControl($relativePath);
+    }
+
+    /**
      * Validate one entry from a downloaded archive.
      *
      * This is the zip-slip guard (§9.4 step 5). An entry is rejected when it
@@ -214,7 +264,7 @@ final class PathGuard
      */
     public function assertWritableTarget(string $relativePath): string
     {
-        if ($this->isProtected($relativePath)) {
+        if ($this->isWriteBlocked($relativePath)) {
             throw new UpdateException('Refusing to write a protected path: ' . $relativePath);
         }
 

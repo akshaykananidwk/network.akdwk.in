@@ -11,6 +11,7 @@ use App\Core\ForbiddenException;
 use App\Core\LimitExceededException;
 use App\Core\NotFoundException;
 use App\Core\Rbac;
+use App\Core\ValidationException;
 use App\Middleware\TenantScope;
 use App\Models\Device;
 use App\Models\IpAllocation;
@@ -18,6 +19,7 @@ use App\Models\JoinCode;
 use App\Models\MigrationRecord;
 use App\Models\Network;
 use App\Models\Plan;
+use App\Models\Relay;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Services\AclService;
@@ -64,6 +66,9 @@ final class DatabaseTests
             self::planLimits();
             self::rbacMatrix();
             self::sqlInjectionResistance();
+            // The two production defects that need a database to reproduce.
+            self::superAdminCreatesNetwork();
+            self::relayWithoutAPublicKey();
         } finally {
             // Nothing this suite created survives.
             DB::rollback();
@@ -202,6 +207,41 @@ final class DatabaseTests
 
         Auth::reset();
         Auth::setApiActor($user, self::$fixtures[$key . '_tenant'], ['*']);
+    }
+
+    /**
+     * A platform super admin: no tenant of their own, and the wildcard.
+     *
+     * Created with raw SQL because the User model refuses to insert into a
+     * tenant-scoped table without a tenant_id — which is the right rule, and
+     * exactly why a super admin is not an ordinary row.
+     */
+    private static function asSuperAdmin(): void
+    {
+        Auth::reset();
+        TenantScope::reset();
+
+        if (!isset(self::$fixtures['super_admin'])) {
+            DB::execute(
+                'INSERT INTO ' . DB::table('users')
+                . ' (tenant_id, name, email, password_hash, role, status, timezone, created_at, updated_at)'
+                . ' VALUES (NULL, :name, :email, :hash, :role, \'active\', \'Asia/Kolkata\','
+                . ' UTC_TIMESTAMP(), UTC_TIMESTAMP())',
+                [
+                    'name'  => 'Platform Admin',
+                    'email' => 'platform-' . bin2hex(random_bytes(4)) . '@example.test',
+                    'hash'  => Crypto::hashPassword('Fixture!Pass2026'),
+                    'role'  => Rbac::SUPER_ADMIN,
+                ]
+            );
+            self::$fixtures['super_admin'] = (int) DB::lastInsertId();
+        }
+
+        $_SESSION['user_id'] = self::$fixtures['super_admin'];
+        unset($_SESSION['tenant_id'], $_SESSION['impersonating']);
+        $_SESSION['role'] = Rbac::SUPER_ADMIN;
+
+        Auth::reset();
     }
 
     // ------------------------------------------------------------ migrations
@@ -656,6 +696,129 @@ final class DatabaseTests
     }
 
     // ------------------------------------------------- injection resistance
+
+    // ---------------------------------------- production defect 6 (1.9.1)
+
+    /**
+     * A super admin creating a network.
+     *
+     * On 1.9.0 this produced "Please correct the highlighted fields" with
+     * nothing highlighted: NetworkService demanded a tenant_id, the actor had
+     * none because that is what makes them a super admin, the form had no
+     * field to supply one, and ValidationException's user-facing message threw
+     * away the only sentence that said what was wrong.
+     */
+    private static function superAdminCreatesNetwork(): void
+    {
+        TestCase::group('Defect 6 — a super admin can create a network for a customer');
+
+        self::asSuperAdmin();
+
+        // 1. The message. A validation error on a field that is not on the
+        //    form must still say what the problem is.
+        try {
+            NetworkService::create(['name' => 'Orphan', 'cidr' => '10.91.0.0/24']);
+            TestCase::assert(false, 'creating a network with no customer is refused');
+        } catch (ValidationException $e) {
+            TestCase::assert(
+                array_key_exists('tenant_id', $e->errors()),
+                'the error names the tenant_id field'
+            );
+            TestCase::assert(
+                !str_starts_with($e->userMessage(), 'Please correct the highlighted fields.')
+                    || count($e->errors()) > 1,
+                'a single error is shown as itself, not as "correct the highlighted fields"',
+                $e->userMessage()
+            );
+            TestCase::assertContains('customer', strtolower($e->userMessage()),
+                'and the message says a customer is needed');
+        }
+
+        // 2. An id that is not a customer is refused rather than silently
+        //    creating a network nobody owns.
+        TestCase::assertThrows(
+            ValidationException::class,
+            static fn () => NetworkService::create([
+                'name'      => 'Ghost',
+                'cidr'      => '10.92.0.0/24',
+                'tenant_id' => 2147483600,
+            ]),
+            'a tenant_id that does not exist is refused'
+        );
+
+        // 3. The working path.
+        self::asSuperAdmin();
+        $network = NetworkService::create([
+            'name'      => 'Platform-created HQ',
+            'cidr'      => '10.93.0.0/24',
+            'tenant_id' => self::$fixtures['beta_tenant'],
+        ]);
+
+        TestCase::assertSame(
+            self::$fixtures['beta_tenant'],
+            (int) $network['tenant_id'],
+            'the network belongs to the customer that was chosen'
+        );
+        TestCase::assert((int) $network['id'] > 0, 'and it was actually written');
+
+        // 4. And the customer sees it as theirs — the scope was not merely
+        //    bypassed for the insert.
+        self::asTenantAdmin('beta');
+        TestCase::assert(
+            Network::find((int) $network['id']) !== null,
+            'Beta reads the network the platform admin created for it'
+        );
+        self::asTenantAdmin('alpha');
+        TestCase::assertSame(
+            null,
+            Network::find((int) $network['id']),
+            'and Alpha still cannot'
+        );
+    }
+
+    // ---------------------------------------- production defect 5 (1.9.1)
+
+    /**
+     * Registering a relay.
+     *
+     * The form demanded a Curve25519 public key that a relay does not have —
+     * it authenticates with AKCONNECT_RELAY_SECRET — so no relay could be
+     * registered without inventing one.
+     */
+    private static function relayWithoutAPublicKey(): void
+    {
+        TestCase::group('Defect 5 — a relay registers without a key it does not have');
+
+        self::asSuperAdmin();
+
+        $id = TenantScope::acrossAllTenants('test relay', static fn (): int => Relay::create([
+            'name'       => 'test-' . bin2hex(random_bytes(3)),
+            'region'     => 'in',
+            'host'       => 'relay-test.example.test',
+            'port'       => 9000,
+            'tcp_port'   => 0,
+            'public_key' => null,
+            'status'     => 'active',
+        ]));
+
+        $relay = TenantScope::acrossAllTenants('test relay', static fn (): ?array => Relay::find($id));
+
+        TestCase::assert($relay !== null, 'the relay row was written');
+        // Indexed, not coalesced: `?? 'missing'` cannot tell a NULL column
+        // from an absent one, and NULL is precisely what is being asserted.
+        TestCase::assert(array_key_exists('public_key', $relay), 'the row has a public_key column');
+        TestCase::assertSame(null, $relay['public_key'],
+            'which is NULL, because a relay has no Curve25519 key to give');
+        TestCase::assertSame(9000, (int) ($relay['port'] ?? 0),
+            'and the control port is the one the relay actually listens on');
+
+        // The form must not ask for either of the two fields that caused this.
+        $view = (string) @file_get_contents(APP_ROOT . '/app/Views/admin/relays.php');
+        TestCase::assertNotContains('name="public_key"', $view,
+            'the registration form does not ask for a public key');
+        TestCase::assertNotContains('name="tcp_port"', $view,
+            'nor for a TCP fallback port, which does not exist');
+    }
 
     private static function sqlInjectionResistance(): void
     {

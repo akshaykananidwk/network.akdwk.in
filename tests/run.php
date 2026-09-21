@@ -35,6 +35,7 @@ use App\Core\View;
 use Tests\BackupTests;
 use Tests\DatabaseTests;
 use Tests\HttpTests;
+use Tests\ProductionDefectTests;
 use Tests\TestCase;
 use Tests\DocumentationTests;
 use Tests\GatewayTests;
@@ -70,6 +71,8 @@ if ($runAll || isset($options['unit'])) {
     UnitTests::run();
     StaticAnalysisTests::run();
     DocumentationTests::run();
+    // The ten defects a real deployment found. Every check fails on 1.9.0.
+    ProductionDefectTests::run();
 }
 
 if ($runAll || isset($options['db'])) {

@@ -110,34 +110,61 @@ chmod -R 755 .
 chmod -R 775 storage uploads config
 ```
 
-In aaPanel, set the site's **document root** to `/www/wwwroot/network.akdwk.in/public`.
+In aaPanel, leave the site's **document root** at
+`/www/wwwroot/network.akdwk.in` — the repository root. There is no `public/`
+directory: this application serves from its root and keeps everything else out
+of the browser with the `.htaccess` at that root, which blocks `app/`,
+`config/`, `database/`, `storage/`, `services/`, `deploy/`, `docs/`, the `.git`
+directory, and every `.md`, `.sh` and `.env` file.
 
-**This matters more than it looks.** Everything outside `public/` — the
-configuration, the database credentials, the private keys — must not be
-reachable over the web. If the document root is the repository root, they are.
+**This matters more than it looks.** If those rules are not being read — the
+document root is somewhere else, `AllowOverride` is `None`, or the site runs on
+nginx without the equivalent rules — the configuration file, the database
+credentials and the private keys are all reachable over the web.
 
 **Check it, from your own machine:**
 
 ```bash
-curl -sS -o /dev/null -w '%{http_code}\n' https://network.akdwk.in/config/config.php
-curl -sS -o /dev/null -w '%{http_code}\n' https://network.akdwk.in/.env
+for p in config/config.php .env .git/config DEPLOY.md deploy/install-edge.sh uploads/.htaccess; do
+  printf '%-28s %s\n' "$p" "$(curl -sS -o /dev/null -w '%{http_code}' https://network.akdwk.in/$p)"
+done
 ```
 
-**Expect:** `404` for both. A `200` means the document root is wrong; fix it
-before going further.
+**Expect:** `403` or `404` for every one of them. A `200` anywhere means the
+rules are not in force; fix that before going further.
 
 ### 1c — URL rewriting
 
-aaPanel's nginx needs one rule. In **Website → Config**, inside the `server`
-block:
+**On Apache** — which is what aaPanel installs by default, and what this was
+deployed on — there is nothing to add: the root `.htaccess` has the rewrite
+rules, the header rules and the hardening. It only needs to be read, so the
+site's **AllowOverride** must be `All`. In aaPanel that is **Website → Config
+→ Configuration file**; the directory block for the site must not say
+`AllowOverride None`.
+
+The same `.htaccess` also carries `CGIPassAuth On`. Apache does not pass the
+`Authorization` header to PHP-FPM without it, and without that header every
+agent call arrives looking unauthenticated — a working install that reports
+itself as a revoked one.
+
+**On nginx**, `.htaccess` is not read at all and you must add the equivalent
+by hand. In **Website → Config**, inside the `server` block:
 
 ```nginx
 location / {
     try_files $uri $uri/ /index.php?$query_string;
 }
+
+# Everything the .htaccess blocks on Apache. Without these, the configuration
+# file and the private keys are served to anyone who asks.
+location ~ ^/(app|config|database|storage|cli|services|tests|deploy|docs)/ { deny all; }
+location ~ /\.(git|env) { deny all; }
+location ~* \.(md|sh|sql|log)$ { deny all; }
+location ^~ /uploads/ { location ~ \.php$ { deny all; } }
 ```
 
-Reload nginx.
+Reload nginx, then run the 1b check again — it must still be `403`/`404` for
+every path.
 
 ### 1d — The database
 
@@ -191,14 +218,29 @@ stopped partway.
 ### 1f — The worker
 
 ```bash
-crontab -e
+crontab -u www -e
 ```
 
 Add the line the installer printed — it has the right PHP binary and the right
-paths already:
+paths already. On aaPanel that binary is under `/www/server/php`, not
+`/usr/bin`:
 
 ```
-*/5 * * * * /usr/bin/php8.1 /www/wwwroot/network.akdwk.in/cli/worker.php >> /www/wwwroot/network.akdwk.in/storage/logs/cron.log 2>&1
+*/5 * * * * /www/server/php/83/bin/php /www/wwwroot/network.akdwk.in/cli/worker.php >> /www/wwwroot/network.akdwk.in/storage/logs/cron.log 2>&1
+```
+
+Two things about that line:
+
+- **`83` is the PHP version directory.** Confirm yours with
+  `ls /www/server/php`. `/usr/bin/php8.1` does not exist on a stock aaPanel
+  box, and a cron line that points at it fails silently every five minutes.
+- **Run it as `www`, not as root.** `crontab -e` as root gives you a root
+  cron; the worker then writes logs, cache and backup files owned by `root`
+  inside `storage/`, and the web user cannot write them afterwards. Use
+  `crontab -u www -e`, or aaPanel's **Cron** page with the user set to `www`.
+
+```bash
+crontab -u www -l | grep worker.php
 ```
 
 Then remove the installer:
@@ -361,7 +403,8 @@ ending with a line naming the relay it knows about.
 
 ### 3a — Tell the panel about the coordinator
 
-**Settings → Coordinator**, using the values `install-edge.sh` printed:
+**Platform → Coordinator** in the sidebar (`/admin/coordinator`), using the values
+`install-edge.sh` printed:
 
 | Field | Value |
 |---|---|
@@ -372,14 +415,18 @@ ending with a line naming the relay it knows about.
 
 ### 3b — Register the relay
 
-**Settings → Relays → Add**:
+**Platform → Relays** (`/admin/relays`), *Register a relay*:
 
 | Field | Value |
 |---|---|
 | Name | `mumbai-1` |
 | Region | `in` |
 | Host | the VPS's public hostname |
-| Port | 9000 |
+| Control port (UDP) | 9000 |
+
+The relay form asks for nothing else. It has no public key of its own — it
+authenticates with `AKCONNECT_RELAY_SECRET` — and there is no TCP fallback to
+configure.
 
 ### 3c — Check they are talking
 
@@ -393,7 +440,7 @@ journalctl -u akconnect-coordinator -f
 successfully. A `401` or `403` means the shared secret in 3a does not match
 `/etc/akconnect/coordinator.env`.
 
-In the panel, **Settings → Relays** should show `mumbai-1` as healthy.
+In the panel, **Platform → Relays** should show `mumbai-1` as healthy.
 
 **The failure I expect you to hit here** is the firewall — either `ufw` or your
 provider's. If the relay shows as unhealthy, check 2d before anything else.
@@ -447,7 +494,10 @@ Run `collect.ps1` at each stage and send me the zip.
 | What you see | Where to look |
 |---|---|
 | The panel loads but `/install` still works | `rm -rf install` was not run — 1f |
-| `config/config.php` returns 200 | The document root is the repository root, not `public/` — 1b |
+| `config/config.php` returns 200 | The root `.htaccess` is not being read. Check the document root, and that the site's `AllowOverride` is `All` — 1b |
+| Every page is HTTP 500 and the log says `php_flag` | An `.htaccess` with unguarded `php_flag`/`php_value` under PHP-FPM. 1.9.1 guards them; a hand-edited copy may not |
+| `storage/logs` files are owned by `root` | The worker cron is root's, not `www`'s — 1f |
+| Agents get "provide the device token as a Bearer token" with a valid token | Apache is not passing the `Authorization` header to FastCGI. 1.9.1 ships `CGIPassAuth` in the root `.htaccess`; confirm it is being read |
 | Devices enrol but never connect | The relay is unreachable. 2d, then `journalctl -u akconnect-relay` |
 | The relay shows unhealthy in the panel | Firewall, almost always — and often the provider's rather than `ufw` |
 | The coordinator logs 401 from the panel | The shared secret in 3a does not match `/etc/akconnect/coordinator.env` |

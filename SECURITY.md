@@ -43,7 +43,12 @@ what you expected. Do not open a public issue for an unpatched flaw.
 | A05 | Security misconfiguration | `display_errors` off in production; traces go only to `storage/logs` | `app/bootstrap.php` |
 | | | CSP with a per-request nonce, no `unsafe-eval`, no inline script | `app/Middleware/SecurityHeadersMiddleware.php::nonce` |
 | | | `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy` on every response | `app/Middleware/SecurityHeadersMiddleware.php::apply` |
-| | | Application directories denied by per-directory `.htaccess` **and** a root rewrite rule | `.htaccess` |
+| | | Application directories denied by per-directory `.htaccess` **and** a root rewrite rule; `deploy/`, `docs/`, `.git`, `*.md` and `*.sh` too, after a production install served them | `.htaccess` |
+| | | `uploads/` executes nothing: `ExecCGI` off, the PHP handler removed, `SetHandler none` under FastCGI, and a final `Require all denied` | `uploads/.htaccess` |
+| | | The updater may write that one rule into the otherwise-protected `uploads/`, and no release may delete it | `app/Updater/PathGuard.php::isWriteBlocked` |
+| | | `php_flag` / `php_value` are guarded by `<IfModule mod_php*.c>`; unguarded they are HTTP 500 on every page under PHP-FPM | `.htaccess` |
+| | | Apache is told to pass the `Authorization` header to FastCGI, and the application reads it wherever a rewrite leaves it | `.htaccess`, `app/Core/Request.php::authorizationHeader` |
+| | | A real Apache + PHP-FPM install, driven through the browser installer, is a release gate | `services/lab/webtarget/drill.sh` |
 | | | Credentials live in `config/`, denied as a whole directory, not in a web-root `.env` guarded by a rule nginx ignores | `install/Installer.php::writeEnv` |
 | | | `config/config.php` written `0640` | `install/Installer.php::writeConfig` |
 | | | `mod_rewrite` is proved with a real request, not inferred | `install/Installer.php::probeRewrite` |

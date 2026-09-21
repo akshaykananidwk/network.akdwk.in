@@ -472,7 +472,9 @@ final class UpdateSteps
 
                 // §9.5: protected paths are never written, whatever the release
                 // contains. config.php, .env, uploads/ and storage/ survive.
-                if ($this->guard->isProtected($relative)) {
+                // The one exception is a shipped control — see
+                // PathGuard::SHIPPED_CONTROLS — which the product owns.
+                if ($this->guard->isWriteBlocked($relative)) {
                     $skippedProtected++;
                     continue;
                 }

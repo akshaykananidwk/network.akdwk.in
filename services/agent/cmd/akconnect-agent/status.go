@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/keystore"
@@ -70,6 +71,14 @@ func runStatus(ctx context.Context, args []string) error {
 	}
 
 	fmt.Printf("  State file : %s\n", stateStore.Path())
+
+	// Where the service writes, which is the first thing to ask for when
+	// somebody says "it just stops".
+	if path := state.ServiceLogPath(); path != "" {
+		if _, err := os.Stat(path); err == nil {
+			fmt.Printf("  Service log: %s\n", path)
+		}
+	}
 
 	return printRuntime(stateStore)
 }

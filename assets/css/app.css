@@ -217,6 +217,7 @@ code.break { word-break: break-all; }
 .nav-icon[data-icon="relay"]::before { content: "⇄"; }
 .nav-icon[data-icon="download"]::before { content: "⇩"; }
 .nav-icon[data-icon="archive"]::before { content: "⬓"; }
+.nav-icon[data-icon="globe"]::before { content: "◍"; }
 
 .sidebar-foot { padding: var(--space-3); border-top: 1px solid var(--border); }
 .nav-avatar {

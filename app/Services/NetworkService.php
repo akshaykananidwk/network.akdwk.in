@@ -9,11 +9,13 @@ use App\Core\Config;
 use App\Core\DB;
 use App\Core\Logger;
 use App\Core\ValidationException;
+use App\Middleware\TenantScope;
 use App\Models\AclRule;
 use App\Models\Device;
 use App\Models\IpAllocation;
 use App\Models\JoinCode;
 use App\Models\Network;
+use App\Models\Tenant;
 use App\Models\NetworkRoute;
 use App\Models\RouteHost;
 
@@ -29,9 +31,29 @@ final class NetworkService
      */
     public static function create(array $input): array
     {
+        // A super administrator has no tenant of their own — that is what makes
+        // them one — so they have to say which customer a network belongs to.
+        // Until 1.9.1 they could not: the form had no such field, and the
+        // failure arrived as "please correct the highlighted fields" with
+        // nothing highlighted.
         $tenantId = Auth::tenantId();
         if ($tenantId === null) {
-            throw new ValidationException(['tenant_id' => 'A network must belong to a customer.']);
+            $chosen = (int) ($input['tenant_id'] ?? 0);
+            if ($chosen <= 0) {
+                throw new ValidationException([
+                    'tenant_id' => 'Choose which customer this network belongs to.',
+                ]);
+            }
+
+            // The tenants table is platform-level and not tenant-scoped, so
+            // this needs no cross-tenant block; reaching this code at all
+            // already required a platform super admin.
+            $tenant = Tenant::find($chosen);
+            if ($tenant === null) {
+                throw new ValidationException(['tenant_id' => 'That customer no longer exists.']);
+            }
+
+            $tenantId = (int) $tenant['id'];
         }
 
         BillingService::assertCanAddNetwork($tenantId);
@@ -41,37 +63,45 @@ final class NetworkService
 
         self::assertCidrNotOverlapping($tenantId, $range, null);
 
-        $networkId = DB::transaction(static function () use ($tenantId, $input, $range): int {
-            $id = Network::create([
-                'tenant_id'            => $tenantId,
-                'name'                 => (string) $input['name'],
-                'network_uid'          => Network::generateUid(),
-                'description'          => $input['description'] ?? null,
-                'cidr'                 => $range['cidr'],
-                'dns_json'             => $input['dns'] ?? Config::get('network.default_dns', []),
-                // Always a zone, because §18's names need one and a network
-                // created without a search domain would silently have no way
-                // to be addressed by name.
-                'search_domain'        => self::zoneFor($input),
-                'mapped_pool'          => isset($input['mapped_pool']) && trim((string) $input['mapped_pool']) !== ''
-                    ? SubnetMapper::validatePool((string) $input['mapped_pool'], $range['cidr'])
-                    : null,
-                'mtu'                  => (int) ($input['mtu'] ?? Config::get('network.default_mtu', 1280)),
-                'keepalive_seconds'    => (int) ($input['keepalive_seconds'] ?? Config::get('network.default_keepalive', 25)),
-                'auto_assign_ip'       => (int) (bool) ($input['auto_assign_ip'] ?? true),
-                'auto_approve_devices' => (int) (bool) ($input['auto_approve_devices'] ?? false),
-                'private'              => (int) (bool) ($input['private'] ?? true),
-                'acl_default_action'   => ($input['acl_default_action'] ?? 'allow') === 'deny' ? 'deny' : 'allow',
-                'status'               => 'active',
-                'created_by'           => Auth::id(),
-            ]);
+        // The write happens in the chosen customer's scope. A super admin has
+        // no scope of their own, so without this the inserts below would run
+        // unfiltered.
+        $networkId = TenantScope::asTenant($tenantId, static fn (): int => DB::transaction(
+            static function () use ($tenantId, $input, $range): int {
+                $id = Network::create([
+                    'tenant_id'            => $tenantId,
+                    'name'                 => (string) $input['name'],
+                    'network_uid'          => Network::generateUid(),
+                    'description'          => $input['description'] ?? null,
+                    'cidr'                 => $range['cidr'],
+                    'dns_json'             => $input['dns'] ?? Config::get('network.default_dns', []),
+                    // Always a zone, because §18's names need one and a network
+                    // created without a search domain would silently have no
+                    // way to be addressed by name.
+                    'search_domain'        => self::zoneFor($input),
+                    'mapped_pool'          => isset($input['mapped_pool']) && trim((string) $input['mapped_pool']) !== ''
+                        ? SubnetMapper::validatePool((string) $input['mapped_pool'], $range['cidr'])
+                        : null,
+                    'mtu'                  => (int) ($input['mtu'] ?? Config::get('network.default_mtu', 1280)),
+                    'keepalive_seconds'    => (int) ($input['keepalive_seconds'] ?? Config::get('network.default_keepalive', 25)),
+                    'auto_assign_ip'       => (int) (bool) ($input['auto_assign_ip'] ?? true),
+                    'auto_approve_devices' => (int) (bool) ($input['auto_approve_devices'] ?? false),
+                    'private'              => (int) (bool) ($input['private'] ?? true),
+                    'acl_default_action'   => ($input['acl_default_action'] ?? 'allow') === 'deny' ? 'deny' : 'allow',
+                    'status'               => 'active',
+                    'created_by'           => Auth::id(),
+                ]);
 
-            IpamService::createPool($tenantId, $id, $range['cidr']);
+                IpamService::createPool($tenantId, $id, $range['cidr']);
 
-            return $id;
-        });
+                return $id;
+            }
+        ));
 
-        $network = Network::findOrFail($networkId);
+        $network = TenantScope::asTenant(
+            $tenantId,
+            static fn (): array => Network::findOrFail($networkId)
+        );
         AuditService::log('network.create', 'network', $networkId, null, [
             'name' => $network['name'],
             'cidr' => $network['cidr'],

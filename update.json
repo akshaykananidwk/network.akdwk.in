@@ -1,13 +1,12 @@
 {
-  "version": "1.9.0",
-  "released_at": "2026-09-22T06:00:00Z",
+  "version": "1.9.1",
+  "released_at": "2026-09-22T09:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "The release the pilot runs on: a Windows installer a customer can use without a command line, a deployment checklist for the panel and the edge servers, and clash detection that reports to the panel instead of a log file nobody reads. Windows DNS is NRPT only — no hosts-file fallback, because antivirus flags that.",
+  "notes": "Ten defects a real aaPanel deployment found in one evening, and the gate that would have found them: Apache with PHP-FPM, a browser install driven end to end, and a PHP whose Argon2 comes from libsodium. Fixes a 500 on every page under PHP-FPM, a webroot that served deploy/, docs/ and .git, an uploads/ directory that executed PHP, an installer that died creating the administrator, an Authorization header Apache never passed on, an agent that refused to start while waiting for approval, and a Windows clash check that refused the overlay because of the agent’s own adapter.",
   "migrations": [
-    "2026_09_21_180000_add_device_problems.php",
-    "2026_09_21_190000_add_network_mapped_pool.php"
+    "2026_09_22_090000_relay_public_key_optional.php"
   ],
   "protected": [
     ".env",
@@ -19,7 +18,8 @@
   ],
   "delete": [],
   "post_update": [
-    "cli/tasks/rebuild_acl_cache.php"
+    "cli/tasks/rebuild_acl_cache.php",
+    "cli/tasks/ensure_uploads_guard.php"
   ],
   "checksums": {},
   "signature": null

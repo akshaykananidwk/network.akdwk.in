@@ -106,6 +106,18 @@ func (e *APIError) Unauthorized() bool {
 	return e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden
 }
 
+// NoCredential reports that the panel saw no credential at all, as opposed to
+// one it did not like.
+//
+// The difference matters more than it sounds. Apache does not pass the
+// Authorization header to PHP-FPM unless it is told to, so a correctly
+// configured agent holding a perfectly good token produced exactly the same
+// 401 as a revoked device — and the agent told the customer to reset, which
+// throws the device's identity away and fixes nothing.
+func (e *APIError) NoCredential() bool {
+	return e.Code == "no_credential"
+}
+
 // envelope matches Response::api() and Response::apiError() exactly:
 //
 //	{"success":true, "data":…, "meta":{…}, "error":null}

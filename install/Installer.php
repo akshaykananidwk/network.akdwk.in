@@ -443,9 +443,15 @@ final class Installer
                 'timeout'     => 15,
             ],
             'coordinator' => [
-                'host'          => $answers['coordinator_host'] ?? '127.0.0.1',
+                // Blank is honest: an operator who has not stood the
+                // coordinator up yet gets a panel that says so, instead of one
+                // that points every agent at its own loopback address. The key
+                // is written because DeviceService reads it — omitting it made
+                // discovery configured and silent.
+                'host'          => $answers['coordinator_host'] ?? '',
                 'port'          => (int) ($answers['coordinator_port'] ?? 8443),
                 'internal_url'  => 'http://127.0.0.1:8080',
+                'public_key'    => $answers['coordinator_public_key'] ?? '',
                 'shared_secret' => $answers['coordinator_secret'],
                 'signing_key'   => $answers['controller_secret_key'] ?? '',
                 'public_host'   => $answers['coordinator_host'] ?? '',

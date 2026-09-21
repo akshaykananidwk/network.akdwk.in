@@ -1,6 +1,6 @@
 # Verification report
 
-**Version 1.2.1 · 21 September 2026**
+**Version 1.9.1 · 22 September 2026**
 
 What follows is what was actually run and what it actually produced. Where a
 requirement is met, the evidence is the command and its output. Where it is
@@ -36,6 +36,7 @@ and all three remain unmet. See [What Phase 2 has not shown](#what-phase-2-has-n
 | G   | Recovery            | **Pass** | Byte-exact recovery from catastrophic damage |
 | H   | The networking gate | **Pass** | Eleven scenarios in one command; found four defects in the code it tests |
 | H2  | Dogfooding          | **Pass after two fixes** | Six update runs, two rollbacks; the rollback drill found a P1, and testing its fix found the fix incomplete |
+| I   | Production (1.9.0)  | **Failed, then fixed** | Ten defects in one evening on a real aaPanel box; two new gates now reproduce six of them, and found a seventh nobody had reported |
 
 Automated suites:
 
@@ -1766,6 +1767,129 @@ port space. `--data-ports` pins the range instead; the systemd unit uses
 
 ---
 
+## I — Production, and the ten defects it found
+
+1.9.0 was deployed to a real aaPanel VPS — Ubuntu 24.04, Apache 2.4 with
+PHP-FPM 8.3, MariaDB 10.11 — and the Windows agent was run on a real Windows
+laptop for the first time. Ten defects came back in one evening.
+
+That number is the important result in this section, and so is the fact that
+1.9.0 had passed everything: 73 lab scenarios, a 15-check cross-version update
+drill, 409 assertions, Go clean under `-race`. **Every one of those ran against
+PHP's built-in web server**, which reads no `.htaccess`, has no `mod_php`,
+passes every header straight through to the application, and is built against
+libargon2. The lab was testing a stack nobody deploys, and it was doing so
+thoroughly.
+
+### What went wrong, and what now catches it
+
+| # | Defect | Caught now by |
+|---|--------|---------------|
+| 1 | Webroot served `deploy/`, `docs/`, `.git`, `*.md`, `*.sh`; `uploads/` executed PHP | web gate; `ProductionDefectTests` |
+| 2 | `php_flag` in `.htaccess` → HTTP 500 on every page under PHP-FPM | web gate; `ProductionDefectTests` |
+| 3 | `password_hash()` ValueError on a libsodium Argon2 build; installer died | Argon2 gate; `ProductionDefectTests` |
+| 4 | No Settings → Coordinator page; installer omitted `coordinator.public_key` | web gate; `ProductionDefectTests` |
+| 5 | Relay form demanded a public key relays do not have | `DatabaseTests` |
+| 6 | Super admin could not create a network; error message named nothing | `DatabaseTests` |
+| 7 | `akconnect-setup.exe` stopped after copying files: no panel address | Go `setup_test.go`; pack gate |
+| 8 | Agent refused to start while pending; service stopped silently | Go `approval_test.go` |
+| 9 | Apache dropped the `Authorization` header; agent blamed the token | web gate; `ProductionDefectTests` |
+| 10 | Windows refused the overlay because of the agent's own adapter | Go `clash_test.go` |
+
+### The two new gates
+
+**`services/lab/webtarget/`** — Apache 2.4 + PHP-FPM + MariaDB in a container,
+with the browser installer driven end to end by `curl`, exactly as a customer
+would drive it: welcome, requirements, database, administrator, configuration,
+finish.
+
+It then signs in as the administrator it created, walks the mandatory
+two-factor enrolment a platform administrator cannot skip, and renders the
+pages the deployment needed.
+
+```
+$ ./services/lab/webtarget/run.sh
+  36 passed, 0 failed
+```
+
+Against 1.9.0, the same drill:
+
+```
+  7 passed, 27 failed
+```
+
+The 16 include everything downstream of the `php_flag` 500, which masks the
+rest. With the three `php_flag` lines removed from 1.9.0's `.htaccess` by hand,
+so the other defects can be seen separately:
+
+```
+  DEPLOY.md                          → 200
+  deploy/install-edge.sh             → 200
+  docs                               → 301
+  .git/config                        → 302
+  uploads/probe.php                  → ran   (arbitrary code execution)
+  coordinator.public_key             → not written
+  /                                  → 503
+  Settings → Coordinator             → no such page
+  the network form                   → no customer selector
+  16 passed, 20 failed
+```
+
+**`services/lab/argon2target/`** — a PHP compiled without libargon2, so its
+Argon2 comes from libsodium, which is what aaPanel's own build does. No
+packaged PHP reproduces this: every distribution and every official PHP image
+links libargon2, and libargon2 accepts any thread count. It runs the real
+`Crypto` class, not a copy of its logic.
+
+```
+$ ./services/lab/argon2target/run.sh
+
+  PHP 8.3.26, Argon2 provider: sodium
+
+  ✓ this build takes its Argon2 from libsodium  provider=sodium
+  ✓ threads => 2 is refused by this build, as it was in production
+      ValueError: A thread value other than 1 is not supported by this implementation
+  ✓ Crypto::hashPassword survives this build
+  ✓ and the hash verifies
+  ✓ and a wrong password does not
+  ✓ and it does not want rehashing, which would throw on every login
+  6 passed, 0 failed
+```
+
+Against 1.9.0: **2 passed, 4 failed**, with the production `ValueError`
+reproduced exactly.
+
+### A defect the new gate found on its own
+
+Not one of the ten. Installing through the web gate with a table prefix — which
+is what the installer offers, and what the drill supplies — produced a site
+that installed successfully and then answered 503 to every request:
+
+```
+Base table or view not found: 1146 Table 'akconnect.sessions' doesn't exist
+```
+
+`DB::table()` was called by the session handler before anything had connected,
+and `DB::$prefix` was only set as a side effect of connecting. Every
+installation using a prefix was affected, and the lab could not see it because
+the lab installs without one. `DB::prefix()` now resolves from configuration
+when nothing has connected yet.
+
+### What these gates still cannot show
+
+- **The `.exe` itself.** The Windows installer is built and its panel-address
+  stamp is verified in the gate, but running it needs Windows. Installing,
+  uninstalling, the Wintun adapter, the NRPT rules and the firewall rule remain
+  manual (test pack, Stage 15).
+- **aaPanel itself.** The web gate is Debian's Apache and PHP-FPM, not
+  aaPanel's. What it reproduces is the combination — Apache talking to PHP-FPM
+  over `mod_proxy_fcgi`, with `.htaccess` in force — and that is the part that
+  broke.
+- **The Event Log.** The service now registers its own event source and writes
+  `service.log` beside the state file; neither has been seen on real Windows.
+
+---
+
 ## What this verification found
 
 The single most important result is not in the table above. It is that **three
@@ -2013,6 +2137,14 @@ These are real and currently shipped.
 
 In the order I would do them.
 
+0. **Apply 1.9.1 to the production box and re-run the checks in DEPLOY.md
+   stage 1b.** Every path in that list must answer 403 or 404, `uploads/` must
+   refuse a `.php`, and an agent call with a valid token must not come back as
+   `no_credential`. Three of the manual patches made on that box by hand are
+   superseded by this release; `.htaccess` and `app/Core/Crypto.php` are
+   overwritten by it, `uploads/.htaccess` is written by a post-update task, and
+   `config/config.php` is left alone.
+
 1. **Change how free addresses are found**, so allocation does not depend on
    the size of the pool. The `ORDER BY ip_numeric` is what forces MariaDB to
    buffer the whole free set; a per-network "next free" cursor, or an index
@@ -2025,13 +2157,16 @@ In the order I would do them.
    restarting at once. Fifty parallel approvals into one pool, asserting that
    no address is issued twice.
 
-3. **Run the agent on Windows.** It cross-compiles and has never executed.
-   DPAPI, the ACL and the Wintun adapter are all places where code that
-   compiles can still be wrong, and `route print` on a real Windows host is
-   one of the acceptance criteria. Stage 13 — gateway mode — is the newest and
-   the least certain: `New-NetNat` is the only mechanism that works on the
-   Windows versions customers have, and a PC where Internet Connection Sharing
-   already owns NAT is a case I expect to have to handle in code.
+3. **Finish what the Windows laptop started.** The agent has now run on real
+   Windows, and DPAPI, the Wintun adapter, the service, the firewall rule,
+   NRPT split DNS, the split-tunnel default route and coordinator discovery
+   over the real internet all worked. Three things did not get exercised and
+   are now the gap: **gateway mode** (Stage 13 — `New-NetNat` is the only
+   mechanism that works on the Windows versions customers have, and a PC where
+   Internet Connection Sharing already owns NAT is a case I expect to have to
+   handle in code); the **installer `.exe` end to end**, including uninstall
+   leaving nothing behind; and the **service log and Event Log entries** added
+   in 1.9.1, neither of which has been seen on Windows.
 
 4. **Test against a real CGNAT path** — a 4G connection is the cheapest way.
    The lab's `MASQUERADE` is the easy case; a symmetric carrier NAT defeats

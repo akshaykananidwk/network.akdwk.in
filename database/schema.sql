@@ -357,9 +357,15 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__relays` (
   `name` VARCHAR(120) NOT NULL,
   `region` VARCHAR(32) NOT NULL DEFAULT 'in',
   `host` VARCHAR(190) NOT NULL,
-  `port` INT NOT NULL DEFAULT 51820,
-  `tcp_port` INT NOT NULL DEFAULT 443,
-  `public_key` VARCHAR(64) NOT NULL,
+  -- The relay's control port. 9000 is what akconnect-relay listens on; the
+  -- old default of 51820 was WireGuard's, which a relay does not use.
+  `port` INT NOT NULL DEFAULT 9000,
+  -- TCP fallback is not implemented. The column stays for when it is.
+  `tcp_port` INT NOT NULL DEFAULT 0,
+  -- Unused. A relay authorises sessions from the coordinator's HMAC ticket and
+  -- has no keypair; this is left over from a design where agents were going to
+  -- talk to relays directly. Nullable since 1.9.1 — see the migration.
+  `public_key` VARCHAR(64) NULL DEFAULT NULL,
   `capacity_mbps` INT NOT NULL DEFAULT 100,
   `current_sessions` INT NOT NULL DEFAULT 0,
   `status` ENUM('active','draining','down','disabled') NOT NULL DEFAULT 'active',
