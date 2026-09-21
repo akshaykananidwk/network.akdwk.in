@@ -106,11 +106,18 @@ trap cleanup EXIT INT TERM
 # Protected paths are excluded because the updater deliberately does not write
 # them, so including them would prove nothing and would put the scratch
 # install's secrets through md5sum for no reason.
+#
+# uploads/ is one of them, and it was missing from this list until 1.9.1 — when
+# a post-update task started writing uploads/.htaccess and the byte-exact check
+# failed for a file the updater is not responsible for. It is checked
+# explicitly instead, below, where what matters about it can be stated: that it
+# arrives, and that a rollback does not take it away again.
 manifest() {
     local root=$1 out=$2
     ( cd "$root" && find . -type f \
         -not -path './.git/*' \
         -not -path './storage/*' \
+        -not -path './uploads/*' \
         -not -path './config/config.php' \
         -not -path './install/install.lock' \
         -not -name '*.local.php' \
@@ -351,6 +358,16 @@ else
     record "dogfood/version-moved" FAIL "VERSION reads $NEW_VERSION, expected $TO_VERSION"
 fi
 
+# The one file the updater is allowed to write inside a protected directory.
+# It is the rule that stops an uploaded .php from executing, and an install
+# updating from 1.9.0 gets it from a post-update task, because 1.9.0's own
+# updater refuses to write into uploads/ at all.
+if [ -s "$SCRATCH_ROOT/uploads/.htaccess" ]; then
+    record "dogfood/uploads-guard" PASS "uploads/.htaccess was installed into a protected directory"
+else
+    record "dogfood/uploads-guard" FAIL "uploads/.htaccess is missing; an uploaded .php would execute"
+fi
+
 manifest "$SCRATCH_ROOT" "$SCRATCH_ROOT/../manifest-after.md5"
 CHANGED="$(diff "$SCRATCH_ROOT/../manifest-before.md5" "$SCRATCH_ROOT/../manifest-after.md5" | grep -c '^[<>]')"
 
@@ -418,6 +435,15 @@ else
 fi
 
 manifest "$SCRATCH_ROOT" "$SCRATCH_ROOT/../manifest-rolled-back.md5"
+
+# A rollback undoes a release. It must not undo a security control: going back
+# to a version that executed uploaded PHP is a support decision, and serving
+# uploaded PHP again is not part of it.
+if [ -s "$SCRATCH_ROOT/uploads/.htaccess" ]; then
+    record "dogfood/uploads-guard-kept" PASS "the rollback left uploads/.htaccess in place"
+else
+    record "dogfood/uploads-guard-kept" FAIL "the rollback removed uploads/.htaccess and reopened the hole"
+fi
 
 if diff -q "$SCRATCH_ROOT/../manifest-before.md5" "$SCRATCH_ROOT/../manifest-rolled-back.md5" >/dev/null; then
     record "dogfood/byte-exact" PASS "all $BEFORE_COUNT files are byte-identical to before the update"
