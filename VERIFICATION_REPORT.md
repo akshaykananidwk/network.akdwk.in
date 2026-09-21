@@ -35,14 +35,14 @@ and all three remain unmet. See [What Phase 2 has not shown](#what-phase-2-has-n
 | F   | Scale               | **Pass, with a finding** | 1,000 devices fine; address allocation scales with *pool* size |
 | G   | Recovery            | **Pass** | Byte-exact recovery from catastrophic damage |
 | H   | The networking gate | **Pass** | Nine scenarios in one command; found three defects in the code it tests |
-| H2  | Dogfooding 1.3.0    | **Pass after a fix** | Update clean in 11 steps; the rollback drill found a P1 — see below |
+| H2  | Dogfooding          | **Pass after two fixes** | Six update runs, two rollbacks; the rollback drill found a P1, and testing its fix found the fix incomplete |
 
 Automated suites:
 
 ```
 $ php -S 127.0.0.1:8088 -t . tests/dev-server.php &
 $ php tests/run.php --url=http://127.0.0.1:8088
-  468 passed, 0 failed, 1 skipped  (468 assertions)
+  471 passed, 0 failed, 1 skipped  (471 assertions)
 
 $ cd services/<each> && go vet ./... && go test -race ./...
   47 tests, all passing, no races
@@ -636,7 +636,7 @@ rather than the unfalsifiable "sha256 matches" it reported before 1.0.7.
 
 ---
 
-## H2 — Dogfooding 1.3.0, and the defect it found
+## H2 — Dogfooding, and the two defects it found
 
 Every release goes out through our own updater. 1.3.0 did, from a deployment
 at 1.2.1, against the real GitHub branch:
@@ -700,12 +700,48 @@ state it would otherwise produce is worse than either version on its own.
 
 There is a test for the pruning, and it fails against the unfixed code.
 
+### And the fix was not the fix
+
+1.3.1 made a missing journal report a failure. Testing it rather than trusting
+it showed that was necessary and not sufficient: the refusal fired, and the
+database restore ran immediately afterwards, because the `throw` was inside the
+method's own `try` and never reached the caller. The four rollback phases were
+running unconditionally. The rollback reported the failure and produced the
+mixed state in the same breath.
+
+1.3.3 makes everything after the file restore conditional on it. Proven by
+removing a journal and attempting the rollback:
+
+```
+  ✗ Files: the rollback journal is missing, so the files this update replaced
+    cannot be restored. The database and version marker have been left alone
+    deliberately — rewinding them under the new files would produce a mixture
+    of two versions. Restore from the file backup listed in History.
+
+  ✗ Rollback incomplete. Maintenance mode has been left ON deliberately.
+
+  Recover manually:
+    tar -xzf storage/backups/20260921-092135-830cf1/files.tar.gz
+    gunzip -c storage/backups/20260921-092135-830cf1/db.sql.gz | mysql ...
+    rm storage/maintenance.flag
+```
+
+Afterwards: `VERSION` still 1.3.3, CHANGELOG still 1.3.3, database untouched,
+maintenance on. The installation is wholly on one version. Before the fix the
+same drill left `VERSION` at 1.3.1 with 1.3.3 files on disk.
+
+The happy path was then re-proven on the same deployment — journal restored,
+`Files: 4 restored, 0 removed`, version back to 1.3.1 — and rolled forward
+again to 1.3.3, serving 200.
+
 ### What this says about the verification
 
 This is the **third** mechanism for surviving a bad update found broken by
-using it. The first two were in 1.0.x — a database backup that could not be
-restored, and a file rollback that restored nothing. All three reported
-success. None was visible by reading the code.
+using it, and the fourth if the incomplete first fix is counted separately. The
+first two were in 1.0.x — a database backup that could not be restored, and a
+file rollback that restored nothing. All of them reported success. None was
+visible by reading the code, and one of them was only visible by testing a fix
+I had just written and would otherwise have called done.
 
 It is also the first one found on a code path I had already exercised nine
 times. What made it appear was a *restored database* — a condition the report

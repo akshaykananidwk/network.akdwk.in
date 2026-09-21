@@ -61,7 +61,7 @@ now checks for it and says where to get it.
 | P5 Commercial | Plans, limits, billing, invoices, API keys, OpenAPI, white-label | Mostly done (see below) |
 | P6 Enterprise | HA, multi-region relays, SSO/SAML, staged agent rollout | Not started |
 
-**468 assertions pass** (`php tests/run.php --url=…`), and
+**471 assertions pass** (`php tests/run.php --url=…`), and
 **`services/lab/run-all.sh` is the networking gate** — it builds the
 namespaces, runs every scenario, prints one table and exits non-zero on any
 failure. No release ships without a clean table.
