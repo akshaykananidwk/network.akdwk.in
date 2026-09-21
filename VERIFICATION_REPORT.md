@@ -1663,6 +1663,18 @@ And 1.6.0 → 1.7.0 → 1.6.0, which is the one that exercises a migration:
   15 checks, all passed.
 ```
 
+1.8.0 → 1.9.0 → 1.8.0, with two migrations:
+
+```
+  dogfood/files-written     PASS  APPLY wrote 60 file(s)
+  dogfood/schema-changed    PASS  2 migration(s) changed the schema to 59f76e69ce3f
+  dogfood/rollback          PASS  restored 38 file(s) and removed 22 the update had added
+  dogfood/byte-exact        PASS  all 363 files are byte-identical to before the update
+  dogfood/schema            PASS  the database schema is back to d4d9c66792a4
+
+  15 checks, all passed.
+```
+
 `dogfood/schema-changed` exists because the first version of this drill could
 have passed on nothing. It compared the schema before the update with the
 schema after the rollback and found them equal — which is also what happens
