@@ -6,6 +6,14 @@ What follows is what was actually run and what it actually produced. Where a
 requirement is met, the evidence is the command and its output. Where it is
 not met, it says so and why. Nothing here is inferred from reading the code.
 
+**1.9.1 is a correction, not a feature release.** It exists because 1.9.0 was
+deployed to a real server and a real Windows laptop and came back with ten
+defects in one evening — none of which this lab could have found, because
+every test in it ran against PHP's built-in web server. Section I is the
+account of that, of the two container gates added so it cannot happen the same
+way again, and of the seventh defect the first of those gates found on its own.
+The rest of the report is the history that preceded it.
+
 Everything was exercised against a real installation — PHP 8.4.19, MariaDB
 10.11.14 — and against the real GitHub repository, not a mock. Eight releases
 (1.0.1 through 1.0.8) were published during this verification and installed
@@ -13,13 +21,15 @@ through the panel's own update pipeline. Nine update runs were performed in
 all: **three left in place, six rolled back** — five on request and one
 automatically, after a failure forced at APPLY.
 
-**The headline caveat, stated first because it is the largest.** Packets now
-move: two hosts behind separate NATs ping each other by virtual IP over a real
+**The headline caveat, stated first because it is the largest.** Packets move:
+two hosts behind separate NATs ping each other by virtual IP over a real
 WireGuard tunnel, and the section below shows the commands and their output.
-But every one of those results comes from **Linux network namespaces on a
-single machine**. Nothing here has run on Windows, on two real ISPs, or behind
-a real carrier-grade NAT. The acceptance criteria for Phase 2 name all three,
-and all three remain unmet. See [What Phase 2 has not shown](#what-phase-2-has-not-shown).
+Every one of those results comes from **Linux network namespaces on a single
+machine**. Since 1.9.0 the agent has also run on a real Windows laptop and
+reached a coordinator over the real internet — one machine, one evening, and
+reported rather than drilled. Two real ISPs at once and a real carrier-grade
+NAT remain untested. See
+[What Phase 2 has not shown](#what-phase-2-has-not-shown).
 
 ---
 
@@ -30,27 +40,44 @@ and all three remain unmet. See [What Phase 2 has not shown](#what-phase-2-has-n
 | A   | Installer           | **Pass** | Clean install on an empty database; re-installation refused |
 | B   | Auto-update         | **Pass** | 9 runs against live GitHub, 6 rolled back; 8 defects found and fixed |
 | C   | Multi-tenancy (R3)  | **Pass** | Fails closed; holds at 1,000 devices |
-| D   | Networking (R1, R4, R5) | **Partial** | Real tunnels direct and relayed, relay selection on measured latency, failover drilled with a relay killed mid-traffic — but only in a Linux lab; Windows and real ISPs untested |
+| D   | Networking (R1, R4, R5) | **Partial** | Real tunnels direct and relayed, relay selection on measured latency, failover drilled with a relay killed mid-traffic — in a Linux lab. The Windows agent has since run on real hardware (§I); two real ISPs still untested |
 | E   | Security            | **Pass** | With the open items listed under [Known limitations](#known-limitations) |
 | F   | Scale               | **Pass, with a finding** | 1,000 devices fine; address allocation scales with *pool* size |
 | G   | Recovery            | **Pass** | Byte-exact recovery from catastrophic damage |
-| H   | The networking gate | **Pass** | Eleven scenarios in one command; found four defects in the code it tests |
+| H   | The networking gate | **Pass** | 73 scenarios in one command; it found four defects when first written and more at every release since |
 | H2  | Dogfooding          | **Pass after two fixes** | Six update runs, two rollbacks; the rollback drill found a P1, and testing its fix found the fix incomplete |
 | I   | Production (1.9.0)  | **Failed, then fixed** | Ten defects in one evening on a real aaPanel box; two new gates now reproduce six of them, and found a seventh nobody had reported |
 
-Automated suites:
+Automated suites, as of 1.9.1:
+
+```
+$ ./services/lab/release.sh
+
+  test suites (PHP)              475 assertions, 0 failed
+  test suites (Go, -race)        clean across all four modules
+  Windows pack builds and is stamped
+  web gate (Apache + PHP-FPM)    36 passed, 0 failed
+  Argon2 gate (libsodium)        6 passed, 0 failed
+  networking gate                73 scenarios, 0 failed
+  update gate                    17 checks, all passed
+```
+
+The PHP figure rises release to release; the newest of it is the regression
+tests for the ten production defects, which fail against 1.9.0.
+
+The HTTP suite needs a server answering at the configured panel URL, so
+`release.sh` skips it unless one is up. Started locally it runs too:
 
 ```
 $ php -S 127.0.0.1:8088 -t . tests/dev-server.php &
 $ php tests/run.php --url=http://127.0.0.1:8088
-  471 passed, 0 failed, 1 skipped  (471 assertions)
-
-$ cd services/<each> && go vet ./... && go test -race ./...
-  63 tests, all passing, no races
+  593 passed, 0 failed, 1 skipped  (593 assertions)
 ```
 
-The one skip is the two-factor challenge, which needs a super admin with 2FA
-enabled; this installation has none.
+That one skip is the two-factor challenge, which needs a super admin with 2FA
+already enabled; this installation has none. The web gate covers it instead —
+it enrols two-factor on the administrator the installer creates, because a
+platform administrator cannot reach any other page until they do.
 
 The Go tests run under `-race` because the coordinator handles every packet in
 its own goroutine. That is not decoration — it found a data race in this
@@ -1859,6 +1886,34 @@ $ ./services/lab/argon2target/run.sh
 Against 1.9.0: **2 passed, 4 failed**, with the production `ValueError`
 reproduced exactly.
 
+### The update path
+
+The release applies through the product's own updater, drilled in a scratch
+database and a scratch application root:
+
+```
+$ ./services/lab/dogfood.sh
+
+  dogfood/versions            PASS  installing 1.9.0 (ff79c3f), updating to 1.9.1 (0d0871b)
+  dogfood/files-written       PASS  APPLY wrote 70 file(s)
+  dogfood/version-moved       PASS  the installed version moved 1.9.0 → 1.9.1
+  dogfood/uploads-guard       PASS  uploads/.htaccess was installed into a protected directory
+  dogfood/rollback            PASS  the rollback restored 52 file(s) and removed 18 the update had added
+  dogfood/uploads-guard-kept  PASS  the rollback left uploads/.htaccess in place
+  dogfood/byte-exact          PASS  all 386 files are byte-identical to before the update
+  dogfood/schema              PASS  the database schema is back to 59f76e69ce3f
+  17 checks, all passed.
+```
+
+Two of those are new, and they exist because the drill tripped over its own
+blind spot. `uploads/` was missing from the list of protected paths the
+byte-exact comparison excludes, so the file the post-update task installs
+looked like a rollback failure. Excluding the directory and saying nothing
+would have been a loophole; what matters about that file is now asserted by
+name — it arrives with the update, and the rollback leaves it alone. Going
+back to a version that executed uploaded PHP is a support decision; serving
+uploaded PHP again is not part of it.
+
 ### A defect the new gate found on its own
 
 Not one of the ten. Installing through the web gate with a table prefix — which
@@ -1979,30 +2034,44 @@ start.
 
 These are real and currently shipped.
 
-1. **Address allocation scales with pool size, not device count.** A fixed
+1. **The gates run Debian's Apache and a purpose-built PHP, not aaPanel's.**
+   The web gate reproduces the combination that broke — Apache talking to
+   PHP-FPM over `mod_proxy_fcgi`, with `.htaccess` in force — and the Argon2
+   gate reproduces the exact `ValueError`. Neither is the customer's actual
+   box. If aaPanel's PHP differs again in some third way, these will not see
+   it; running `release.sh`'s web gate is not a substitute for the checks in
+   `DEPLOY.md` stage 1b after an update.
+
+2. **The Windows installer is built in the gate, not run.** The panel-address
+   stamp is verified, and the agent's own logic is covered by Go tests. From
+   double-click to uninstall it still needs a Windows machine and the test
+   pack (Stage 15). The same is true of the service log and the Event Log
+   entries added in 1.9.1.
+
+3. **Address allocation scales with pool size, not device count.** A fixed
    toll on every approval, set by how wide the network's CIDR is: roughly an
    order of magnitude more on a `/16` than on a `/24`, and unchanged whether
    it is the first device or the four-thousandth. Correct, but the wrong
    shape. See §F.
 
-2. **Concurrency is untested.** Every measurement is sequential. The address
+4. **Concurrency is untested.** Every measurement is sequential. The address
    allocator takes a transaction and relies on `UPDATE ... LIMIT 1` for
    mutual exclusion, which is sound in principle and unverified in practice.
 
-3. **A fix to the update pipeline only takes effect from the next update.**
+5. **A fix to the update pipeline only takes effect from the next update.**
    The CLI runs all eleven steps in one process, so the code that performs an
    update is the code that was installed *before* it. This is inherent to
    self-updating software, not a defect, but it means a defect in MIGRATE or
    FINALISE survives exactly one more update. The web UI runs each step in its
    own request and so picks up the new code earlier — from APPLY onwards.
 
-4. **A rollback that has to restore the database rewinds the update system's
+6. **A rollback that has to restore the database rewinds the update system's
    own records.** `app_updates` and `app_backups` are in the dump like any
    other table, so a restore moves them back too. Status, error text and step
    are re-written afterwards, and the run log on disk is authoritative, but
    the row is not a complete account of a rolled-back run.
 
-5. **Relayed bytes are counted at ingress *and* egress on each hop.** A byte
+7. **Relayed bytes are counted at ingress *and* egress on each hop.** A byte
    relayed from A to B is counted when it arrives at the relay and again when
    it leaves, so the figure is roughly twice the payload. This is defensible —
    it is what the relay's own bandwidth bill looks like — but it belongs in
@@ -2010,29 +2079,29 @@ These are real and currently shipped.
 
    (The billed figure itself is no longer agent-reported; see §H.)
 
-6. **Relay failover costs about fifteen to twenty seconds.** Nothing tells an
+8. **Relay failover costs about fifteen to twenty seconds.** Nothing tells an
    agent a relay has died except the absence of a reply, and three missed
    five-second rebinds is how long establishing that takes. Measured
    repeatedly: 37% loss over a 40-second window for a restart, 49–50% for a
    move to another relay. Deferred deliberately; BACKLOG.md B4 carries the
    measurements and two ways to beat it.
 
-7. **The ACL filter is stateful but not a full firewall.** It tracks flows to
+9. **The ACL filter is stateful but not a full firewall.** It tracks flows to
    recognise replies, which closes the source-port bypass, but it does not
    validate TCP sequence numbers or reassemble streams. A packet that matches
    an open flow's 5-tuple is accepted on that basis. Closing that gap means a
    great deal more state for an attack that already requires the ability to
    inject into an established WireGuard tunnel.
 
-8. **IPv6 extension headers are refused, not parsed.** The overlay is IPv4, so
+10. **IPv6 extension headers are refused, not parsed.** The overlay is IPv4, so
    this costs nothing today and would need doing properly before it becomes
    dual-stack.
 
-9. **PHP cannot hold a socket open.** There are no WebSockets; live progress
+11. **PHP cannot hold a socket open.** There are no WebSockets; live progress
    uses Server-Sent Events. This was a deliberate choice, stated when it was
    made, not a limitation discovered late.
 
-10. **A machine numbered out of the mapping pool still loses the contest.**
+12. **A machine numbered out of the mapping pool still loses the contest.**
     Duplicate LAN ranges no longer collide — each advertised LAN gets a prefix
     of its own from `10.128.0.0/10` — but somebody already using that range on
     their own network will be handed a mapped prefix that lands on top of it.
@@ -2040,14 +2109,14 @@ These are real and currently shipped.
     prefix that clashed. The fix is to change `network.mapped_pool`; there is
     no way for the agent to reach both. Drilled as `gateway-clash`.
 
-11. **One agent install belongs to one customer.** `devices.network_id` is a
+13. **One agent install belongs to one customer.** `devices.network_id` is a
     single column, so a support laptop that services twenty customers needs
     twenty enrolments and one install holds one. Multi-network membership is
     not implemented, and would still need per-network routing tables before
     twenty hotels on 192.168.1.0/24 could work. This is the architectural
     question after subnet-router mode, not a defect in it.
 
-12. **Gateway mode has never run on Windows.** `New-NetNat` plus per-interface
+14. **Gateway mode has never run on Windows.** `New-NetNat` plus per-interface
     forwarding is the only mechanism available on the Windows 10 and 11
     machines customers have — RRAS is Server-only, ICS cannot target a prefix
     — and none of it has executed. Stage 13 of the test pack covers it,
@@ -2060,40 +2129,48 @@ These are real and currently shipped.
     operating system. That is an argument for why it should work, not a
     result. Stage 13g asks for the result.
 
-13. **Two of the three split-DNS mechanisms have never run.** Names work, and
-    the gate proves it end to end — but what it exercises is the hosts-file
-    fallback, because no machine in this lab has systemd-resolved. The
-    `resolvectl` path and Windows' NRPT are written, reviewed and unexercised.
-    Stage 14 of the test pack covers NRPT; the Linux half needs a machine with
-    systemd-resolved on it, which is an afternoon rather than a project.
+15. **Split DNS is proven on Linux and reported working on Windows.** The gate
+    exercises the hosts-file fallback and, since 1.8.0, the real
+    `systemd-resolved` path in a container that has it. NRPT is the half this
+    environment cannot run at all; it was reported working on a real Windows
+    laptop with 1.9.0, which is a result from one machine rather than a drill.
+    Stage 14 of the test pack is still the way it gets evidence.
 
-6. **`UNLOCK TABLES` commits.** The restore path issues it only when locks are
+16. **`UNLOCK TABLES` commits.** The restore path issues it only when locks are
    actually held, precisely because issuing it unconditionally would commit a
    caller's open transaction. Callers that restore inside a transaction should
    not expect to roll that transaction back.
 
-7. **Ten files remain above the ~400-line guideline.** `BackupManager` was
-   split for exactly this reason during 1.0.7 (517 → 417 plus a 240-line
-   `ArchiveStore`), but the rest were not:
+17. **Fourteen files remain above the ~400-line guideline**, and the list has
+   grown rather than shrunk. `BackupManager` was split for exactly this reason
+   during 1.0.7 (517 → 417 plus a 240-line `ArchiveStore`); nothing else has
+   been:
 
    | File | Lines |
    |---|---|
-   | `app/Updater/UpdateSteps.php` | 738 |
-   | `tests/DatabaseTests.php` | 716 |
+   | `tests/DatabaseTests.php` | 879 |
+   | `app/Updater/UpdateSteps.php` | 750 |
    | `tests/HttpTests.php` | 683 |
-   | `install/Installer.php` | 667 |
-   | `tests/UnitTests.php` | 587 |
+   | `install/Installer.php` | 677 |
+   | `tests/UnitTests.php` | 641 |
    | `tests/StaticAnalysisTests.php` | 516 |
-   | `install/index.php` | 471 |
+   | `install/index.php` | 487 |
+   | `tests/GatewayTests.php` | 476 |
+   | `app/Services/DeviceService.php` | 465 |
+   | `app/Updater/RollbackManager.php` | 435 |
    | `app/Updater/UpdateManager.php` | 434 |
    | `app/Updater/BackupManager.php` | 417 |
    | `app/Updater/GithubClient.php` | 409 |
+   | `app/Services/AclService.php` | 408 |
 
-   `UpdateSteps.php` is the clear offender — it is a step machine and eleven
-   steps in one file, and it grew during this verification rather than
-   shrinking. The test files are less pressing but are not exempt.
+   `UpdateSteps.php` is still the clear offender — a step machine and eleven
+   steps in one file. `DatabaseTests.php` overtook it in 1.9.1, which is the
+   cost of putting the production regressions where the fixtures already are;
+   splitting the tenant-isolation fixtures out is the obvious next move. New
+   code in 1.9.1 stayed under the line: the largest is
+   `app/Updater/PathGuard.php` at 328.
 
-8. **Signature verification is implemented but unused.** Manifests carry a
+18. **Signature verification is implemented but unused.** Manifests carry a
    `signature` field and the code checks it when present; no release in this
    verification was signed, so the *verified* path is the unsigned one.
 
@@ -2101,33 +2178,27 @@ These are real and currently shipped.
 
 ## Not implemented, and why
 
-1. **Relay selection is not yet intelligent.** The relay exists and works, but
-   selection is round-robin within a region and `devices` has no region
-   column, so in practice it picks the first configured relay. Latency-based
-   selection needs the agents to measure and report round-trip times to each
-   candidate relay, which they do not. A customer in Ahmedabad could today be
-   assigned a relay anywhere.
+Relay selection on measured latency and per-port ACL enforcement on the agent
+were both in this list until 1.6.0. They are done, drilled in the gate
+(`relay/path`, `acl/scope`, `srcport/bypass`, `tamper/blocked`) and described
+in §H; what remains is below.
 
-   **R7 is partially met.** Packets move, directly and relayed, so the panel
-   is no longer a dashboard with nothing behind it. But a product whose agent
-   has never run on Windows and has never crossed two real ISPs is not one I
-   would put in front of a paying customer. Nothing in this report should be
-   read as claiming otherwise.
+**R7 is partially met.** Packets move, directly and relayed, over real NAT and
+now over the real internet from a real Windows laptop, so the panel is not a
+dashboard with nothing behind it. But a product that has never crossed two real
+ISPs at once, and whose customer-facing installer has never been run end to end
+on Windows, is not one I would put in front of a paying customer. Nothing in
+this report should be read as claiming otherwise.
 
-2. **ACL enforcement on the agent.** The panel compiles per-peer filters and
-   sends them in the configuration; the agent currently applies the peer set
-   and the allowed_ips, which is coarse-grained allow/deny, and ignores the
-   port and protocol filters. A rule that says "only 443" is today enforced as
-   "that peer is reachable".
-
-3. **Billing and payment.** Plans and limits are enforced at the action; there
+1. **Billing and payment.** Plans and limits are enforced at the action; there
    is no payment provider, invoicing or dunning.
 
-4. **Agent release distribution.** The `agent_releases` table exists and is
-   empty. There is now an agent to release, so this has gone from "nothing to
-   serve" to "not built yet".
+2. **Agent release distribution.** The `agent_releases` table exists and is
+   empty. There is now an agent to release — and a Windows installer pack that
+   is built by hand and copied — so this has gone from "nothing to serve" to
+   "not built yet".
 
-5. **Horizontal scale testing.** The session store is in the database and the
+3. **Horizontal scale testing.** The session store is in the database and the
    web tier is stateless by design, so more than one node should work. It has
    never been run on more than one node.
 

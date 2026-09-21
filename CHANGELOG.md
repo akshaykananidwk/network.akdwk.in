@@ -115,6 +115,13 @@ them, secrets encrypted at rest. `DEPLOY.md` had been sending operators to a
 page that did not exist. The installer now asks for the public key too, and no
 longer defaults the coordinator to `127.0.0.1`.
 
+**Two checks in the update drill** (`services/lab/dogfood.sh`): that
+`uploads/.htaccess` arrives with the update, and that the rollback leaves it
+there. `uploads/` had been missing from the list of protected paths the
+byte-exact comparison excludes, so the new post-update task looked like a
+rollback failure; excluding the directory and saying nothing would have been a
+loophole.
+
 ### Changed
 
 `DEPLOY.md`: the document root is the repository root; the worker cron uses
