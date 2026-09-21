@@ -489,6 +489,43 @@ Run `collect.ps1` at each stage and send me the zip.
 
 ---
 
+## Updating a panel that is already running
+
+Updates go through **System → Updates** in the panel, or `php cli/update.php`.
+The pipeline takes a verified backup before it writes anything and rolls back
+by itself if the health check fails.
+
+What matters on a box that has been patched by hand — and 1.9.0's had to be:
+
+| File | What the update does |
+|---|---|
+| `.htaccess` | **Overwritten.** 1.9.1's is the one with the guarded `php_flag`, the blocked directories and `CGIPassAuth`; a hand-edited copy is replaced by it |
+| `app/Core/Crypto.php` | **Overwritten.** The Argon2 fix is in it |
+| `uploads/.htaccess` | **Written by a post-update task.** `uploads/` is a protected path, so the updater itself will not write into it; the task installs the file and a rollback leaves it alone |
+| `config/config.php` | **Left alone**, always. Values edited there by hand survive |
+| `.env`, `storage/`, `uploads/*`, `*.local.php` | **Left alone** |
+
+So a manual edit to `.htaccess` or `Crypto.php` is superseded, not merged — if
+you added something of your own to either, re-apply it afterwards. A manual
+edit to `config/config.php` survives, which is the reason the coordinator
+settings moved out of it: **Platform → Coordinator** now stores them in the
+database, where a later release cannot miss them and you can see them.
+
+**After the update, re-run the 1b check.** Every path must still answer 403 or
+404, and this one must not execute:
+
+```bash
+printf '<?php echo "EXECUTED";' > /www/wwwroot/network.akdwk.in/uploads/probe.php
+curl -sS https://network.akdwk.in/uploads/probe.php
+rm /www/wwwroot/network.akdwk.in/uploads/probe.php
+```
+
+**Expect:** a 403 page, or the source as plain text. The word `EXECUTED` on its
+own means `uploads/.htaccess` is not in force — check it exists and that
+`AllowOverride` permits it.
+
+---
+
 ## When something is wrong
 
 | What you see | Where to look |
