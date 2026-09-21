@@ -187,8 +187,18 @@ func (s *session) applyConfig(priv wgPrivate, cfg *panel.Config) error {
 		return err
 	}
 
-	if err := netcfg.Apply(s.tun.Name(), plan); err != nil {
+	refused, err := netcfg.Apply(s.tun.Name(), plan)
+	if err != nil {
 		return fmt.Errorf("configuring the interface: %w", err)
+	}
+	for _, prefix := range refused {
+		// Loud, because the customer will experience it as "the camera at the
+		// hotel does not open" and nothing in the panel will look wrong. The
+		// answer is to renumber one of the two LANs, and nobody can be told
+		// that unless the agent says which prefix clashed.
+		s.logf("route %s not installed: this machine is already on that network. "+
+			"Devices in the remote %s are unreachable from here until one side is renumbered",
+			prefix, prefix)
 	}
 
 	if err := s.applyGateway(cfg); err != nil {
@@ -208,6 +218,10 @@ func (s *session) applyConfig(priv wgPrivate, cfg *panel.Config) error {
 	table.AdoptFlows(s.filters)
 	s.filters = table
 	s.tun.SetFilters(table)
+	if table.Served() > 0 {
+		s.logf("acl: forwarding for %d peer/subnet pair(s); rules about machines behind this gateway are enforced here too",
+			table.Served())
+	}
 	if table.Restricted() > 0 {
 		s.logf("acl: %d of %d peer(s) carry port rules, enforced in both directions",
 			table.Restricted(), len(cfg.Peers))

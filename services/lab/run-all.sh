@@ -104,6 +104,14 @@ cleanup() {
     # run's environment from underneath it.
     lab::stop_servers
 
+    # KEEP=1 leaves the namespaces, the control plane and the tenant standing
+    # so a failure can be looked at rather than reasoned about. A drill that
+    # destroys the evidence on its way out makes every failure a guess.
+    if [ "${KEEP:-0}" = "1" ]; then
+        say "KEEP=1: leaving the lab up. Tear it down with ./topology.sh down"
+        return
+    fi
+
     if ! lab::owns; then
         lab::down_agents
         return
@@ -163,9 +171,11 @@ declare -A SCENARIOS=(
     [acl-srcport]=scenario_acl_source_port
     [enrol-throttle]=scenario_enrol_throttle
     [gateway]=scenario_gateway
+    [gateway-clash]=scenario_gateway_clash
+    [gateway-tamper]=scenario_gateway_tamper
     [revocation]=scenario_revocation
 )
-ORDER=(cone relay cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway revocation)
+ORDER=(cone relay cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash gateway-tamper revocation)
 
 if [ "${1:-}" = "--list" ]; then
     printf '%s\n' "${ORDER[@]}"

@@ -19,7 +19,14 @@ func buildFilterTable(cfg *panel.Config) *acl.Table {
 	table.AddSelf(cfg.Device.VirtualIP)
 
 	for _, peer := range cfg.Peers {
-		table.Add(peer.VirtualIP, convertFilters(peer.Filters))
+		table.Add(peer.VirtualIP, localFilters(peer.Filters))
+
+		// On a gateway, each peer also carries what it may reach inside the
+		// LANs this device routes for. Absent everywhere else, because every
+		// other device forwards nothing.
+		for _, served := range peer.Routes {
+			table.AddServed(peer.VirtualIP, served.Destination, convertFilters(served.Filters))
+		}
 	}
 
 	// Prefixes reachable through a gateway. The machines inside them have no
@@ -32,7 +39,7 @@ func buildFilterTable(cfg *panel.Config) *acl.Table {
 			// nowhere.
 			continue
 		}
-		table.AddRoute(route.Destination, route.Via, convertFilters(route.Filters))
+		table.AddRoute(route.Destination, route.Via, localFilters(route.Filters))
 	}
 
 	return table

@@ -95,3 +95,18 @@ func runPowerShell(statement string) error {
 
 	return nil
 }
+
+// outputPowerShell runs a statement and returns what it printed, for the
+// checks that need an answer rather than a success or failure.
+func outputPowerShell(statement string) (string, error) {
+	cmd := exec.Command("powershell.exe",
+		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+		"-Command", statement)
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	return string(out), nil
+}

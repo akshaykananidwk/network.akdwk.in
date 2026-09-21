@@ -40,6 +40,12 @@ final class AclService
         $selfTags = self::tagsOf($self);
         $defaultAllow = $network['acl_default_action'] !== 'deny';
 
+        // Prefixes this device is itself the gateway for. Empty for everything
+        // that is not a subnet router, which is almost every device.
+        $serves = (int) $self['is_gateway'] === 1
+            ? NetworkRoute::cidrsViaDevice((int) $self['id'])
+            : [];
+
         $out = [];
         foreach ($peers as $peer) {
             $peerTags = self::tagsOf($peer);
@@ -84,6 +90,17 @@ final class AclService
 
             $out[] = [
                 'uid'          => $peer['device_uid'],
+                // What this peer may reach inside the LANs *we* route for.
+                //
+                // Without this the gateway forwards on the strength of the
+                // peer link alone, and every rule about a machine behind it is
+                // enforced only by the agent being restricted. That agent runs
+                // on hardware the customer owns, so a modified build would
+                // reach the whole NVR when the rule named one port on it — the
+                // same shape of hole as matching a source port. The gateway is
+                // the one device in the path that the customer being
+                // restricted does not control, so it checks too.
+                'routes'       => self::routeFiltersFor($networkId, $peer, $serves),
                 'name'         => $peer['name'],
                 'public_key'   => $peer['public_key'],
                 'virtual_ip'   => $peer['virtual_ip'],
@@ -93,6 +110,27 @@ final class AclService
                 'is_gateway'   => (int) $peer['is_gateway'] === 1,
                 'filters'      => $decision['filters'],
                 'last_seen_at' => $peer['last_seen_at'],
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
+     * What one peer may reach inside each prefix this device routes for.
+     *
+     * @param array<string,mixed> $peer
+     * @param list<string> $serves
+     * @return list<array<string,mixed>>
+     */
+    private static function routeFiltersFor(int $networkId, array $peer, array $serves): array
+    {
+        $out = [];
+
+        foreach ($serves as $cidr) {
+            $out[] = [
+                'destination' => $cidr,
+                'filters'     => AclRouteFilters::forRoute($networkId, $peer, $cidr),
             ];
         }
 

@@ -10,11 +10,13 @@
 
   .\collect.ps1 -Stage 01-before-install
   .\collect.ps1 -Stage 07-connected -PeerIP 10.99.0.3
+  .\collect.ps1 -Stage 13-gateway -LanIP 192.168.1.50
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Stage,
     [string]$PeerIP = "",
+    [string]$LanIP  = "",
     [string]$Agent  = ""
 )
 
@@ -145,6 +147,57 @@ if ($PeerIP) {
     Check "traceroute to the peer" { tracert -d -h 8 -w 2000 $PeerIP }
 }
 Check "traceroute to a public address (must not enter the overlay)" { tracert -d -h 8 -w 2000 1.1.1.1 }
+
+# ---- gateway / subnet-router mode ---------------------------------------------------
+#
+# Only meaningful on the PC that acts as the site's gateway, but every check is
+# safe to run anywhere: on a machine that is not a gateway they simply report
+# nothing, and "nothing" is itself the answer to "did the agent turn this
+# machine into a router behind my back?".
+Check "IP forwarding on each interface" {
+    Get-NetIPInterface -AddressFamily IPv4 |
+        Format-Table -AutoSize InterfaceAlias, Forwarding, ConnectionState, InterfaceMetric
+}
+Check "NAT instances (New-NetNat)" {
+    Get-NetNat -ErrorAction SilentlyContinue |
+        Format-List Name, InternalIPInterfaceAddressPrefix, ExternalIPInterfaceAddressPrefix, Active
+}
+Check "NAT session mappings" {
+    Get-NetNatSession -ErrorAction SilentlyContinue | Select-Object -First 20 |
+        Format-Table -AutoSize NatName, Protocol, InternalSourceAddress, InternalSourcePort, ExternalSourceAddress
+}
+Check "routes that are not the overlay and not the default route" {
+    Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.DestinationPrefix -ne "0.0.0.0/0" -and $_.DestinationPrefix -notlike "127.*" } |
+        Sort-Object InterfaceAlias |
+        Format-Table -AutoSize DestinationPrefix, InterfaceAlias, NextHop, RouteMetric
+}
+Check "RRAS, in case something else on this machine already routes" {
+    Get-Service RemoteAccess -ErrorAction SilentlyContinue | Format-List Name, Status, StartType
+}
+Check "Internet Connection Sharing, which conflicts with New-NetNat" {
+    Get-Service SharedAccess -ErrorAction SilentlyContinue | Format-List Name, Status, StartType
+}
+if ($LanIP) {
+    # The point of the whole feature: a machine with no agent on it, reached
+    # across the tunnel. Run this one from the SUPPORT laptop, not the gateway.
+    Check "interface chosen for the LAN device behind the gateway" {
+        Find-NetRoute -RemoteIPAddress $LanIP -ErrorAction SilentlyContinue |
+            Format-Table -AutoSize InterfaceAlias, IPAddress, NextHop
+    }
+    Check "ping the LAN device behind the gateway" { ping -n 6 $LanIP }
+    Check "traceroute to the LAN device (should be gateway then device)" {
+        tracert -d -h 6 -w 2000 $LanIP
+    }
+    Check "TCP 554 to the LAN device — the port the rule allows" {
+        Test-NetConnection -ComputerName $LanIP -Port 554 -WarningAction SilentlyContinue |
+            Format-List ComputerName, RemotePort, TcpTestSucceeded, PingSucceeded
+    }
+    Check "TCP 80 to the LAN device — the port the rule does not allow" {
+        Test-NetConnection -ComputerName $LanIP -Port 80 -WarningAction SilentlyContinue |
+            Format-List ComputerName, RemotePort, TcpTestSucceeded, PingSucceeded
+    }
+}
 
 # ---- firewall and sockets ---------------------------------------------------------
 Check "firewall rule" { netsh advfirewall firewall show rule name="AKConnect Agent (WireGuard UDP)" }

@@ -117,7 +117,13 @@ lab::build() {
         ( cd "$REPO/services/$svc" && go build -o "$BIN/akconnect-$svc" "./cmd/akconnect-$svc" ) \
             || die "build failed: $svc"
     done
-    say "built coordinator, relay and agent"
+    # A second agent with its own rule enforcement compiled out, for the drills
+    # that have to prove the *far* end holds. Build-tag gated, so the binary
+    # the product ships cannot contain it.
+    ( cd "$REPO/services/agent" && go build -tags labtamper -o "$BIN/akconnect-agent-tampered" ./cmd/akconnect-agent ) \
+        || die "build failed: tampered agent"
+
+    say "built coordinator, relay and agent (plus the tampered agent the ACL drills need)"
 }
 
 # ------------------------------------------------------------------ secrets

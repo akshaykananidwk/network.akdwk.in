@@ -40,6 +40,18 @@ type Plan struct {
 	Routes []netip.Prefix
 	// MTU for the tunnel interface.
 	MTU int
+
+	// Overlay is the network's own prefix. It is also the first entry in
+	// Routes; it is named separately because it is the one route that is not
+	// negotiable — a device with no route to the overlay is not on the
+	// network at all.
+	Overlay netip.Prefix
+
+	// installed is what Apply actually put in the routing table, which can be
+	// fewer prefixes than Routes when one of them collides with a network the
+	// machine is already on. Remove deletes only these, so the agent never
+	// tears down a route it did not create.
+	installed []netip.Prefix
 }
 
 // Build validates a configuration and returns the plan to apply.
@@ -62,6 +74,7 @@ func Build(cfg *panel.Config) (*Plan, error) {
 	}
 
 	routes := []netip.Prefix{overlay.Masked()}
+	ours := servedLocally(cfg)
 
 	for _, r := range cfg.Routes {
 		prefix, err := netip.ParsePrefix(r.Destination)
@@ -71,6 +84,19 @@ func Build(cfg *panel.Config) (*Plan, error) {
 		if err := reject(prefix, "the routes list"); err != nil {
 			return nil, err
 		}
+
+		// The routes list carries every gateway's prefixes, including this
+		// device's own. Installing a route for the LAN we are the gateway for
+		// would point our own kernel back down the tunnel for traffic we are
+		// supposed to be forwarding out to the LAN — the packet arrives from
+		// the tunnel, the kernel looks up 192.168.1.50, finds the tunnel, and
+		// the NVR is never reached. It also replaces the interface route the
+		// kernel installed for our LAN, so the gateway loses the site it
+		// serves.
+		if _, mine := ours[prefix.Masked()]; mine {
+			continue
+		}
+
 		routes = append(routes, prefix.Masked())
 	}
 
@@ -100,6 +126,7 @@ func Build(cfg *panel.Config) (*Plan, error) {
 		Address: netip.PrefixFrom(addr, addr.BitLen()),
 		Routes:  dedupe(routes),
 		MTU:     mtu,
+		Overlay: overlay.Masked(),
 	}, nil
 }
 
@@ -128,6 +155,32 @@ func dedupe(in []netip.Prefix) []netip.Prefix {
 		}
 		seen[p] = struct{}{}
 		out = append(out, p)
+	}
+
+	return out
+}
+
+// servedLocally is the set of prefixes this device is itself the gateway for.
+//
+// Two sources, because either can be missing: the panel says so directly in
+// the device block, and the routes list names the gateway by its overlay
+// address, which for our own routes is our own.
+func servedLocally(cfg *panel.Config) map[netip.Prefix]struct{} {
+	out := make(map[netip.Prefix]struct{})
+
+	for _, cidr := range cfg.Device.Advertises {
+		if prefix, err := netip.ParsePrefix(cidr); err == nil {
+			out[prefix.Masked()] = struct{}{}
+		}
+	}
+
+	for _, r := range cfg.Routes {
+		if r.Via == "" || r.Via != cfg.Device.VirtualIP {
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(r.Destination); err == nil {
+			out[prefix.Masked()] = struct{}{}
+		}
 	}
 
 	return out

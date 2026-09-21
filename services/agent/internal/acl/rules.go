@@ -207,6 +207,10 @@ type Table struct {
 	// self is this device's own overlay address, needed to tell which end of
 	// a routed packet is the far one.
 	self netip.Addr
+	// served is the other direction of the same idea: prefixes this device is
+	// the gateway for, keyed by the peer whose traffic it would be forwarding.
+	// Empty on everything that is not a subnet router.
+	served map[netip.Addr][]Route
 }
 
 // NewTable compiles a table from the panel's peer list.

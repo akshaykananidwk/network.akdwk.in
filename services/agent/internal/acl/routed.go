@@ -63,6 +63,77 @@ func (t *Table) AddRoute(cidr, via string, filters []Filter) {
 	})
 }
 
+// AddServed records a prefix *this* device is the gateway for, together with
+// what one peer may reach inside it.
+//
+// This is the other half of a routed rule, and the half that matters when the
+// restricted agent cannot be trusted. Rules about an NVR are compiled into the
+// support laptop's table so it refuses to send, and into the gateway's table,
+// keyed by the laptop, so the gateway refuses to forward. A modified laptop
+// agent gets past the first and not the second.
+func (t *Table) AddServed(peerIP, cidr string, filters []Filter) {
+	peer, err := netip.ParseAddr(strings.TrimSpace(peerIP))
+	if err != nil {
+		return
+	}
+
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(cidr))
+	if err != nil {
+		return
+	}
+
+	sorted := append([]Filter(nil), filters...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].RuleID < sorted[j].RuleID })
+
+	if t.served == nil {
+		t.served = make(map[netip.Addr][]Route)
+	}
+
+	key := peer.Unmap()
+	t.served[key] = append(t.served[key], Route{Prefix: prefix.Masked(), Filters: sorted})
+
+	sort.SliceStable(t.served[key], func(i, j int) bool {
+		return t.served[key][i].Prefix.Bits() > t.served[key][j].Prefix.Bits()
+	})
+}
+
+// servedRouteFor returns the rules for traffic from one peer into a LAN this
+// device routes for, and whether such a route exists at all.
+func (t *Table) servedRouteFor(peer, dst netip.Addr) ([]Filter, bool) {
+	for _, r := range t.served[peer] {
+		if r.Prefix.Contains(dst) {
+			return r.Filters, true
+		}
+	}
+
+	return nil, false
+}
+
+// servesPrefix reports whether an address sits in a LAN this device is the
+// gateway for — that is, whether a packet from it is one we are forwarding
+// rather than one we originated.
+func (t *Table) servesPrefix(addr netip.Addr) bool {
+	for _, routes := range t.served {
+		for _, r := range routes {
+			if r.Prefix.Contains(addr) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// Served is how many peer/prefix pairs this device forwards for.
+func (t *Table) Served() int {
+	n := 0
+	for _, routes := range t.served {
+		n += len(routes)
+	}
+
+	return n
+}
+
 // routeFor returns the most specific advertised prefix covering an address.
 func (t *Table) routeFor(addr netip.Addr) (Route, bool) {
 	for _, r := range t.routes {

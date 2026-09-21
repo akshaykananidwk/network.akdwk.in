@@ -80,13 +80,18 @@ lab::uid() { jq -r '.device_uid' "$(lab::state_dir "$1")/state.json"; }
 # made a later scenario fail for reasons that had nothing to do with it.
 # setsid puts the whole chain in one group so the group can be killed.
 lab::up() {
-    local ns=$1
+    local ns=$1 binary="${2:-akconnect-agent}"
     setsid ip netns exec "$ns" env \
         AKCONNECT_STATE_DIR="$(lab::state_dir "$ns")" \
-        "$BIN/akconnect-agent" up --verbose \
+        "$BIN/$binary" up --verbose \
         >"$LOGS/$ns-up.log" 2>&1 &
     AGENT_PIDS+=("$!")
 }
+
+# lab::up_tampered runs a namespace's agent with rule enforcement compiled out,
+# which is the closest the lab can get to a customer who rebuilt the binary. Any
+# rule that still holds afterwards is being held by the other end.
+lab::up_tampered() { lab::up "$1" akconnect-agent-tampered; }
 
 lab::down_agents() {
     local pid

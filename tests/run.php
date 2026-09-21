@@ -37,6 +37,7 @@ use Tests\DatabaseTests;
 use Tests\HttpTests;
 use Tests\TestCase;
 use Tests\DocumentationTests;
+use Tests\GatewayTests;
 use Tests\StaticAnalysisTests;
 use Tests\UnitTests;
 
@@ -86,6 +87,10 @@ if ($runAll || isset($options['db'])) {
 
         try {
             DatabaseTests::run();
+            // Its own transaction, and its own fixtures: subnet routing across
+            // two customers is a different question from tenant scoping, and
+            // mixing them makes a failure in either harder to read.
+            GatewayTests::run();
             // Runs after, and outside, the transaction DatabaseTests wraps
             // itself in: dumping and restoring means DDL, which commits.
             BackupTests::run();

@@ -78,6 +78,17 @@ type Peer struct {
 	// link. The panel has already decided *whether* these two devices may
 	// talk; these decide which packets between them may pass.
 	Filters []Filter `json:"filters"`
+	// Routes are the prefixes *this* device is the gateway for, each with the
+	// rules governing what this peer may reach inside them. Present only on a
+	// gateway's own configuration, and only there because it is the device
+	// that forwards the traffic.
+	Routes []PeerRoute `json:"routes"`
+}
+
+// PeerRoute is what one peer may reach inside one LAN we route for.
+type PeerRoute struct {
+	Destination string   `json:"destination"`
+	Filters     []Filter `json:"filters"`
 }
 
 // Filter is one compiled ACL rule, as AclService::toFilter() emits it.

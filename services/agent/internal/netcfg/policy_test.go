@@ -133,3 +133,81 @@ func TestDefaultsMTUWhenThePanelDoesNotSay(t *testing.T) {
 		t.Errorf("MTU = %d, want the 1420 fallback", plan.MTU)
 	}
 }
+
+// A gateway must not route its own LAN down the tunnel.
+//
+// This is the defect that made subnet-router mode look implemented and route
+// nothing: the panel sends every gateway's prefixes in the routes list, the
+// agent installed all of them, and `ip route replace 192.168.77.0/24 dev akc0`
+// on the gateway itself both destroyed the kernel's interface route for the
+// LAN and pointed forwarded packets back at the tunnel they arrived on. The
+// tunnel was up, the iptables rules were right, and the NVR was unreachable.
+func TestBuildSkipsPrefixesThisDeviceServes(t *testing.T) {
+	cfg := &panel.Config{}
+	cfg.Device.VirtualIP = "10.99.0.3"
+	cfg.Device.IsGateway = true
+	cfg.Device.Advertises = []string{"192.168.77.0/24"}
+	cfg.Network.CIDR = "10.99.0.0/24"
+	cfg.Routes = []panel.Route{
+		{Destination: "192.168.77.0/24", Via: "10.99.0.3"},
+		{Destination: "192.168.88.0/24", Via: "10.99.0.9"},
+	}
+
+	plan, err := Build(cfg)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	for _, route := range plan.Routes {
+		if route.String() == "192.168.77.0/24" {
+			t.Fatalf("plan routes this device's own LAN through the tunnel: %v", plan.Routes)
+		}
+	}
+
+	var sawOther bool
+	for _, route := range plan.Routes {
+		if route.String() == "192.168.88.0/24" {
+			sawOther = true
+		}
+	}
+	if !sawOther {
+		t.Fatalf("another gateway's prefix was dropped too: %v", plan.Routes)
+	}
+}
+
+// The same, when the panel names the prefix only in the device block — an
+// older panel, or a route whose via address has not been filled in yet.
+func TestBuildSkipsAdvertisedPrefixWithoutVia(t *testing.T) {
+	cfg := &panel.Config{}
+	cfg.Device.VirtualIP = "10.99.0.3"
+	cfg.Device.IsGateway = true
+	cfg.Device.Advertises = []string{"192.168.77.0/24"}
+	cfg.Network.CIDR = "10.99.0.0/24"
+	cfg.Routes = []panel.Route{{Destination: "192.168.77.0/24"}}
+
+	plan, err := Build(cfg)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if len(plan.Routes) != 1 || plan.Routes[0].String() != "10.99.0.0/24" {
+		t.Fatalf("expected the overlay alone, got %v", plan.Routes)
+	}
+}
+
+// Overlay must be filled in, because applyPlan uses it to decide which route
+// is not allowed to lose to a local network.
+func TestBuildRecordsTheOverlay(t *testing.T) {
+	cfg := &panel.Config{}
+	cfg.Device.VirtualIP = "10.99.0.2"
+	cfg.Network.CIDR = "10.99.0.0/24"
+
+	plan, err := Build(cfg)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if plan.Overlay.String() != "10.99.0.0/24" {
+		t.Fatalf("Overlay = %q", plan.Overlay)
+	}
+}

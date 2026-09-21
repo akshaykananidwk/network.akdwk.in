@@ -399,6 +399,134 @@ rule. Both are findings.
 
 ---
 
+## Stage 13 — Gateway mode · 20 min
+
+**This stage needs two machines and one more device.** The gateway PC is a
+Windows machine on the customer's LAN. The support laptop is the other end of
+the tunnel. The third device is anything with an IP that cannot run our agent —
+an NVR, a printer, a DVR, or just a second PC with the agent stopped.
+
+Write down the LAN address of that third device before you start. Everywhere
+below I write `192.168.1.50`, use that address instead.
+
+### 13a — On the panel, before touching either machine
+
+1. Open the gateway PC's device page.
+2. **Advertise route** → enter the LAN range the PC is on, e.g. `192.168.1.0/24`.
+3. Leave it **unapproved** for now.
+
+### 13b — On the support laptop, with the route still unapproved
+
+```powershell
+Find-NetRoute -RemoteIPAddress 192.168.1.50 | Format-Table -AutoSize InterfaceAlias, NextHop
+Test-NetConnection -ComputerName 192.168.1.50 -Port 554
+.\collect.ps1 -Stage 13a-before-approval -LanIP 192.168.1.50
+```
+
+**Expect:** `TcpTestSucceeded : False`, and `Find-NetRoute` picks your physical
+adapter, not AKConnect. An unapproved route must carry nothing (R4).
+
+**The failure I am looking for:** it works before anyone approved it. That is a
+finding and I want to know immediately.
+
+### 13c — Approve it on the panel
+
+Device page → the advertised route → **Approve**. Wait 30 seconds.
+
+### 13d — On the gateway PC
+
+```powershell
+Get-NetIPInterface -AddressFamily IPv4 | Format-Table -AutoSize InterfaceAlias, Forwarding
+Get-NetNat | Format-List Name, InternalIPInterfaceAddressPrefix, Active
+.\collect.ps1 -Stage 13d-gateway-pc
+```
+
+**Expect:** `Forwarding` is `Enabled` on the AKConnect adapter, and one
+`Get-NetNat` entry whose name starts with `AKConnect`.
+
+**The failure I am looking for:** `New-NetNat` refusing because Internet
+Connection Sharing or RRAS already owns NAT on this machine. Windows reports
+this as a plain "The parameter is incorrect", which tells you nothing, so the
+collector records the state of both services next to it. If you see it, tell
+me — a hotel PC with ICS already on is a case I have to handle in code, not in
+the runbook.
+
+### 13e — On the support laptop, after approval
+
+```powershell
+.\akconnect-agent.exe status
+Find-NetRoute -RemoteIPAddress 192.168.1.50 | Format-Table -AutoSize InterfaceAlias, NextHop
+tracert -d -h 6 192.168.1.50
+Test-NetConnection -ComputerName 192.168.1.50 -Port 554
+Test-NetConnection -ComputerName 192.168.1.50 -Port 80
+.\collect.ps1 -Stage 13e-through-gateway -LanIP 192.168.1.50
+```
+
+**Expect:** `Find-NetRoute` now picks the AKConnect adapter for
+`192.168.1.50`. The traceroute shows the gateway PC's overlay address and then
+the device. Port 554 connects. Port 80 does **not**, if the only ACL rule you
+wrote names 554.
+
+If you have written no ACL rule yet, both ports will connect and that is
+correct — write the rule on the panel (`allow`, destination `192.168.1.50/32`,
+`tcp`, port `554`), wait 30 seconds, and run the two `Test-NetConnection` lines
+again.
+
+**The failure I am looking for:** port 80 still connects after the rule is in
+place. That means the ACL is not being applied to traffic going *through* the
+gateway, only to the gateway itself, and it is a P1.
+
+### 13f — The split tunnel must still hold
+
+```powershell
+Get-NetRoute -DestinationPrefix "0.0.0.0/0" | Format-Table -AutoSize InterfaceAlias, NextHop
+tracert -d -h 6 1.1.1.1
+.\collect.ps1 -Stage 13f-split-tunnel-after-gateway
+```
+
+**Expect:** unchanged from Stage 11. Gateway mode adds one LAN range, not the
+internet (R1).
+
+### 13g — Overlapping LAN ranges
+
+Only if your support laptop is itself on `192.168.1.0/24` — which is likely, it
+is the default on most routers.
+
+```powershell
+Get-NetRoute -DestinationPrefix "192.168.1.0/24" | Format-Table -AutoSize InterfaceAlias, NextHop
+Get-Content "$env:ProgramData\AKConnect\logs\agent.log" -Tail 40
+.\collect.ps1 -Stage 13g-overlap
+```
+
+**Expect:** the route still points at your own physical adapter, and the log
+carries a line saying the route was **not installed** because this machine is
+already on that network. The agent is supposed to lose that contest: breaking
+the LAN the laptop is sitting on would be worse than not reaching the customer.
+
+**Known limitation, stated plainly:** when both LANs are `192.168.1.0/24`, the
+remote one is unreachable from that laptop until one side is renumbered. I have
+not solved this, and I am not going to pretend the log line is a fix.
+
+### 13h — Stop the agent on the gateway PC
+
+```powershell
+Stop-Service AKConnectAgent
+Start-Sleep -Seconds 5
+Get-NetNat | Format-List Name, Active
+Get-NetIPInterface -AddressFamily IPv4 | Format-Table -AutoSize InterfaceAlias, Forwarding
+.\collect.ps1 -Stage 13h-after-stop
+```
+
+**Expect:** the `AKConnect` NAT instance is gone. `Forwarding` may still read
+`Enabled` — the agent deliberately does not turn it back off, because it may
+have been on before we arrived and a NAS or a hypervisor on the same PC could
+depend on it. A leftover **NAT instance** is a finding; leftover forwarding is
+not.
+
+Start it again before moving on: `Start-Service AKConnectAgent`.
+
+---
+
 ## Finish — send the results · 2 min
 
 ```powershell
@@ -430,3 +558,4 @@ to include them, and I check for that.
 | 10 | A normal user cannot steal the identity | 5 |
 | 11 | Split tunnel holds on Windows | 5 |
 | 12 | Uninstall leaves nothing behind | 5 |
+| 13 | Gateway mode: an agentless NVR reached through a site PC | 20 |

@@ -194,7 +194,7 @@ func (t *Table) Check(dir Direction, raw []byte) Verdict {
 	}
 	peer = peer.Unmap()
 
-	filters, ok := t.filtersFor(peer)
+	filters, ok := t.filtersFor(dir, peer, p)
 	if !ok {
 		// Neither a peer this device was told about nor an address behind a
 		// gateway that advertised a route for it. WireGuard's allowed_ips
@@ -211,6 +211,21 @@ func (t *Table) Check(dir Direction, raw []byte) Verdict {
 		return Verdict{Allowed: true, Reason: "established flow"}
 	}
 
+	// Forwarding is one-way. A gateway exists so the overlay can reach the
+	// site's LAN, not so the site's LAN can reach the overlay: the machines
+	// behind it are the ones nobody could put an agent on, which is usually
+	// because nobody can patch them either. An NVR running five-year-old
+	// firmware must not be a route into every customer this laptop supports.
+	//
+	// After the flow check, deliberately — answers to conversations the
+	// overlay started are not the LAN opening anything.
+	if dir == Outbound && t.servesPrefix(p.src.Unmap()) {
+		return Verdict{
+			Allowed: false,
+			Reason:  "a machine behind this gateway may not open a connection into the overlay",
+		}
+	}
+
 	verdict := Decide(filters, p)
 	if verdict.Allowed && t.flows != nil {
 		t.flows.open(dir, p)
@@ -225,7 +240,22 @@ func (t *Table) Check(dir Direction, raw []byte) Verdict {
 // A peer is looked up directly. Anything else may still be a machine behind a
 // gateway — an NVR or a printer that cannot run an agent — in which case the
 // route that covers it decides, and the most specific route wins.
-func (t *Table) filtersFor(addr netip.Addr) ([]Filter, bool) {
+func (t *Table) filtersFor(dir Direction, addr netip.Addr, p packet) ([]Filter, bool) {
+	// Traffic arriving from a peer and addressed into a LAN this device is the
+	// gateway for is traffic we are about to forward on that peer's behalf. The
+	// rules that govern it are the ones about the machine being reached, not
+	// the ones about the link the packet came in on — "AK Support may reach the
+	// NVR on tcp/554" says nothing about the reception PC doing the routing,
+	// and judging the packet by the PC's filters is how a modified support
+	// agent would reach every other port on the recorder.
+	if dir == Inbound && len(t.served) > 0 {
+		if _, known := t.known[addr]; known {
+			if filters, ok := t.servedRouteFor(addr, p.dst.Unmap()); ok {
+				return filters, true
+			}
+		}
+	}
+
 	if _, known := t.known[addr]; known {
 		return t.byPeer[addr], true
 	}
