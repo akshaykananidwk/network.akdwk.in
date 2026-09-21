@@ -146,11 +146,11 @@ func TestBuildSkipsPrefixesThisDeviceServes(t *testing.T) {
 	cfg := &panel.Config{}
 	cfg.Device.VirtualIP = "10.99.0.3"
 	cfg.Device.IsGateway = true
-	cfg.Device.Advertises = []string{"192.168.77.0/24"}
+	cfg.Device.Advertises = []panel.Advertised{{Destination: "10.128.0.0/24", RealDestination: "192.168.77.0/24"}}
 	cfg.Network.CIDR = "10.99.0.0/24"
 	cfg.Routes = []panel.Route{
-		{Destination: "192.168.77.0/24", Via: "10.99.0.3"},
-		{Destination: "192.168.88.0/24", Via: "10.99.0.9"},
+		{Destination: "10.128.0.0/24", RealDestination: "192.168.77.0/24", Via: "10.99.0.3"},
+		{Destination: "10.128.1.0/24", RealDestination: "192.168.88.0/24", Via: "10.99.0.9"},
 	}
 
 	plan, err := Build(cfg)
@@ -159,14 +159,14 @@ func TestBuildSkipsPrefixesThisDeviceServes(t *testing.T) {
 	}
 
 	for _, route := range plan.Routes {
-		if route.String() == "192.168.77.0/24" {
+		if route.String() == "10.128.0.0/24" {
 			t.Fatalf("plan routes this device's own LAN through the tunnel: %v", plan.Routes)
 		}
 	}
 
 	var sawOther bool
 	for _, route := range plan.Routes {
-		if route.String() == "192.168.88.0/24" {
+		if route.String() == "10.128.1.0/24" {
 			sawOther = true
 		}
 	}
@@ -181,9 +181,9 @@ func TestBuildSkipsAdvertisedPrefixWithoutVia(t *testing.T) {
 	cfg := &panel.Config{}
 	cfg.Device.VirtualIP = "10.99.0.3"
 	cfg.Device.IsGateway = true
-	cfg.Device.Advertises = []string{"192.168.77.0/24"}
+	cfg.Device.Advertises = []panel.Advertised{{Destination: "10.128.0.0/24", RealDestination: "192.168.77.0/24"}}
 	cfg.Network.CIDR = "10.99.0.0/24"
-	cfg.Routes = []panel.Route{{Destination: "192.168.77.0/24"}}
+	cfg.Routes = []panel.Route{{Destination: "10.128.0.0/24", RealDestination: "192.168.77.0/24"}}
 
 	plan, err := Build(cfg)
 	if err != nil {

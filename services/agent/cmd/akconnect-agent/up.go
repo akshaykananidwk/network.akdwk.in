@@ -201,6 +201,10 @@ func (s *session) applyConfig(priv wgPrivate, cfg *panel.Config) error {
 			prefix, prefix)
 	}
 
+	// Subnet mapping before the gateway's own forwarding rules, and before the
+	// ACL: from here up, every address in this process is a mapped one.
+	s.tun.SetMappings(buildMappings(cfg))
+
 	if err := s.applyGateway(cfg); err != nil {
 		// A gateway that cannot forward is not a gateway, and the site's
 		// cameras are unreachable. Failing loudly beats a tunnel that looks
@@ -218,6 +222,10 @@ func (s *session) applyConfig(priv wgPrivate, cfg *panel.Config) error {
 	table.AdoptFlows(s.filters)
 	s.filters = table
 	s.tun.SetFilters(table)
+	if mapped := s.tun.Mapped(); mapped > 0 {
+		s.logf("subnet mapping: %d LAN(s) translated so the overlay never carries the site's own range",
+			mapped)
+	}
 	if table.Served() > 0 {
 		s.logf("acl: forwarding for %d peer/subnet pair(s); rules about machines behind this gateway are enforced here too",
 			table.Served())
@@ -274,7 +282,7 @@ func (s *session) applyGateway(cfg *panel.Config) error {
 // advertisedBy is the list of prefixes this device routes for, and only this
 // device: the routes list also carries prefixes other gateways advertise,
 // which this machine installs as routes rather than forwards for.
-func advertisedBy(cfg *panel.Config) []string {
+func advertisedBy(cfg *panel.Config) []panel.Advertised {
 	if !cfg.Device.IsGateway {
 		return nil
 	}
@@ -285,11 +293,22 @@ func advertisedBy(cfg *panel.Config) []string {
 
 	// Older panels do not send the explicit list, so fall back to the routes
 	// pointing at this device's own overlay address.
-	var out []string
+	var out []panel.Advertised
 	for _, route := range cfg.Routes {
-		if route.Via != "" && route.Via == cfg.Device.VirtualIP {
-			out = append(out, route.Destination)
+		if route.Via == "" || route.Via != cfg.Device.VirtualIP {
+			continue
 		}
+
+		real := route.RealDestination
+		if real == "" {
+			// A panel from before subnet mapping. The overlay prefix and the
+			// LAN prefix were the same thing then, and treating them as such
+			// keeps that gateway working rather than silently forwarding
+			// nothing.
+			real = route.Destination
+		}
+
+		out = append(out, panel.Advertised{Destination: route.Destination, RealDestination: real})
 	}
 
 	return out

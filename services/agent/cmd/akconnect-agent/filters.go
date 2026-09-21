@@ -5,8 +5,34 @@ import (
 	"time"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/acl"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/netmap"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
 )
+
+// buildMappings compiles the LANs this device is the gateway for into the
+// address translation it applies.
+//
+// Only a gateway maps anything. A client uses the mapped addresses end to end
+// and never learns the site's real range, which is the entire point: two
+// customers on 192.168.1.0/24 are two different prefixes as far as it is
+// concerned.
+func buildMappings(cfg *panel.Config) *netmap.Table {
+	table := netmap.NewTable()
+
+	if !cfg.Device.IsGateway {
+		return table
+	}
+
+	for _, advertised := range cfg.Device.Advertises {
+		real := advertised.RealDestination
+		if real == "" {
+			continue
+		}
+		table.Add(advertised.Destination, real)
+	}
+
+	return table
+}
 
 // buildFilterTable compiles the panel's peer list into the table the tunnel
 // enforces.

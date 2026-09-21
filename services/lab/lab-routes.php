@@ -44,7 +44,15 @@ function labRoute(array $args): int
         ])
     );
 
-    printf("ROUTE=%d\nAPPROVED=%d\n", (int) $route['id'], (int) $route['approved']);
+    // The mapped prefix is printed because a drill cannot know it in advance —
+    // the panel allocates it — and every check that follows has to address the
+    // customer's machines through it.
+    printf(
+        "ROUTE=%d\nAPPROVED=%d\nMAPPED=%s\n",
+        (int) $route['id'],
+        (int) $route['approved'],
+        (string) ($route['mapped_cidr'] ?? '')
+    );
 
     return 0;
 }
@@ -123,6 +131,27 @@ function labAclCidr(array $args): int
     );
 
     printf("RULE=%d\nAT=%.3f\n", $result['rule'], microtime(true));
+
+    return 0;
+}
+
+/**
+ * Print the first address the mapping pool will hand out.
+ *
+ * A drill that wants to test a collision has to be able to *cause* one, and
+ * the pool is configuration rather than something a script should hard-code.
+ */
+function labPool(): int
+{
+    $pool = \App\Services\SubnetMapper::pool();
+    [$addr, $bits] = array_pad(explode('/', $pool, 2), 2, '32');
+
+    // The .1 of the first block: an address to put on an interface, not a
+    // prefix, because that is what `ip address add` wants.
+    $parts = explode('.', (string) $addr);
+    $parts[3] = '1';
+
+    printf("%s/%s\n", implode('.', $parts), $bits === '32' ? '24' : '24');
 
     return 0;
 }

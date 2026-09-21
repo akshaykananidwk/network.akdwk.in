@@ -30,12 +30,20 @@ scenario_gateway() {
 
     # Advertise the site LAN through beta, and approve it the way an
     # administrator would. Unapproved, it must not reach agents at all.
-    local advertised
+    local advertised mapped nvr_overlay
     advertised="$(php "$LAB_DIR/lab-setup.php" route "$NETWORK" 192.168.77.0/24 "$UID_BETA")" \
         || { record "gw/advertise" FAIL "could not advertise the route"; lab::stop_servers; return; }
+    mapped="$(awk -F= '/^MAPPED=/ {print $2}' <<<"$advertised")"
+    nvr_overlay="$(lab::mapped_host "$mapped" 50)"
+
+    if [ -z "$nvr_overlay" ]; then
+        record "gw/advertise" FAIL "the panel advertised the route without a virtual prefix"
+        lab::stop_servers
+        return
+    fi
 
     sleep 12
-    if lab::tcp_connect alpha 192.168.77.50 554; then
+    if lab::tcp_connect alpha "$nvr_overlay" 554; then
         record "gw/approval" FAIL "an unapproved route was already carrying traffic"
         lab::stop_servers
         return
@@ -47,16 +55,17 @@ scenario_gateway() {
     php "$LAB_DIR/lab-setup.php" route-approve "$routeId" >/dev/null \
         || { record "gw/advertise" FAIL "could not approve the route"; lab::stop_servers; return; }
 
-    # An ACL that names the NVR by its LAN address, not by any device.
+    # An ACL that names the NVR by its LAN address, not by any device and not
+    # by the overlay address the panel invented for it.
     php "$LAB_DIR/lab-setup.php" acl-cidr "$NETWORK" allow "$UID_ALPHA" 192.168.77.50/32 tcp 554 >/dev/null \
         || { record "gw/advertise" FAIL "could not author the LAN rule"; lab::stop_servers; return; }
 
-    if ! lab::wait_reachable alpha 192.168.77.50 554 45; then
-        record "gw/reach" FAIL "the NVR is unreachable through the gateway"
+    if ! lab::wait_reachable alpha "$nvr_overlay" 554 45; then
+        record "gw/reach" FAIL "the NVR is unreachable at $nvr_overlay through the gateway"
         lab::stop_servers
         return
     fi
-    record "gw/reach" PASS "alpha reached the agentless NVR at 192.168.77.50:554 through beta"
+    record "gw/reach" PASS "alpha reached the agentless NVR (192.168.77.50) at $nvr_overlay:554 through beta"
 
     if ! lab::serving nvr 8080; then
         record "gw/denied" FAIL "the NVR's second listener died, so a refused connection proves nothing"
@@ -64,7 +73,7 @@ scenario_gateway() {
         return
     fi
 
-    if lab::tcp_connect alpha 192.168.77.50 8080; then
+    if lab::tcp_connect alpha "$nvr_overlay" 8080; then
         record "gw/denied" FAIL "the NVR's tcp/8080 was reachable; the rule named 554 only"
     else
         record "gw/denied" PASS "tcp/8080 on the NVR is refused; the rule named 554 and meant it"
@@ -81,19 +90,21 @@ scenario_gateway() {
     lab::stop_servers
 }
 
-# §16–17: a support laptop whose own LAN is the same range the customer
-# advertises.
+# §16–17: the backstop, for when even the mapped prefix collides.
 #
-# This is not a corner case. Nearly every consumer router hands out
-# 192.168.0.0/24 or 192.168.1.0/24, so a technician sitting on one hotel's LAN
-# will routinely be offered a route to another hotel's identical range. The
-# agent cannot serve both, and the one it must not break is the network the
-# machine is physically on: taking that route would cut the laptop off from the
-# printer next to it, and often from its own default gateway.
+# Subnet mapping removed the common collision — the technician's own
+# 192.168.1.0/24 and the customer's are two different prefixes on the overlay
+# now, and `subnet-mapping` proves it. What is left is the rarer case the
+# mapping cannot solve: a machine already numbered out of the mapping pool
+# itself. Somebody running 10.128.0.0/24 in their own office will be handed an
+# overlay prefix that lands on top of it.
 #
-# Refuse, say which prefix clashed, and leave the local LAN alone.
+# There the agent still has to lose the contest deliberately. Cutting a
+# technician off from the printer beside them is worse than not reaching the
+# customer, and the log has to say which prefix clashed so somebody can change
+# the pool.
 scenario_gateway_clash() {
-    step "gateway — an advertised LAN that collides with the technician's own"
+    step "gateway — a mapped prefix that lands on the technician's own network"
     fixture gateway
 
     if ! lab::wait_tunnel alpha "$BETA_IP" 60; then
@@ -101,38 +112,47 @@ scenario_gateway_clash() {
         return
     fi
 
-    # Give the support laptop a second network card on the very range the
-    # customer is about to advertise, the way a technician plugged into the
-    # customer's own switch would have.
-    # A veth pair rather than a dummy interface: the kernels this runs on do
-    # not all carry the dummy module, and both halves staying in alpha gives a
-    # link that is operationally up, which is what makes the kernel install the
-    # connected route we are about to defend.
+    # The first prefix the panel hands out in a fresh network is the bottom of
+    # the pool. Put the technician's own office on exactly that.
+    local pool_start
+    pool_start="$(php "$LAB_DIR/lab-setup.php" pool)" || pool_start=""
+    if [ -z "$pool_start" ]; then
+        record "clash/setup" FAIL "could not read the mapping pool from the panel"
+        return
+    fi
+
     if ! ip netns exec alpha ip link add name lan-local type veth peer name lan-local-far \
-        || ! ip netns exec alpha ip address add 192.168.77.1/24 dev lan-local \
+        || ! ip netns exec alpha ip address add "$pool_start" dev lan-local \
         || ! ip netns exec alpha ip link set dev lan-local up \
         || ! ip netns exec alpha ip link set dev lan-local-far up; then
-        record "clash/setup" FAIL "could not give alpha a colliding local LAN"
+        record "clash/setup" FAIL "could not put alpha's own network on $pool_start"
         return
     fi
 
-    local before
-    before="$(ip netns exec alpha ip -o route show exact 192.168.77.0/24)"
+    local prefix before
+    prefix="$(awk -F/ '{split($1,o,"."); printf "%s.%s.%s.0/%s", o[1], o[2], o[3], $2}' <<<"$pool_start")"
+    before="$(ip netns exec alpha ip -o route show exact "$prefix")"
     if [[ "$before" != *"dev lan-local"* ]]; then
-        record "clash/setup" FAIL "alpha's own LAN route was not there to begin with: ${before:-none}"
+        record "clash/setup" FAIL "alpha's own route for $prefix was not there to begin with: ${before:-none}"
         return
     fi
+    record "clash/setup" PASS "alpha's own network is $prefix, the first prefix the panel will hand out"
 
-    # Now advertise and approve the customer's identical range.
-    local advertised routeId
+    local advertised routeId mapped
     advertised="$(php "$LAB_DIR/lab-setup.php" route "$NETWORK" 192.168.77.0/24 "$UID_BETA")" \
         || { record "clash/advertise" FAIL "could not advertise the route"; return; }
     routeId="$(awk -F= '/^ROUTE=/ {print $2}' <<<"$advertised")"
+    mapped="$(awk -F= '/^MAPPED=/ {print $2}' <<<"$advertised")"
     php "$LAB_DIR/lab-setup.php" route-approve "$routeId" >/dev/null \
         || { record "clash/advertise" FAIL "could not approve the route"; return; }
 
-    # Long enough for the revision to reach alpha and be applied.
-    local deadline after
+    if [ "$mapped" != "$prefix" ]; then
+        record "clash/collided" FAIL "the panel mapped the customer to $mapped, which does not collide, so nothing below is tested"
+        return
+    fi
+    record "clash/collided" PASS "the panel mapped the customer to $mapped, on top of alpha's own network"
+
+    local deadline
     deadline=$(( $(date +%s) + 60 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         grep -q "not installed: this machine is already on that network" \
@@ -146,11 +166,12 @@ scenario_gateway_clash() {
         record "clash/refused" PASS "the agent refused the colliding route and named the prefix"
     fi
 
-    after="$(ip netns exec alpha ip -o route show exact 192.168.77.0/24)"
+    local after
+    after="$(ip netns exec alpha ip -o route show exact "$prefix")"
     if [[ "$after" == *"dev lan-local"* ]]; then
-        record "clash/local-lan" PASS "the technician's own LAN route survived the advertisement"
+        record "clash/local-lan" PASS "the technician's own network survived the advertisement"
     else
-        record "clash/local-lan" FAIL "alpha's own LAN route was taken over: ${after:-none}"
+        record "clash/local-lan" FAIL "alpha's own route was taken over: ${after:-none}"
     fi
 
     # The overlay itself must still work. Refusing one route is not a reason to
@@ -188,17 +209,19 @@ scenario_gateway_tamper() {
         return
     fi
 
-    local advertised routeId
+    local advertised routeId mapped nvr_overlay
     advertised="$(php "$LAB_DIR/lab-setup.php" route "$NETWORK" 192.168.77.0/24 "$UID_BETA")" \
         || { record "gwtamper/setup" FAIL "could not advertise the route"; lab::stop_servers; return; }
     routeId="$(awk -F= '/^ROUTE=/ {print $2}' <<<"$advertised")"
+    mapped="$(awk -F= '/^MAPPED=/ {print $2}' <<<"$advertised")"
+    nvr_overlay="$(lab::mapped_host "$mapped" 50)"
     php "$LAB_DIR/lab-setup.php" route-approve "$routeId" >/dev/null \
         || { record "gwtamper/setup" FAIL "could not approve the route"; lab::stop_servers; return; }
 
     php "$LAB_DIR/lab-setup.php" acl-cidr "$NETWORK" allow "$UID_ALPHA" 192.168.77.50/32 tcp 554 >/dev/null \
         || { record "gwtamper/setup" FAIL "could not author the LAN rule"; lab::stop_servers; return; }
 
-    if ! lab::wait_reachable alpha 192.168.77.50 554 45; then
+    if ! lab::wait_reachable alpha "$nvr_overlay" 554 45; then
         record "gwtamper/setup" FAIL "the NVR was unreachable before tampering, so nothing below proves anything"
         lab::stop_servers
         return
@@ -219,7 +242,7 @@ scenario_gateway_tamper() {
 
     # It must still reach what the rule allows — otherwise a refusal below
     # would prove nothing but a broken tunnel.
-    if ! lab::wait_reachable alpha 192.168.77.50 554 45; then
+    if ! lab::wait_reachable alpha "$nvr_overlay" 554 45; then
         record "gwtamper/allowed" FAIL "the tampered agent could not reach the allowed port either; the drill is inconclusive"
         lab::stop_servers
         return
@@ -228,10 +251,136 @@ scenario_gateway_tamper() {
 
     if ! lab::serving nvr 8080; then
         record "gwtamper/blocked" FAIL "the NVR's second listener died, so a refused connection proves nothing"
-    elif lab::tcp_connect alpha 192.168.77.50 8080; then
+    elif lab::tcp_connect alpha "$nvr_overlay" 8080; then
         record "gwtamper/blocked" FAIL "a client with its rules compiled out reached tcp/8080 on the NVR"
     else
         record "gwtamper/blocked" PASS "tcp/8080 refused at the gateway, with the client's own enforcement removed"
+    fi
+
+    lab::stop_servers
+}
+
+# §16–17: the collision case, which is the normal case in this country.
+#
+# The customer's hotel is on 192.168.1.0/24. So is the technician's own office.
+# Both have a machine at .50. Before subnet mapping the agent refused the
+# customer's route and said so in its log, which was honest and useless: the
+# NVR stayed unreachable until somebody renumbered a building.
+#
+# The proof is not "the connection succeeded" — a connection to 192.168.1.50
+# succeeds either way, because the technician's own printer is at that address.
+# The proof is *which machine answered*, so both ends announce themselves.
+scenario_subnet_mapping() {
+    step "gateway — both LANs are 192.168.1.0/24, and the customer is still reachable"
+    fixture collision
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 60; then
+        record "map/tunnel" FAIL "no tunnel between the support laptop and the site PC"
+        return
+    fi
+
+    # Same address, same port, two different machines.
+    if ! lab::serve_tcp nvr 554 "CUSTOMER-NVR" || ! lab::serve_tcp nvr 8080 "CUSTOMER-NVR-WEB" \
+        || ! lab::serve_tcp office 554 "TECHNICIAN-OFFICE"; then
+        record "map/setup" FAIL "the test listeners never came up"
+        lab::stop_servers
+        return
+    fi
+
+    local local_banner
+    local_banner="$(lab::banner_from alpha 192.168.1.50 554 5)"
+    if [ "$local_banner" != "TECHNICIAN-OFFICE" ]; then
+        record "map/setup" FAIL "alpha's own LAN is not answering at 192.168.1.50 (got '${local_banner:-nothing}')"
+        lab::stop_servers
+        return
+    fi
+    record "map/own-lan" PASS "alpha's own 192.168.1.50 answers from its office before anything is advertised"
+
+    # Advertise the customer's identical range and approve it.
+    local advertised routeId mapped
+    advertised="$(php "$LAB_DIR/lab-setup.php" route "$NETWORK" 192.168.1.0/24 "$UID_BETA")" \
+        || { record "map/advertise" FAIL "could not advertise the route"; lab::stop_servers; return; }
+    routeId="$(awk -F= '/^ROUTE=/ {print $2}' <<<"$advertised")"
+    mapped="$(awk -F= '/^MAPPED=/ {print $2}' <<<"$advertised")"
+
+    if [ -z "$mapped" ]; then
+        record "map/allocated" FAIL "the panel advertised the route without allocating a virtual prefix"
+        lab::stop_servers
+        return
+    fi
+    record "map/allocated" PASS "the panel gave the customer's 192.168.1.0/24 the overlay prefix $mapped"
+
+    php "$LAB_DIR/lab-setup.php" route-approve "$routeId" >/dev/null \
+        || { record "map/advertise" FAIL "could not approve the route"; lab::stop_servers; return; }
+
+    # The rule names the machine by the address on its own label, not by the
+    # overlay address the panel invented for it.
+    php "$LAB_DIR/lab-setup.php" acl-cidr "$NETWORK" allow "$UID_ALPHA" 192.168.1.50/32 tcp 554 >/dev/null \
+        || { record "map/advertise" FAIL "could not author the LAN rule"; lab::stop_servers; return; }
+
+    # The overlay address of the customer's NVR: host .50 inside the prefix the
+    # panel allocated.
+    local nvr_overlay
+    nvr_overlay="$(lab::mapped_host "$mapped" 50)"
+
+    if ! lab::wait_reachable alpha "$nvr_overlay" 554 60; then
+        record "map/reach" FAIL "the customer's NVR is unreachable at $nvr_overlay through the gateway"
+        lab::stop_servers
+        return
+    fi
+
+    local remote_banner
+    remote_banner="$(lab::banner_from alpha "$nvr_overlay" 554 8)"
+    if [ "$remote_banner" = "CUSTOMER-NVR" ]; then
+        record "map/reach" PASS "alpha reached the customer's NVR at $nvr_overlay — it answered CUSTOMER-NVR"
+    else
+        record "map/reach" FAIL "$nvr_overlay answered '${remote_banner:-nothing}', not the customer's NVR"
+        lab::stop_servers
+        return
+    fi
+
+    # The failure that looks like success: reaching your own printer and
+    # believing you reached the customer.
+    local_banner="$(lab::banner_from alpha 192.168.1.50 554 5)"
+    if [ "$local_banner" = "TECHNICIAN-OFFICE" ]; then
+        record "map/own-lan-intact" PASS "192.168.1.50 still reaches the technician's own office, not the customer's"
+    else
+        record "map/own-lan-intact" FAIL "alpha's own LAN now answers '${local_banner:-nothing}'; the overlay took it over"
+    fi
+
+    # The ACL is authored against 192.168.1.50 and has to be enforced against
+    # the overlay address it became — at the gateway, not only at the client.
+    if ! lab::serving nvr 8080; then
+        record "map/acl" FAIL "the NVR's second listener died, so a refused connection proves nothing"
+        lab::stop_servers
+        return
+    elif lab::tcp_connect alpha "$nvr_overlay" 8080; then
+        record "map/acl" FAIL "tcp/8080 on the mapped NVR was reachable; the rule named 554 only"
+        lab::stop_servers
+        return
+    else
+        record "map/acl" PASS "tcp/8080 on the mapped NVR is refused; the rule named the real IP and still bound the mapped one"
+    fi
+
+    # That refusal was alpha's own. The rule has to hold when alpha's
+    # enforcement is not there — a mapped address must not be a way around the
+    # gateway's half of the check.
+    lab::down_agents
+    lab::up_tampered alpha
+    lab::up beta
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 60 || ! lab::wait_reachable alpha "$nvr_overlay" 554 60; then
+        record "map/gateway-acl" FAIL "the tampered agent never reached the allowed port, so the drill is inconclusive"
+        lab::stop_servers
+        return
+    fi
+
+    if ! lab::serving nvr 8080; then
+        record "map/gateway-acl" FAIL "the NVR's second listener died, so a refused connection proves nothing"
+    elif lab::tcp_connect alpha "$nvr_overlay" 8080; then
+        record "map/gateway-acl" FAIL "a client with its rules compiled out reached tcp/8080 on the mapped NVR"
+    else
+        record "map/gateway-acl" PASS "the gateway refused tcp/8080 on the mapped address with the client's own enforcement removed"
     fi
 
     lab::stop_servers

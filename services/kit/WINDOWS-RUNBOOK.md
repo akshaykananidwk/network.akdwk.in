@@ -489,23 +489,40 @@ internet (R1).
 
 ### 13g — Overlapping LAN ranges
 
-Only if your support laptop is itself on `192.168.1.0/24` — which is likely, it
-is the default on most routers.
+**This is the stage I care about most, and the one most likely to be the real
+test for you** — if your support laptop is on `192.168.1.0/24` and so is the
+customer, which is the normal case here, this is what decides whether gateway
+mode is usable at all.
+
+The overlay does not carry the customer's real range. On the panel's route
+list you will see two addresses side by side: the customer's real range, and
+the range the overlay uses for it. The NVR at `192.168.1.50` on the customer's
+LAN is reached at the matching address in that second range — same last number.
+Write it down; it is `$MappedIP` below.
 
 ```powershell
 Get-NetRoute -DestinationPrefix "192.168.1.0/24" | Format-Table -AutoSize InterfaceAlias, NextHop
-Get-Content "$env:ProgramData\AKConnect\logs\agent.log" -Tail 40
-.\collect.ps1 -Stage 13g-overlap
+Find-NetRoute -RemoteIPAddress 192.168.1.50 | Format-Table -AutoSize InterfaceAlias, NextHop
+Test-NetConnection -ComputerName 10.128.0.50 -Port 554
+.\collect.ps1 -Stage 13g-overlap -LanIP 192.168.1.50 -MappedIP 10.128.0.50
 ```
 
-**Expect:** the route still points at your own physical adapter, and the log
-carries a line saying the route was **not installed** because this machine is
-already on that network. The agent is supposed to lose that contest: breaking
-the LAN the laptop is sitting on would be worse than not reaching the customer.
+**Expect:** your own `192.168.1.0/24` still points at your physical adapter and
+still reaches your own printer. The customer's NVR answers at the mapped
+address on tcp/554. Neither has taken the other over.
 
-**Known limitation, stated plainly:** when both LANs are `192.168.1.0/24`, the
-remote one is unreachable from that laptop until one side is renumbered. I have
-not solved this, and I am not going to pretend the log line is a fix.
+**The failure I am looking for, and it looks exactly like success:** you connect
+to `192.168.1.50` and something answers. That is almost certainly your *own*
+machine at that address, not the customer's. Check what answered, not that
+something did — open it in a browser, or look at the model name. If your own
+device and the customer's are reachable at the same address, tell me
+immediately; that is a P1 and it means the mapping is not being applied.
+
+The agent does this rewriting itself rather than asking Windows to. Windows has
+no one-to-one prefix NAT — `New-NetNat` masquerades many-to-one and
+`Add-NetNatStaticMapping` forwards a single port — so there is nothing in
+`netsh` or `Get-NetNat` that shows the mapping. `.\akconnect-agent.exe status`
+lists it instead, and the collector captures that.
 
 ### 13h — Stop the agent on the gateway PC
 
@@ -559,3 +576,4 @@ to include them, and I check for that.
 | 11 | Split tunnel holds on Windows | 5 |
 | 12 | Uninstall leaves nothing behind | 5 |
 | 13 | Gateway mode: an agentless NVR reached through a site PC | 20 |
+| 13g | Two LANs both on 192.168.1.0/24, both still reachable | (in 13) |

@@ -21,9 +21,10 @@ type Config struct {
 		// IsGateway says this device routes for machines that cannot run an
 		// agent — an NVR, a printer, a DVR.
 		IsGateway bool `json:"is_gateway"`
-		// Advertises are the LAN prefixes it routes for, as the panel
-		// approved them. Empty unless IsGateway.
-		Advertises []string `json:"advertises"`
+		// Advertises are the LANs it routes for, as the panel approved them.
+		// Each carries both prefixes: the one the overlay uses and the real
+		// one on the site's own network. Empty unless IsGateway.
+		Advertises []Advertised `json:"advertises"`
 	} `json:"device"`
 
 	Network struct {
@@ -104,11 +105,27 @@ type Filter struct {
 	RuleID   int    `json:"rule_id"`
 }
 
+// Advertised is one LAN a gateway routes for, in both address spaces.
+type Advertised struct {
+	// Destination is the prefix the overlay uses for this LAN.
+	Destination string `json:"destination"`
+	// RealDestination is the prefix on the site's own network. The two differ
+	// because two customers both on 192.168.1.0/24 is the normal case, and one
+	// routing table cannot hold both.
+	RealDestination string `json:"real_destination"`
+}
+
 // Route is a subnet reachable through a gateway device.
 type Route struct {
+	// Destination is the prefix the overlay uses — the mapped one. This is
+	// what a client routes on and what its rules are about.
 	Destination string `json:"destination"`
-	Via         string `json:"via"`
-	Metric      int    `json:"metric"`
+	// RealDestination is the address range on the site's LAN, carried for the
+	// gateway that has to NAT between the two and for anything showing a human
+	// which machine a rule names. A client never routes on it.
+	RealDestination string `json:"real_destination"`
+	Via             string `json:"via"`
+	Metric          int    `json:"metric"`
 	// Filters govern traffic to machines inside this prefix. They are
 	// separate from the gateway peer's own filters: a rule about the NVR at
 	// 192.168.1.50 is about the NVR, not about the reception PC that happens

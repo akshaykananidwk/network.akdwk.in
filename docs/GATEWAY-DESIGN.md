@@ -155,6 +155,94 @@ A packet whose source is inside a prefix this device serves is now refused
 unless it belongs to a flow the overlay started. Replies still pass, because
 the flow table recognises them.
 
+## Subnet mapping — the overlay never carries the customer's range
+
+This is the part that decides whether gateway mode is usable in India at all.
+
+Almost every router sold here hands out `192.168.1.0/24` or `192.168.0.0/24`.
+A technician's laptop sitting on one of those cannot reach a customer whose LAN
+is the same range: a routing table holds one route per destination, and taking
+the customer's would cut the laptop off from the printer beside it. The first
+version of this refused the route and logged which prefix clashed, which was
+honest and useless — "renumber one side" is not an answer a business can give
+its customers.
+
+So the overlay never sees the customer's real range.
+
+The panel allocates each advertised LAN a prefix of its own out of a pool
+(`10.128.0.0/10` by default, configurable), unique within the network. The
+hotel's `192.168.1.0/24` becomes, say, `10.128.0.0/24`, and the recorder at
+`192.168.1.50` is reached at `10.128.0.50`. The host part carries across
+unchanged, so the mapping is arithmetic rather than a table: a LAN with two
+hundred cameras costs what a LAN with one costs, and nothing is remembered
+between packets.
+
+```
+  technician's laptop            gateway PC                 the recorder
+  192.168.1.0/24 (its own)       192.168.1.1                192.168.1.50
+        │                             │                            │
+        │  dst 10.128.0.50            │  dst 192.168.1.50          │
+        └────── tunnel ───────────────┤────────── LAN ─────────────┘
+                                 rewritten here
+```
+
+### Rules are written about the real address
+
+An operator writes "AK Support may reach 192.168.1.50 on tcp/554", because
+that is the address on the label on the recorder. The panel translates the
+destination into mapped space before the rule is sent; the agent never sees the
+real address at all. Both ends of the tunnel therefore speak one address space,
+which is what lets the gateway enforce the same rule the client does.
+
+### Where the rewriting happens, and why not in iptables
+
+Linux has `iptables -j NETMAP`, which does exactly this. Windows has nothing
+equivalent: `New-NetNat` masquerades many-to-one and `Add-NetNatStaticMapping`
+forwards a single port, and neither maps a prefix.
+
+So the agent does it, in `services/agent/internal/netmap`, at the point where
+packets are already plaintext and already ours:
+
+```
+  acl.Wrap( netmap.Wrap( tun ) )
+```
+
+Translation goes **innermost**, deliberately. Everything above it — the filter,
+wireguard-go, the panel's rules, the peer at the other end — lives in mapped
+address space; only the operating system below it and the LAN beyond it see the
+real range. Translating above the filter would have the gateway judging packets
+by addresses no other device in the network uses, which is how a rule comes to
+mean two different things at two ends of one tunnel.
+
+One implementation, identical on both platforms, and no dependency on a
+netfilter target Windows will never have.
+
+### Checksums
+
+Rewriting an address changes the IPv4 header checksum and, because they cover a
+pseudo-header, the TCP and UDP checksums. All three are repaired incrementally
+(RFC 1624) rather than by re-summing the packet.
+
+Two cases are easy to get wrong and are tested rather than reasoned about:
+
+- **A UDP checksum of zero means "not computed" and must stay zero.** Writing a
+  repaired value there would invent a guarantee the sender did not give.
+- **An ICMP error quotes the packet that caused it**, and the quoted header
+  carries the address we rewrote. ICMP's own checksum does not cover the outer
+  IP addresses, but it does cover the quoted header — including that header's
+  own checksum, which also changes. Missing either makes "fragmentation needed"
+  unattributable, which a customer experiences as a camera stream that stalls
+  on its first large frame rather than as an error anybody sees.
+
+The tests recompute every checksum from scratch and compare. Incremental
+arithmetic that is subtly wrong produces packets that look perfectly reasonable
+in a hex dump and are discarded silently by the far end, so "the bytes changed"
+is not a result worth having.
+
+That is not hypothetical: the first version of this had the IPv4 header
+checksum at offset 8, which is the TTL. Every rewritten packet would have been
+dropped by the next hop. The recomputation caught it on the first run.
+
 ## Overlapping LAN subnets
 
 Every hotel uses 192.168.1.0/24. This has to not matter, and mostly it does
@@ -167,12 +255,12 @@ not:
   one destination. The panel must refuse the second, with a message that says
   which device already advertises it.
 
-- **On one machine**, an advertised prefix can collide with a LAN the machine
-  is physically on. This is common, not rare. The agent refuses the advertised
-  route, keeps the local one, and logs which prefix clashed: breaking the LAN a
-  technician is sitting on — their printer, their NAS, often their own default
-  gateway — is worse than not reaching the customer. The remote range stays
-  unreachable from that laptop until one side is renumbered. `Remove` deletes
+- **On one machine**, an advertised prefix used to be able to collide with a LAN
+  the machine is physically on. Subnet mapping removes that case: the machine
+  routes the mapped prefix, which came out of a pool nothing else uses, so its
+  own LAN is never contested. The refusal logic is kept as a backstop for a
+  mapped prefix that somehow collides anyway — a customer already numbering out
+  of `10.128.0.0/10`, for instance, who should change the pool. `Remove` deletes
   only what `Apply` installed, so a stopping agent cannot take a site's own LAN
   route with it either.
 
@@ -201,6 +289,7 @@ Three scenarios in `services/lab/run-all.sh`:
 | `gateway` | An unapproved route carries nothing; the agentless NVR is reachable on tcp/554 and refused on tcp/8080; the NVR cannot reach back into the overlay |
 | `gateway-clash` | A route colliding with the technician's own LAN is refused, the local route survives, and the overlay keeps working |
 | `gateway-tamper` | With the client's enforcement compiled out, the gateway still refuses the denied port |
+| `subnet-mapping` | Both LANs on 192.168.1.0/24, both with a machine at .50, and the right one answers |
 
 Plus `tests/GatewayTests.php`: two customers advertising byte-identical
 192.168.1.0/24, with neither appearing in the other's configuration, and a

@@ -1,11 +1,13 @@
 {
-  "version": "1.6.0",
-  "released_at": "2026-09-21T18:00:00Z",
+  "version": "1.7.0",
+  "released_at": "2026-09-21T20:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Gateway / subnet-router mode: one PC at a site routes for the machines that cannot run an agent — an NVR, a printer, a DVR. Routes are advertised from the panel and carry nothing until an administrator approves them, access rules name the machine by its LAN address, and the gateway enforces them itself rather than trusting the device being restricted. Also the four 1.5.0 fixes, which were never released on their own: the source-port rule bypass, unparseable packets failing closed, enrolment throttling that no longer cuts off a rollout, and relay-reported billing.",
-  "migrations": [],
+  "notes": "Subnet mapping: the overlay no longer carries a customer's LAN range, so a technician on 192.168.1.0/24 can reach a customer on 192.168.1.0/24. Each advertised LAN gets a prefix of its own and the gateway rewrites between the two, host part preserved. Rules are still written about the real address. Also fixes a rule about one machine being enforced as a rule about the whole subnet.",
+  "migrations": [
+    "2026_09_21_140000_add_route_mapped_cidr.php"
+  ],
   "protected": [
     ".env",
     "config/config.php",

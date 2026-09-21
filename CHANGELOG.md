@@ -6,6 +6,77 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.7.0] — 2026-09-21
+
+Subnet mapping, and a real cross-version update drill.
+
+### Added
+
+**The overlay no longer carries a customer's LAN range.** Almost every router
+sold in India hands out 192.168.1.0/24 or 192.168.0.0/24, so a technician's
+laptop on one of those could not reach a customer whose LAN was the same range.
+1.6.0 refused the route and logged which prefix clashed. That was honest and
+useless: "renumber one side" is not an answer a business can give its
+customers.
+
+Each advertised LAN now gets a prefix of its own from a pool (`10.128.0.0/10`
+by default, `network.mapped_pool` to change it), unique within the network. The
+hotel's 192.168.1.0/24 becomes 10.128.0.0/24 and the recorder at 192.168.1.50
+is reached at 10.128.0.50 — the host part carries across unchanged, so the
+mapping is arithmetic rather than a table and a LAN with two hundred cameras
+costs what a LAN with one costs.
+
+Rules are still written about the real address, because that is the address on
+the label on the recorder. The panel translates them before they are sent; the
+agent never learns the real range at all. The panel's route list shows both
+addresses side by side, and `akconnect-agent status` lists them on a gateway.
+
+**The rewriting is in the agent, not in iptables.** Linux has `NETMAP` and does
+this natively; Windows has nothing equivalent — `New-NetNat` masquerades
+many-to-one and `Add-NetNatStaticMapping` forwards a single port, and neither
+maps a prefix. `services/agent/internal/netmap` gives one implementation that
+behaves identically on both, at the point where packets are already plaintext
+and already ours. It sits *inside* the ACL filter, so everything above it — the
+rules, wireguard-go, the peer at the other end — works in one address space.
+
+**A cross-version update drill, `services/lab/dogfood.sh`.** It installs the
+previous release into a scratch app root with a database and database user of
+its own, updates it forward through our own updater, and rolls it back,
+failing unless files were genuinely written, the new ones genuinely removed
+again, and every file byte-identical afterwards. 1.6.0's dogfood wrote zero
+files because the release was built on the machine it was installed on, which
+skipped the paths the 1.3.x P1 lived in. `services/lab/release.sh` runs the
+four gates together.
+
+### Fixed
+
+**A rule about one machine was enforced as a rule about the whole LAN.** Route
+filters were selected by *overlap*, so "AK Support may reach 192.168.1.50 on
+tcp/554" was compiled into the entry for the entire 192.168.1.0/24 — which
+opened tcp/554 on the till at 192.168.1.60 as well. The rule said one machine
+and the agent enforced twenty.
+
+A rule now governs an entry only when it covers it. A narrower rule gets an
+entry of its own, which wins on longest prefix and picks the wider rules up
+again through the same test. Caught by a test written for the mapping work,
+not by the drill: `gw/denied` passed throughout, because it only ever asked
+about the one machine the rule named.
+
+### Known limitations
+
+**Windows subnet mapping is untested on real hardware.** The code is
+platform-independent by construction — it is the agent doing the rewriting, not
+the operating system — but that is an argument, not a result. Stage 13g of the
+test pack covers it.
+
+**A machine numbered out of the mapping pool still loses the contest.** Somebody
+already using 10.128.0.0/10 on their own network will be handed a colliding
+prefix, and the agent will refuse it and keep the local route. The fix is to
+change `network.mapped_pool`; the agent's log names the prefix that clashed.
+Drilled as `gateway-clash`.
+
+---
+
 ## [1.6.0] — 2026-09-21
 
 Phase 4 continues: gateway / subnet-router mode (§16–17). A hotel's NVR, a

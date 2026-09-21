@@ -3,6 +3,8 @@ package netcfg
 import (
 	"fmt"
 	"net/netip"
+
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
 )
 
 // Gateway (subnet-router) mode.
@@ -25,8 +27,14 @@ import (
 type GatewayPlan struct {
 	// Interface is the tunnel interface traffic arrives on.
 	Interface string
-	// Advertised are the LAN prefixes this device routes for.
+	// Advertised are the LAN prefixes this device routes for, as they exist on
+	// the site's own network. These are what the kernel forwards into and
+	// NATs for; the overlay never uses them.
 	Advertised []netip.Prefix
+	// Mapped pairs each advertised prefix with the one the overlay uses for
+	// it, in the same order. The agent translates between the two above the
+	// kernel, so nothing here ever sees a mapped address.
+	Mapped []netip.Prefix
 	// Overlay is the tunnel's own prefix — the source addresses that are
 	// allowed to be forwarded. Anything else arriving on the tunnel is not
 	// ours and is not forwarded.
@@ -39,7 +47,7 @@ type GatewayPlan struct {
 // 0.0.0.0/0 would turn every client's split tunnel into a full one, which is
 // the thing R1 exists to prevent, and it must be refused on the device as well
 // as on the server that sent it.
-func BuildGatewayPlan(ifaceName string, overlayCIDR string, advertised []string) (*GatewayPlan, error) {
+func BuildGatewayPlan(ifaceName string, overlayCIDR string, advertised []panel.Advertised) (*GatewayPlan, error) {
 	overlay, err := netip.ParsePrefix(overlayCIDR)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: overlay %q is not a prefix: %w", overlayCIDR, err)
@@ -47,22 +55,39 @@ func BuildGatewayPlan(ifaceName string, overlayCIDR string, advertised []string)
 
 	plan := &GatewayPlan{Interface: ifaceName, Overlay: overlay.Masked()}
 
-	for _, cidr := range advertised {
-		prefix, err := netip.ParsePrefix(cidr)
+	for _, entry := range advertised {
+		prefix, err := netip.ParsePrefix(entry.RealDestination)
 		if err != nil {
-			return nil, fmt.Errorf("gateway: advertised route %q is not a prefix: %w", cidr, err)
+			return nil, fmt.Errorf("gateway: advertised route %q is not a prefix: %w", entry.RealDestination, err)
 		}
 		if err := reject(prefix, "the advertised routes"); err != nil {
 			return nil, err
 		}
 
+		mapped, err := netip.ParsePrefix(entry.Destination)
+		if err != nil {
+			return nil, fmt.Errorf("gateway: mapped prefix %q is not a prefix: %w", entry.Destination, err)
+		}
+		if err := reject(mapped, "the mapped prefixes"); err != nil {
+			return nil, err
+		}
+		if mapped.Bits() != prefix.Bits() {
+			// Different sizes cannot map one-to-one, and approximating would
+			// put half the LAN somewhere else.
+			return nil, fmt.Errorf(
+				"gateway: %s cannot be mapped to %s — the two are different sizes",
+				entry.RealDestination, entry.Destination)
+		}
+
 		// A gateway advertising the overlay itself would have the kernel
-		// forward tunnel traffic back into the tunnel.
-		if prefix.Masked() == plan.Overlay {
+		// forward tunnel traffic back into the tunnel. The mapped prefix is
+		// checked too: it is the one that arrives on the interface.
+		if prefix.Masked() == plan.Overlay || mapped.Masked() == plan.Overlay {
 			return nil, fmt.Errorf("gateway: refusing to advertise the overlay prefix %s as a LAN route", prefix)
 		}
 
 		plan.Advertised = append(plan.Advertised, prefix.Masked())
+		plan.Mapped = append(plan.Mapped, mapped.Masked())
 	}
 
 	if len(plan.Advertised) == 0 {

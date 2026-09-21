@@ -124,7 +124,7 @@ func Build(cfg *panel.Config) (*Plan, error) {
 
 	return &Plan{
 		Address: netip.PrefixFrom(addr, addr.BitLen()),
-		Routes:  dedupe(routes),
+		Routes:  widestOnly(dedupe(routes)),
 		MTU:     mtu,
 		Overlay: overlay.Masked(),
 	}, nil
@@ -168,8 +168,8 @@ func dedupe(in []netip.Prefix) []netip.Prefix {
 func servedLocally(cfg *panel.Config) map[netip.Prefix]struct{} {
 	out := make(map[netip.Prefix]struct{})
 
-	for _, cidr := range cfg.Device.Advertises {
-		if prefix, err := netip.ParsePrefix(cidr); err == nil {
+	for _, advertised := range cfg.Device.Advertises {
+		if prefix, err := netip.ParsePrefix(advertised.Destination); err == nil {
 			out[prefix.Masked()] = struct{}{}
 		}
 	}
@@ -180,6 +180,33 @@ func servedLocally(cfg *panel.Config) map[netip.Prefix]struct{} {
 		}
 		if prefix, err := netip.ParsePrefix(r.Destination); err == nil {
 			out[prefix.Masked()] = struct{}{}
+		}
+	}
+
+	return out
+}
+
+// widestOnly drops a prefix that another prefix in the list already covers.
+//
+// The panel sends one route entry per advertised LAN *and* one per rule that
+// names a machine inside it, because the filter matches longest-prefix and a
+// rule about one camera must not become a rule about the whole LAN. The
+// routing table needs none of that: every one of those entries goes to the
+// same gateway, and installing a /32 beside the /24 that contains it adds a
+// line to `ip route` for no behaviour.
+func widestOnly(in []netip.Prefix) []netip.Prefix {
+	out := make([]netip.Prefix, 0, len(in))
+
+	for _, candidate := range in {
+		covered := false
+		for _, other := range in {
+			if other != candidate && other.Bits() < candidate.Bits() && other.Contains(candidate.Addr()) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, candidate)
 		}
 	}
 

@@ -196,6 +196,18 @@ func (s *session) publishRuntime(controlPlaneUp bool) {
 		rt.Interface = s.tun.Name()
 		rt.ListenPort = s.tun.ListenPort()
 	}
+	if s.gateway != nil {
+		for i, lan := range s.gateway.Advertised {
+			if i >= len(s.gateway.Mapped) {
+				break
+			}
+			rt.Mappings = append(rt.Mappings, state.RuntimeMapping{
+				Overlay: s.gateway.Mapped[i].String(),
+				LAN:     lan.String(),
+			})
+		}
+	}
+
 	if s.plan != nil && len(s.plan.Routes) > 0 {
 		rt.OverlayCIDR = s.plan.Routes[0].String()
 	}

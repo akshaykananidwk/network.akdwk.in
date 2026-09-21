@@ -38,10 +38,18 @@ final class RouteService
 
         self::refuseDuplicate($networkId, $cidr);
 
+        // Allocated before the row is written, because a route with no mapped
+        // prefix is a route that would put the customer's real range into
+        // every agent's routing table — which is the thing this exists to
+        // prevent. Failing here refuses the advertisement rather than creating
+        // a half-mapped one.
+        $mapped = SubnetMapper::allocate($networkId, $cidr);
+
         $id = NetworkRoute::create([
             'tenant_id'        => (int) $network['tenant_id'],
             'network_id'       => $networkId,
             'destination_cidr' => $cidr,
+            'mapped_cidr'      => $mapped,
             'via_device_id'    => (int) $device['id'],
             'metric'           => isset($input['metric']) ? max(1, (int) $input['metric']) : 100,
             'description'      => isset($input['description']) ? trim((string) $input['description']) : null,
@@ -59,6 +67,7 @@ final class RouteService
 
         AuditService::log('route.advertise', 'route', $id, null, [
             'destination_cidr' => $cidr,
+            'mapped_cidr'      => $mapped,
             'via_device_id'    => (int) $device['id'],
         ]);
 

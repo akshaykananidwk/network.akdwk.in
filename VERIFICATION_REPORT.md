@@ -807,9 +807,41 @@ $ echo $?
 0
 ```
 
-That is the 1.6.0 gate, run 2026-09-21, and it is the table the release is
-allowed to ship on. The build before it — 1.5.0 — did **not** ship: `gw/reach`
-failed, and the section on subnet-router mode below says why.
+That was the 1.6.0 gate. 1.7.0 added eight more checks and runs 44:
+
+```
+  gw/approval             PASS    an unapproved route carries nothing
+  gw/reach                PASS    alpha reached the agentless NVR (192.168.77.50)
+                                  at 10.128.0.50:554 through beta
+  gw/denied               PASS    tcp/8080 on the NVR is refused
+  gw/no-reverse           PASS    the NVR cannot reach the overlay
+  clash/setup             PASS    alpha's own network is 10.128.0.0/24, the first
+                                  prefix the panel will hand out
+  clash/collided          PASS    the panel mapped the customer to 10.128.0.0/24,
+                                  on top of alpha's own network
+  clash/refused           PASS    the agent refused the colliding route
+  clash/local-lan         PASS    the technician's own network survived
+  clash/overlay           PASS    the overlay still carries traffic
+  gwtamper/tunnel         PASS    the tampered agent enrolled and handshaked normally
+  gwtamper/allowed        PASS    it still reaches tcp/554
+  gwtamper/blocked        PASS    tcp/8080 refused at the gateway
+  map/own-lan             PASS    alpha's own 192.168.1.50 answers from its office
+  map/allocated           PASS    the customer's 192.168.1.0/24 became 10.128.0.0/24
+  map/reach               PASS    alpha reached the customer's NVR at 10.128.0.50 —
+                                  it answered CUSTOMER-NVR
+  map/own-lan-intact      PASS    192.168.1.50 still reaches the technician's office
+  map/acl                 PASS    tcp/8080 on the mapped NVR is refused
+  map/gateway-acl         PASS    the gateway refused it with the client's own
+                                  enforcement removed
+  revoke/cutoff           PASS    traffic stopped 4s after revocation
+
+  44 checks, all passed. The networking proof holds for this build.
+```
+
+Two builds did **not** ship on their own gate. 1.5.0's `gw/reach` failed while
+subnet-router mode was being built. And the first 1.7.0 run failed
+`accounting/tunnel` — which turned out to be the drill's own defect, not the
+product's, and is written up with the other lab faults below.
 
 Several results in that table are worth reading twice.
 
@@ -1164,6 +1196,7 @@ that is wrong is worse than no drill:
 | `ping` prints `loss,` with a comma, and the parser matched `loss` | Every failover measurement read `?%` — the drill could not measure the thing it existed to measure |
 | The control plane bound to the bridge address, which each scenario deletes | Nothing ran at all until the sockets moved to the wildcard address |
 | The ACL drill used a one-shot listener, and the baseline check consumed it | **A false pass.** The deny appeared to take effect in *zero seconds* — impossible, because an agent only learns a rule when it next polls. The connection was refused because nothing was listening |
+| The stray-agent reaper matched the binary path exactly, so it missed both `" (deleted)"` and the tampered agent added for the gateway drills | **A false failure.** A leaked agent from an earlier run kept writing the state file a later scenario reads. `accounting` reported "the pair is not relayed" about a pair that was relayed, on a build where nothing about relaying had changed |
 | A host-side veth outlived its namespace, so the rebuild failed with "File exists" — and nothing checked the topology builder's exit code | **A false failure.** That side never got its default route, and the scenario reported the panel unreachable. The lab was broken and the product was blamed |
 
 The last two are a matched pair, and worth keeping in mind together: one
@@ -1171,6 +1204,21 @@ reported success that had not happened, the other reported a failure that was
 not the product's. A drill is only evidence if it can be wrong in neither
 direction, and the topology builder's exit code is now checked because an
 unchecked one turned a lab fault into a product bug report.
+
+The reaper is worth a paragraph of its own, because it is the same lesson
+arriving a third time. The gateway work added a second agent binary — the
+tampered build the ACL drills need — and the reaper matched one exact path, so
+that binary leaked a process on every run. Every rebuild then made the leaked
+processes invisible a second way, because the kernel appends `" (deleted)"` to
+`/proc/pid/exe` once the file they came from has been replaced. Three of them
+were alive, one for over two hours, all still polling the panel and all still
+writing the state files the drills read.
+
+The symptom was `accounting` reporting "the pair is not relayed" — a product
+failure, on a build where nothing about relaying had changed. The state file it
+read had been written by an agent from a run that ended thirty-three minutes
+earlier. The tell was in the file: a handshake age of `33m0s` on a lab that had
+been up for two minutes.
 
 The false pass is the one to keep in mind. It did not look like a bug; it looked
 like the feature working extremely well. The tell was the number: a deny cannot
@@ -1291,6 +1339,95 @@ same LAN address is not a reply, and it failed.
 
 A packet whose source is inside a prefix this device serves is now refused
 unless it belongs to a flow the overlay started.
+
+#### Subnet mapping, and the rule that was enforced twenty times too widely
+
+The limitation 1.6.0 shipped with — a technician on 192.168.1.0/24 cannot reach
+a customer on 192.168.1.0/24 — was not acceptable for this business, and it was
+right not to accept it. Almost every router sold in India defaults to that range
+or to 192.168.0.0/24, so the collision is not an edge case; it is most
+installations.
+
+The overlay no longer carries the customer's range at all. Each advertised LAN
+is given a prefix of its own from a pool, unique within the network, and the
+gateway rewrites between the two with the host part preserved.
+
+**The proof is not that a connection succeeded.** In the drill, the technician's
+own office and the customer's site are both 192.168.1.0/24 and *both have a
+machine at .50*, so a connection to 192.168.1.50 succeeds either way — reaching
+your own printer and believing you reached the customer is the failure that
+looks exactly like success. Both machines therefore announce themselves:
+
+```
+  map/own-lan          PASS  alpha's own 192.168.1.50 answers from its office
+                             before anything is advertised
+  map/allocated        PASS  the panel gave the customer's 192.168.1.0/24 the
+                             overlay prefix 10.128.0.0/24
+  map/reach            PASS  alpha reached the customer's NVR at 10.128.0.50 —
+                             it answered CUSTOMER-NVR
+  map/own-lan-intact   PASS  192.168.1.50 still reaches the technician's own
+                             office, not the customer's
+  map/acl              PASS  tcp/8080 on the mapped NVR is refused; the rule
+                             named the real IP and still bound the mapped one
+  map/gateway-acl      PASS  the gateway refused tcp/8080 on the mapped address
+                             with the client's own enforcement removed
+```
+
+And the routing table afterwards, which is the other half of the claim:
+
+```
+$ ip netns exec alpha ip route
+default via 192.168.10.1 dev veth-alpha
+10.99.0.0/24 dev akc0 scope link
+10.128.0.0/24 dev akc0 scope link
+192.168.1.0/24 dev lan-alpha proto kernel scope link src 192.168.1.1
+```
+
+The default route is untouched (R1), the technician's own LAN is still on their
+own adapter, and the customer's LAN is reachable beside it.
+
+The last row of that table is worth reading twice. `map/gateway-acl` re-runs the
+check with a client built `-tags labtamper`, its rule enforcement compiled out,
+and the logs say which machine decided:
+
+```
+alpha drops: 0        # the tampered client refused nothing, because it could not
+beta drops:  1        # the gateway did
+```
+
+**Where the rewriting happens.** In the agent, not in iptables. Linux has
+`NETMAP` and does this natively; Windows has nothing equivalent — `New-NetNat`
+masquerades many-to-one, `Add-NetNatStaticMapping` forwards a single port, and
+neither maps a prefix. Doing it in `services/agent/internal/netmap` gives one
+implementation for both platforms, and it sits *inside* the ACL filter so that
+everything above it lives in one address space.
+
+**The checksum arithmetic is tested against full recomputation**, not against
+itself. That is not ceremony: the first version had the IPv4 header checksum at
+offset 8, which is the TTL, so every rewritten packet would have been dropped by
+the next hop. A test that only checked "the address changed" would have passed.
+The same tests cover a UDP checksum of zero staying zero, and an ICMP error's
+quoted header being carried across — the case that decides whether path MTU
+discovery works, which a customer experiences as a camera stream stalling on its
+first large frame rather than as an error anybody sees.
+
+#### A rule about one machine was enforced as a rule about the whole LAN
+
+Found while building the above, not by a drill.
+
+Route filters were selected by *overlap*. A rule naming 192.168.1.50 overlaps
+the /24 that contains it, so it was compiled into the entry for the whole LAN —
+"AK Support may reach the NVR on tcp/554" opened tcp/554 on the till at
+192.168.1.60 as well. The rule said one machine and the agent enforced twenty.
+
+`gw/denied` had been passing throughout, because it only ever asked about the
+one machine the rule named. The drill was not wrong; it was narrow, and a
+narrow drill is how a bug this shape survives three releases.
+
+A rule now governs an entry only when it **covers** it — equal or wider. A
+narrower rule gets an entry of its own, which wins on longest prefix and picks
+up the wider rules again through the same test, so "allow the subnet, deny the
+till" still means what it says.
 
 #### Overlapping LAN ranges
 
@@ -1557,12 +1694,13 @@ These are real and currently shipped.
    uses Server-Sent Events. This was a deliberate choice, stated when it was
    made, not a limitation discovered late.
 
-10. **A machine cannot reach a remote LAN that duplicates its own.** When a
-    support laptop sits on 192.168.1.0/24 and the customer's gateway
-    advertises 192.168.1.0/24, the agent refuses the advertised route and
-    keeps the local one, logging which prefix clashed. One side has to be
-    renumbered. This is the single most likely gateway-mode complaint, because
-    that prefix is the default on most consumer routers.
+10. **A machine numbered out of the mapping pool still loses the contest.**
+    Duplicate LAN ranges no longer collide — each advertised LAN gets a prefix
+    of its own from `10.128.0.0/10` — but somebody already using that range on
+    their own network will be handed a mapped prefix that lands on top of it.
+    The agent refuses the advertised route and keeps the local one, naming the
+    prefix that clashed. The fix is to change `network.mapped_pool`; there is
+    no way for the agent to reach both. Drilled as `gateway-clash`.
 
 11. **One agent install belongs to one customer.** `devices.network_id` is a
     single column, so a support laptop that services twenty customers needs
@@ -1578,6 +1716,18 @@ These are real and currently shipped.
     including the case where Internet Connection Sharing already owns NAT and
     Windows reports the failure as "The parameter is incorrect". Until those
     results come back, subnet-router mode is proven on Linux only.
+
+    Subnet mapping is the one part of it that is platform-independent by
+    construction, because the agent does the rewriting rather than the
+    operating system. That is an argument for why it should work, not a
+    result. Stage 13g asks for the result.
+
+13. **Split DNS is not implemented.** §18 asks for
+    `nvr.hotel-abc.<network>.internal` names for overlay devices and for
+    machines behind a gateway. The schema carries `search_domain` and
+    `dns_json` and the agent config declares `dns.split_only`, but nothing
+    resolves a name: every address in this product is reached numerically
+    today. Not started, and not claimed anywhere as working.
 
 6. **`UNLOCK TABLES` commits.** The restore path issues it only when locks are
    actually held, precisely because issuing it unconditionally would commit a

@@ -29,6 +29,22 @@ type Runtime struct {
 	CoordinatorUp  bool          `json:"coordinator_reachable"`
 	ControlPlaneUp bool          `json:"control_plane_reachable"`
 	Peers          []RuntimePeer `json:"peers"`
+	// Mappings are the LANs this device is the gateway for, each shown in both
+	// address spaces. Empty on everything that is not a subnet router.
+	//
+	// It is in the status file because Windows has no way to show it: the
+	// rewriting is done in the agent, not by netsh or New-NetNat, so
+	// `akconnect-agent status` is the only place a technician can see which
+	// overlay address reaches which machine.
+	Mappings []RuntimeMapping `json:"mappings,omitempty"`
+}
+
+// RuntimeMapping is one advertised LAN, in both address spaces.
+type RuntimeMapping struct {
+	// Overlay is the prefix peers use to reach this LAN.
+	Overlay string `json:"overlay"`
+	// LAN is the range as it exists on the site's own network.
+	LAN string `json:"lan"`
 }
 
 // RuntimePeer is one peer's live state.

@@ -173,9 +173,10 @@ declare -A SCENARIOS=(
     [gateway]=scenario_gateway
     [gateway-clash]=scenario_gateway_clash
     [gateway-tamper]=scenario_gateway_tamper
+    [subnet-mapping]=scenario_subnet_mapping
     [revocation]=scenario_revocation
 )
-ORDER=(cone relay cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash gateway-tamper revocation)
+ORDER=(cone relay cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash gateway-tamper subnet-mapping revocation)
 
 if [ "${1:-}" = "--list" ]; then
     printf '%s\n' "${ORDER[@]}"

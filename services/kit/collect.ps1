@@ -10,13 +10,14 @@
 
   .\collect.ps1 -Stage 01-before-install
   .\collect.ps1 -Stage 07-connected -PeerIP 10.99.0.3
-  .\collect.ps1 -Stage 13-gateway -LanIP 192.168.1.50
+  .\collect.ps1 -Stage 13-gateway -LanIP 192.168.1.50 -MappedIP 10.128.0.50
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Stage,
     [string]$PeerIP = "",
     [string]$LanIP  = "",
+    [string]$MappedIP = "",
     [string]$Agent  = ""
 )
 
@@ -196,6 +197,42 @@ if ($LanIP) {
     Check "TCP 80 to the LAN device — the port the rule does not allow" {
         Test-NetConnection -ComputerName $LanIP -Port 80 -WarningAction SilentlyContinue |
             Format-List ComputerName, RemotePort, TcpTestSucceeded, PingSucceeded
+    }
+}
+
+# ---- subnet mapping -----------------------------------------------------------------
+#
+# The overlay does not carry the customer's real LAN range: the panel gives each
+# site a range of its own, and the agent rewrites between the two. That
+# rewriting is done in the agent, not by Windows, because Windows has no
+# one-to-one prefix NAT — New-NetNat masquerades many-to-one and
+# Add-NetNatStaticMapping forwards single ports. So there is nothing here for
+# netsh to show, and these checks look at the routing table and the agent's own
+# log instead.
+Check "the agent's view of its routes and mappings" {
+    & $Agent status 2>&1
+}
+if ($MappedIP) {
+    Check "interface chosen for the mapped address" {
+        Find-NetRoute -RemoteIPAddress $MappedIP -ErrorAction SilentlyContinue |
+            Format-Table -AutoSize InterfaceAlias, IPAddress, NextHop
+    }
+    Check "ping the LAN device at its overlay address" { ping -n 6 $MappedIP }
+    Check "TCP 554 at the overlay address — the port the rule allows" {
+        Test-NetConnection -ComputerName $MappedIP -Port 554 -WarningAction SilentlyContinue |
+            Format-List ComputerName, RemotePort, TcpTestSucceeded, PingSucceeded
+    }
+    Check "TCP 80 at the overlay address — the port the rule does not allow" {
+        Test-NetConnection -ComputerName $MappedIP -Port 80 -WarningAction SilentlyContinue |
+            Format-List ComputerName, RemotePort, TcpTestSucceeded, PingSucceeded
+    }
+}
+if ($LanIP) {
+    # The question that decides whether the feature works on a real technician's
+    # laptop: does the machine's own LAN still belong to the machine?
+    Check "what this machine reaches at the customer's real address" {
+        Find-NetRoute -RemoteIPAddress $LanIP -ErrorAction SilentlyContinue |
+            Format-Table -AutoSize InterfaceAlias, IPAddress, NextHop
     }
 }
 

@@ -3,6 +3,7 @@ package tunnel
 import (
 	"fmt"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/acl"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/netmap"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ type Tunnel struct {
 	// filter sits between wireguard-go and the operating system and drops
 	// packets the panel's ACL forbids, in both directions.
 	filter *acl.Device
+	mapper *netmap.Device
 }
 
 // Options configures Open.
@@ -100,11 +102,20 @@ func Open(opts Options) (*Tunnel, error) {
 	// teach peers an address that does not work.
 	bind := disconn.New()
 
-	// The ACL filter wraps the interface rather than the device, so
-	// wireguard-go reads and writes through it without knowing it is there.
-	// This is the only point on the machine where packets are both plaintext
-	// and attributable to a peer.
-	filter := acl.Wrap(tunDev, opts.OnFilterDrop)
+	// Two wrappers around the interface, and the order is the point.
+	//
+	// Address translation goes innermost, so everything above it — the ACL
+	// filter, wireguard-go, the panel's rules, the other end of the tunnel —
+	// works in one address space. Only the operating system below it and the
+	// LAN beyond it see the customer's real range. Translating above the
+	// filter would have the gateway judging packets by addresses no other
+	// device in the network uses.
+	mapper := netmap.Wrap(tunDev)
+
+	// The ACL filter wraps that, so wireguard-go reads and writes through both
+	// without knowing either is there. This is the only point on the machine
+	// where packets are both plaintext and attributable to a peer.
+	filter := acl.Wrap(mapper, opts.OnFilterDrop)
 
 	dev := device.NewDevice(filter, bind, logger)
 
@@ -115,7 +126,25 @@ func Open(opts Options) (*Tunnel, error) {
 		name:   actualName,
 		port:   port,
 		filter: filter,
+		mapper: mapper,
 	}, nil
+}
+
+// SetMappings replaces the subnet mappings a gateway applies. Empty on every
+// device that is not a subnet router.
+func (t *Tunnel) SetMappings(table *netmap.Table) {
+	if t.mapper != nil {
+		t.mapper.SetTable(table)
+	}
+}
+
+// Mapped is how many advertised LANs this device translates for.
+func (t *Tunnel) Mapped() int {
+	if t.mapper == nil {
+		return 0
+	}
+
+	return t.mapper.Active()
 }
 
 // SetFilters replaces the ACL table. Safe while traffic is flowing, and it

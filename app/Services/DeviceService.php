@@ -306,7 +306,17 @@ final class DeviceService
                 // prefixes *other* gateways advertise, which this device
                 // installs as routes rather than forwards for.
                 'is_gateway' => (int) $device['is_gateway'] === 1,
-                'advertises' => NetworkRoute::cidrsViaDevice($deviceId),
+                // Both prefixes for each LAN this device routes for. The
+                // gateway is the only place that needs each: the real range to
+                // forward into and NAT for, and the mapped range to recognise
+                // arriving on the tunnel and to rewrite to.
+                'advertises' => array_map(
+                    static fn (array $r): array => [
+                        'destination'      => (string) ($r['mapped_cidr'] ?: $r['destination_cidr']),
+                        'real_destination' => (string) $r['destination_cidr'],
+                    ],
+                    NetworkRoute::servedByDevice($deviceId)
+                ),
             ],
             'network'     => [
                 'uid'           => $network['network_uid'],
@@ -324,23 +334,7 @@ final class DeviceService
                 'split_only'    => true,
             ],
             'peers'       => $peers,
-            'routes'      => array_map(
-                static fn (array $r): array => [
-                    'destination' => $r['destination_cidr'],
-                    'via'         => $r['via_device_ip'] ?? null,
-                    'metric'      => (int) $r['metric'],
-                    // Rules about machines inside this prefix. They name the
-                    // destination by LAN address, because that is how an
-                    // operator thinks about an NVR: the rule is about the
-                    // recorder, not about the PC that routes for it.
-                    'filters'     => AclRouteFilters::forRoute(
-                        $networkId,
-                        $device,
-                        (string) $r['destination_cidr']
-                    ),
-                ],
-                NetworkRoute::forNetwork($networkId)
-            ),
+            'routes'      => self::routesFor($networkId, $device),
             'relays'      => array_map(
                 static fn (array $r): array => [
                     'name'       => $r['name'],
@@ -374,6 +368,49 @@ final class DeviceService
         ];
 
         return self::assertSplitTunnel($config);
+    }
+
+    /**
+     * The advertised LANs, as the agent needs to see them.
+     *
+     * Every destination here is a **mapped** prefix. The customer's real range
+     * is carried alongside it for the agent that has to NAT between the two —
+     * the gateway — and for anything that has to show a human which machine a
+     * rule is about. It is never what a client routes on, because two
+     * customers on 192.168.1.0/24 is the normal case and one routing table
+     * cannot hold both.
+     *
+     * @param array<string,mixed> $device
+     * @return list<array<string,mixed>>
+     */
+    private static function routesFor(int $networkId, array $device): array
+    {
+        $out = [];
+
+        foreach (NetworkRoute::forNetwork($networkId) as $route) {
+            $compiled = AclRouteFilters::compile(
+                $networkId,
+                $device,
+                (string) $route['destination_cidr'],
+                isset($route['mapped_cidr']) ? (string) $route['mapped_cidr'] : null
+            );
+
+            foreach ($compiled as $entry) {
+                $out[] = [
+                    'destination'      => $entry['destination'],
+                    'real_destination' => $entry['real_destination'],
+                    'via'              => $route['via_device_ip'] ?? null,
+                    'metric'           => (int) $route['metric'],
+                    // Rules about machines inside this prefix. They name the
+                    // destination by LAN address, because that is how an
+                    // operator thinks about an NVR: the rule is about the
+                    // recorder, not about the PC that routes for it.
+                    'filters'          => $entry['filters'],
+                ];
+            }
+        }
+
+        return $out;
     }
 
     /**

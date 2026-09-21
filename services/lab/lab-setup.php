@@ -49,6 +49,7 @@ use App\Models\UsageCounter;
 use App\Services\AclService;
 use App\Services\DeviceService;
 use App\Services\IpamService;
+use App\Services\SubnetMapper;
 
 $command = $argv[1] ?? '';
 $args = array_slice($argv, 2);
@@ -64,6 +65,7 @@ exit(match ($command) {
     'acl-cidr'  => labAclCidr($args),
     'route'     => labRoute($args),
     'route-approve' => labRouteApprove($args[0] ?? ''),
+    'pool'      => labPool(),
     'joincode'  => labJoinCode($args),
     'usage'     => labUsage((int) ($args[0] ?? 0)),
     'teardown'  => labTeardown((int) ($args[0] ?? 0)),

@@ -14,9 +14,12 @@ use App\Models\NetworkRoute;
 use App\Models\Plan;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Services\AclRouteFilters;
+use App\Services\AclService;
 use App\Services\DeviceService;
 use App\Services\NetworkService;
 use App\Services\RouteService;
+use App\Services\SubnetMapper;
 use App\Core\Rbac;
 use Throwable;
 
@@ -45,6 +48,8 @@ final class GatewayTests
         try {
             self::seed();
             self::identicalPrefixesStaySeparate();
+            self::subnetsAreMapped();
+            self::rulesAreTranslatedAndStayPrecise();
             self::approvalGatesTheRoute();
             self::duplicateWithinOneNetworkRefused();
         } finally {
@@ -164,9 +169,9 @@ final class GatewayTests
 
             $config = DeviceService::buildAgentConfig(Device::find(self::$fx[$mine . '_laptop']));
 
-            $destinations = array_column($config['routes'], 'destination');
-            TestCase::assertSame(['192.168.1.0/24'], array_values(array_unique($destinations)),
-                $mine . "'s agent sees exactly one 192.168.1.0/24 route");
+            $reals = array_values(array_unique(array_column($config['routes'], 'real_destination')));
+            TestCase::assertSame(['192.168.1.0/24'], $reals,
+                $mine . "'s agent knows of exactly one 192.168.1.0/24");
             TestCase::assertSame(1, count($config['routes']),
                 $mine . "'s agent is not offered the other customer's identical prefix");
 
@@ -187,6 +192,120 @@ final class GatewayTests
             TestCase::assertNotContains((string) $foreignGateway['virtual_ip'], $json,
                 "no trace of " . $theirs . "'s gateway address in " . $mine . "'s config");
         }
+    }
+
+    /**
+     * The mapping itself: both customers on 192.168.1.0/24, each given a
+     * different prefix, and the overlay carrying neither customer's real
+     * range.
+     */
+    private static function subnetsAreMapped(): void
+    {
+        TestCase::group('Gateway — identical LANs get different virtual prefixes (§16)');
+
+        $pool = SubnetMapper::pool();
+
+        foreach (['hotelA', 'hotelB'] as $key) {
+            self::act($key);
+            $route = NetworkRoute::find(self::$fx[$key . '_route']);
+
+            TestCase::assert(!empty($route['mapped_cidr']),
+                $key . "'s route was given a virtual prefix", (string) $route['mapped_cidr']);
+            TestCase::assert(AclRouteFilters::overlap((string) $route['mapped_cidr'], $pool),
+                'and it came out of the pool ' . $pool);
+            self::$fx[$key . '_mapped'] = (string) $route['mapped_cidr'];
+        }
+
+        // Different customers may reuse a virtual prefix — they never share a
+        // routing table — but within our own fixtures they are separate
+        // networks, and what matters is that neither carries the other's.
+        foreach (['hotelA' => 'hotelB', 'hotelB' => 'hotelA'] as $mine => $theirs) {
+            self::act($mine);
+            $config = DeviceService::buildAgentConfig(Device::find(self::$fx[$mine . '_laptop']));
+
+            $destinations = array_column($config['routes'], 'destination');
+            TestCase::assert(!in_array('192.168.1.0/24', $destinations, true),
+                $mine . "'s agent is never told to route the customer's real range");
+            TestCase::assert(in_array(self::$fx[$mine . '_mapped'], $destinations, true),
+                'it routes ' . self::$fx[$mine . '_mapped'] . ' instead');
+
+            // The real range is still carried, because the gateway has to NAT
+            // between the two and a human has to be shown which machine a rule
+            // is about.
+            $reals = array_column($config['routes'], 'real_destination');
+            TestCase::assert(in_array('192.168.1.0/24', $reals, true),
+                'and the real range travels alongside it for the gateway and the UI');
+        }
+
+        // The gateway is told both, because it is the only device that needs
+        // each.
+        self::act('hotelA');
+        $gatewayConfig = DeviceService::buildAgentConfig(Device::find(self::$fx['hotelA_gw']));
+
+        TestCase::assertSame(1, count($gatewayConfig['device']['advertises']),
+            'the gateway advertises one LAN');
+        TestCase::assertSame('192.168.1.0/24',
+            $gatewayConfig['device']['advertises'][0]['real_destination'],
+            'the gateway knows the real range it forwards into');
+        TestCase::assertSame(self::$fx['hotelA_mapped'],
+            $gatewayConfig['device']['advertises'][0]['destination'],
+            'and the mapped range it receives on');
+    }
+
+    /**
+     * Rules are written about the address on the recorder and compiled to the
+     * address the overlay uses — and a rule about one machine stays about one
+     * machine.
+     */
+    private static function rulesAreTranslatedAndStayPrecise(): void
+    {
+        TestCase::group('Gateway — rules name the real IP, agents get the mapped one (§36)');
+
+        self::act('hotelA');
+        $mapped = self::$fx['hotelA_mapped'];
+
+        // "AK Support may reach the NVR on tcp/554." The NVR is named by the
+        // address on its own label.
+        AclService::createRule(self::$fx['hotelA_network'], [
+            'action'    => 'allow',
+            'src_type'  => 'device',
+            'src_value' => (string) Device::find(self::$fx['hotelA_laptop'])['device_uid'],
+            'dst_type'  => 'cidr',
+            'dst_value' => '192.168.1.50/32',
+            'protocol'  => 'tcp',
+            'port_from' => 554,
+            'port_to'   => 554,
+            'priority'  => 10,
+        ]);
+
+        $config = DeviceService::buildAgentConfig(Device::find(self::$fx['hotelA_laptop']));
+        $byDestination = [];
+        foreach ($config['routes'] as $route) {
+            $byDestination[(string) $route['destination']] = $route;
+        }
+
+        $expected = SubnetMapper::mapAddress('192.168.1.50/32', '192.168.1.0/24', $mapped);
+        TestCase::assert($expected !== null, 'the NVR maps to an overlay address', (string) $expected);
+
+        TestCase::assert(isset($byDestination[$expected]),
+            'the agent gets an entry of its own for the NVR at ' . $expected);
+        TestCase::assertSame('192.168.1.50/32',
+            (string) $byDestination[$expected]['real_destination'],
+            'and is told which real address that is');
+
+        TestCase::assertNotContains('192.168.1.50', (string) json_encode(array_column($config['routes'], 'destination')),
+            'no real LAN address appears in anything the agent routes on');
+
+        // The precision that matters: the whole-LAN entry must not have
+        // inherited the NVR's rule, or the rule would open tcp/554 on the till
+        // as well.
+        $subnetFilters = $byDestination[$mapped]['filters'] ?? [];
+        TestCase::assertSame(0, count($subnetFilters),
+            'the rule about one machine did not become a rule about the whole LAN');
+
+        $hostFilters = $byDestination[$expected]['filters'] ?? [];
+        TestCase::assertSame(1, count($hostFilters), 'and it did land on that machine');
+        TestCase::assertSame(554, (int) $hostFilters[0]['port_from'], 'on the port it names');
     }
 
     /** R4 applies to subnets: nothing reaches a LAN before a person approves it. */
@@ -210,7 +329,7 @@ final class GatewayTests
         RouteService::approve((int) $route['id']);
 
         $config = DeviceService::buildAgentConfig(Device::find(self::$fx['hotelA_laptop']));
-        TestCase::assert(in_array('192.168.90.0/24', array_column($config['routes'], 'destination'), true),
+        TestCase::assert(in_array('192.168.90.0/24', array_column($config['routes'], 'real_destination'), true),
             'and present once an administrator approves it');
 
         RouteService::withdraw((int) $route['id']);

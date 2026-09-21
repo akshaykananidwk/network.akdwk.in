@@ -284,6 +284,10 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__routes` (
   `tenant_id` BIGINT UNSIGNED NOT NULL,
   `network_id` BIGINT UNSIGNED NOT NULL,
   `destination_cidr` VARCHAR(20) NOT NULL,
+  -- The prefix the overlay uses for this LAN. Unique within the network,
+  -- because two customers both on 192.168.1.0/24 is the normal case and one
+  -- routing table cannot hold both.
+  `mapped_cidr` VARCHAR(20) NULL DEFAULT NULL,
   `via_device_id` BIGINT UNSIGNED NULL,
   `metric` INT NOT NULL DEFAULT 100,
   `description` VARCHAR(190) NULL,
@@ -298,6 +302,9 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__routes` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_routes_net_dest` (`route_key`),
   KEY `idx_routes_network` (`network_id`, `enabled`),
+  -- Unique: two LANs sharing a virtual prefix is the collision the virtual
+  -- prefix exists to prevent, and allocation reads before it writes.
+  UNIQUE KEY `idx_routes_mapped` (`network_id`, `mapped_cidr`),
   KEY `idx_routes_tenant` (`tenant_id`),
   CONSTRAINT `fk_routes_network` FOREIGN KEY (`network_id`) REFERENCES `__PREFIX__networks` (`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_routes_device` FOREIGN KEY (`via_device_id`) REFERENCES `__PREFIX__devices` (`id`) ON DELETE CASCADE

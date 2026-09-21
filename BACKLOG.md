@@ -159,18 +159,20 @@ not exist.
 twenty customers needs twenty enrolments, and one agent install holds one. The
 overlay works perfectly for each customer in turn and cannot hold two at once.
 
-Two changes, and the second is the harder one:
+**Subnet mapping removed the hard half of this.** The original entry said
+twenty hotels on 192.168.1.0/24 would collide in one routing table however good
+the membership model was, and that reaching two at once needed per-network
+routing tables — policy routing on Linux, and on Windows a mechanism that does
+not obviously exist. That is no longer true: every advertised LAN already has a
+prefix of its own, so twenty customers are twenty distinct prefixes in one
+ordinary routing table.
 
-1. **Membership.** A device belongs to many networks: a join table, a peer set
-   per network, and an identity per network or one shared across them — that
-   choice has consequences for revocation, because revoking a laptop from one
-   customer must not touch the others.
-2. **Routing.** Twenty hotels all on 192.168.1.0/24 collide in one routing
-   table however good the membership model is. Reaching two of them at once
-   needs per-network routing — policy routing with a table per network on
-   Linux, and on Windows a mechanism that does not obviously exist. It may be
-   that the honest answer is "one customer connected at a time, switched from
-   the tray", which is a product decision rather than an engineering one.
+What is left is membership: a device belonging to many networks — a join table,
+a peer set per network, and an identity per network or one shared across them.
+That choice has consequences for revocation, because revoking a laptop from one
+customer must not touch the others. It also needs the mapped-prefix pool to be
+allocated per *device* rather than per network, since one device would then see
+several networks' mappings at once.
 
 **Cost of leaving it:** a technician disconnects from one customer to reach
 another. Annoying, not blocking, and every competitor has the same problem with

@@ -219,6 +219,14 @@ $base = url('networks/' . $network['id']);
                 subnet-router. <strong>0.0.0.0/0 is rejected:</strong> the tunnel never carries a
                 default route, so normal internet traffic always leaves via the customer's own ISP.
             </p>
+            <p class="text-muted px-4 pb-4">
+                <strong>Two addresses per LAN, on purpose.</strong> Almost every router hands out
+                192.168.1.0/24, so if the overlay carried the customer's real range your own laptop
+                could not tell theirs from its own. Each site gets a range of its own here instead —
+                an NVR at <code>192.168.1.50</code> on the site is reached at the overlay address
+                shown beside it. Write access rules about the real address, the one on the label on
+                the device; the gateway translates.
+            </p>
 
             <?php if ($routes === []): ?>
                 <?= \App\Core\View::partial('partials.empty', [
@@ -229,7 +237,8 @@ $base = url('networks/' . $network['id']);
                     <table class="table">
                         <thead>
                         <tr>
-                            <th scope="col">Destination</th>
+                            <th scope="col">On the site</th>
+                            <th scope="col">On the overlay</th>
                             <th scope="col">Via</th>
                             <th scope="col">Metric</th>
                             <th scope="col">State</th>
@@ -238,7 +247,19 @@ $base = url('networks/' . $network['id']);
                         <tbody>
                         <?php foreach ($routes as $route): ?>
                             <tr>
-                                <td><code><?= e($route['destination_cidr']) ?></code></td>
+                                <td>
+                                    <code><?= e($route['destination_cidr']) ?></code>
+                                    <span class="text-muted d-block small">the customer&rsquo;s own range</span>
+                                </td>
+                                <td>
+                                    <?php if (!empty($route['mapped_cidr'])): ?>
+                                        <code><?= e($route['mapped_cidr']) ?></code>
+                                        <span class="text-muted d-block small">what you connect to</span>
+                                    <?php else: ?>
+                                        <code class="text-muted"><?= e($route['destination_cidr']) ?></code>
+                                        <span class="text-muted d-block small">unmapped &mdash; re-advertise to fix</span>
+                                    <?php endif; ?>
+                                </td>
                                 <td><?= e($route['via_device_name'] ?? '—') ?> <code class="text-muted"><?= e($route['via_device_ip'] ?? '') ?></code></td>
                                 <td><?= e($route['metric']) ?></td>
                                 <td>

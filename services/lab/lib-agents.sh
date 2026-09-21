@@ -117,7 +117,27 @@ lab::reap_agents() {
     for entry in /proc/[0-9]*; do
         pid="${entry#/proc/}"
         exe="$(readlink "$entry/exe" 2>/dev/null)" || continue
-        [ "$exe" = "$BIN/akconnect-agent" ] || continue
+
+        # Two things the exact comparison this used to do would miss, and both
+        # of them happened:
+        #
+        #   - " (deleted)", which the kernel appends once the binary has been
+        #     replaced. Every run rebuilds, so every agent that outlives one
+        #     build is invisible to an exact match.
+        #   - the tampered agent, a second binary beside the first. It was
+        #     never matched at all, so the ACL drills leaked one on every run.
+        #
+        # A stray agent is not a tidiness problem. It keeps polling the panel
+        # and keeps writing the state file a later scenario reads, so a drill
+        # ends up measuring an agent from a run that is over — which is how
+        # `accounting` came to report "the pair is not relayed" about a pair
+        # that was, and blame the product for it.
+        exe="${exe% (deleted)}"
+        case "$exe" in
+            "$BIN"/akconnect-agent*) ;;
+            *) continue ;;
+        esac
+
         kill -TERM "$pid" 2>/dev/null && killed=$((killed + 1))
     done
 
@@ -314,8 +334,22 @@ lab::tcp_connect() {
 # the wrong reason. "-k" keeps the socket open across connections so the
 # service is still there when the drill asks again.
 lab::serve_tcp() {
-    local ns=$1 port=$2
-    setsid ip netns exec "$ns" nc -k -l "$port" >/dev/null 2>&1 &
+    local ns=$1 port=$2 banner=${3:-}
+
+    if [ -n "$banner" ]; then
+        # A banner makes "which machine answered" a question the drill can
+        # settle. When two namespaces hold the same address — which is the
+        # whole point of the subnet-mapping drill — a successful connection
+        # proves nothing on its own.
+        #
+        # Not nc: "-k" keeps the socket open but sends the banner once, and a
+        # loop around a one-shot "nc -l" leaves a window between connections
+        # where the next connect gets a reset and the drill blames the product.
+        setsid ip netns exec "$ns" php "$LAB_DIR/banner-server.php" "$port" "$banner" \
+            >/dev/null 2>&1 &
+    else
+        setsid ip netns exec "$ns" nc -k -l "$port" >/dev/null 2>&1 &
+    fi
     SERVER_PIDS+=("$!")
 
     # Confirm it is actually listening before anything is concluded from a
@@ -330,6 +364,25 @@ lab::serve_tcp() {
     done
 
     return 1
+}
+
+# mapped_host is the overlay address of one machine on a mapped LAN.
+#
+# The panel allocates the prefix, so a drill cannot know it in advance: it asks
+# for the prefix and works out where inside it a given host sits. The host part
+# carries across unchanged, which is the whole design.
+lab::mapped_host() {
+    local prefix=$1 host=$2
+    [ -n "$prefix" ] || return 0
+    awk -F/ -v h="$host" '{split($1, o, "."); printf "%s.%s.%s.%s", o[1], o[2], o[3], h}' <<<"$prefix"
+}
+
+# banner_from reads what a listener says, so a drill can tell which machine
+# answered rather than only that something did.
+lab::banner_from() {
+    local ns=$1 target=$2 port=$3 timeout=${4:-5}
+    ip netns exec "$ns" timeout "$timeout" bash -c \
+        "exec 3<>/dev/tcp/$target/$port; head -n1 <&3" 2>/dev/null | tr -d '\r\n'
 }
 
 # serving reports whether the listener is still up, from inside its own

@@ -100,6 +100,17 @@ func printRuntime(stateStore *state.Store) error {
 	fmt.Printf("  Coordinator: %s\n", reachable(rt.CoordinatorUp))
 	fmt.Printf("  Panel      : %s\n", reachable(rt.ControlPlaneUp))
 
+	if len(rt.Mappings) > 0 {
+		// The only place a technician can look this up. The rewriting happens
+		// inside the agent, so neither `ip route` on Linux nor `Get-NetNat` on
+		// Windows shows which overlay address reaches which machine.
+		fmt.Printf("\n  This device is a gateway. Machines on these LANs are reached\n")
+		fmt.Printf("  at the matching address in the overlay range:\n\n")
+		for _, m := range rt.Mappings {
+			fmt.Printf("    %-20s on the site  →  %-20s on the overlay\n", m.LAN, m.Overlay)
+		}
+	}
+
 	if len(rt.Peers) == 0 {
 		fmt.Printf("\n  No peers.\n")
 		return nil

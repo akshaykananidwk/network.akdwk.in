@@ -189,16 +189,20 @@ traceroute does not pass through our infrastructure.
 | Subnet-router mode, Linux | Done and drilled: an agentless NVR reached through a site PC on one port |
 | Subnet-router mode, Windows | **Code written, never run on Windows.** `New-NetNat` + per-interface forwarding. Stage 13 of the test pack covers it |
 | ACLs on routed traffic | Done, per destination LAN IP and port, enforced on the client **and** on the gateway |
-| Overlapping LAN subnets | Handled across tenants and within a network. On one machine, a collision with the technician's own LAN is refused and logged — see the limitation below |
+| Overlapping LAN subnets | **Solved.** Each advertised LAN gets a unique virtual prefix and the gateway rewrites between the two, so two customers on 192.168.1.0/24 — and a technician on it too — all work |
+| Subnet mapping, Windows | Platform-independent by construction (the agent rewrites, not the OS), but **never run on Windows**. Stage 13g |
 | Split DNS | **Not started** |
 | Site-to-site | **Not started** |
 
-### The limitation to say out loud
+### The limitations to say out loud
 
-A support laptop whose own LAN is 192.168.1.0/24 cannot reach a customer's
-192.168.1.0/24. The agent refuses the advertised route rather than taking over
-the LAN the machine is sitting on, and logs which prefix clashed. One side has
-to be renumbered. This is not solved.
+Duplicate LAN ranges are solved, but a machine already numbered out of the
+mapping pool (`10.128.0.0/10`) will be handed a virtual prefix that lands on top
+of its own network. The agent refuses that route and keeps the local one; the
+fix is to change `network.mapped_pool`.
+
+Split DNS (§18) is not started. Every address in this product is reached
+numerically.
 
 Related and larger: a device belongs to exactly one network
 (`devices.network_id` is a single column), so one support laptop cannot be a
@@ -257,8 +261,13 @@ Listed so nobody discovers them the hard way.
    on `devices.network_id` being a single column, and on the fact that twenty
    customers all using 192.168.1.0/24 would collide in one routing table even
    if it were not.
-5. **Split DNS and site-to-site** — the rest of Phase 4.
-6. Then Phase 6.
+5. **Split DNS** (§18) — `nvr.hotel-abc.<network>.internal` for overlay devices
+   and for machines behind a gateway, for our domain only, with the customer's
+   own resolution untouched. The mechanisms that give true split DNS rather
+   than a takeover are systemd-resolved's per-interface domain routing on Linux
+   and NRPT on Windows; neither is written yet.
+6. **Site-to-site** — the rest of Phase 4.
+7. Then Phase 6.
 
 The order is deliberate: items 1 and 3 decide whether any of the rest matters
 commercially.

@@ -26,7 +26,7 @@ die() { echo "  ✗ $*" >&2; exit 1; }
 note() { echo "  $*"; }
 
 teardown() {
-    for ns in alpha beta natgw-a natgw-b nvr; do
+    for ns in alpha beta natgw-a natgw-b nvr office; do
         ip netns del "$ns" 2>/dev/null || true
     done
     ip link del "$BRIDGE" 2>/dev/null || true
@@ -39,7 +39,7 @@ teardown() {
     local link
     for link in br-alpha br-beta br-natgw-a br-natgw-b \
                 veth-alpha veth-beta wan-natgw-a wan-natgw-b \
-                lan-natgw-a lan-natgw-b lan-beta veth-nvr; do
+                lan-natgw-a lan-natgw-b lan-beta veth-nvr lan-alpha veth-office; do
         ip link del "$link" 2>/dev/null || true
     done
 
@@ -268,12 +268,66 @@ build_gateway() {
     note "nvr is 192.168.77.50 on beta's LAN, with no agent and no route to the overlay"
 }
 
+# The topology the subnet-mapping feature exists for.
+#
+# The customer's hotel is on 192.168.1.0/24. So is the technician's own office.
+# So, in this country, is nearly everybody — which is why "renumber one side"
+# is not an answer a business can give its customers.
+#
+# Both LANs carry a machine at .50, deliberately. If the mapping is wrong in
+# either direction the technician reaches their own printer and gets a
+# perfectly successful connection to the wrong machine, which is the failure
+# worth catching: it looks exactly like success.
+build_collision() {
+    teardown
+
+    ip link add "$BRIDGE" type bridge
+    ip address add "$HOST_IP/24" dev "$BRIDGE"
+    ip link set "$BRIDGE" up
+
+    build_nat_side alpha natgw-a 10 192.168.10 cone
+    build_nat_side beta  natgw-b 11 192.168.20 cone
+
+    # The customer's site, behind beta.
+    ip netns add nvr
+    ip link add lan-beta type veth peer name veth-nvr
+    ip link set lan-beta netns beta
+    ip link set veth-nvr netns nvr
+
+    ip netns exec beta ip address add 192.168.1.1/24 dev lan-beta
+    ip netns exec beta ip link set lan-beta up
+
+    ip netns exec nvr ip link set lo up
+    ip netns exec nvr ip address add 192.168.1.50/24 dev veth-nvr
+    ip netns exec nvr ip link set veth-nvr up
+    ip netns exec nvr ip route add default via 192.168.1.1
+
+    # The technician's own office, on the same range, with its own machine at
+    # the same address.
+    ip netns add office
+    ip link add lan-alpha type veth peer name veth-office
+    ip link set lan-alpha netns alpha
+    ip link set veth-office netns office
+
+    ip netns exec alpha ip address add 192.168.1.1/24 dev lan-alpha
+    ip netns exec alpha ip link set lan-alpha up
+
+    ip netns exec office ip link set lo up
+    ip netns exec office ip address add 192.168.1.50/24 dev veth-office
+    ip netns exec office ip link set veth-office up
+    ip netns exec office ip route add default via 192.168.1.1
+
+    sysctl -qw net.ipv4.ip_forward=1
+    note "both LANs are 192.168.1.0/24, and both have a machine at .50"
+}
+
 case "${1:-up}" in
     up)        build_flat ;;
     nat)       build_nat ;;
     symmetric) build_symmetric ;;
     mixed)     build_mixed "${2:-cone}" "${3:-symmetric}" ;;
     gateway)   build_gateway ;;
+    collision) build_collision ;;
     down)      teardown ;;
-    *)         die "unknown command: $1 (use up, nat, symmetric, mixed, gateway or down)" ;;
+    *)         die "unknown command: $1 (use up, nat, symmetric, mixed, gateway, collision or down)" ;;
 esac

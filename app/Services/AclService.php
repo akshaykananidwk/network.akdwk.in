@@ -43,7 +43,7 @@ final class AclService
         // Prefixes this device is itself the gateway for. Empty for everything
         // that is not a subnet router, which is almost every device.
         $serves = (int) $self['is_gateway'] === 1
-            ? NetworkRoute::cidrsViaDevice((int) $self['id'])
+            ? NetworkRoute::servedByDevice((int) $self['id'])
             : [];
 
         $out = [];
