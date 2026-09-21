@@ -19,6 +19,7 @@ source "$LAB/lib.sh"
 ALPHA_IP=""
 BETA_IP=""
 TENANT=""
+NETWORK=""
 RESULTS=()
 FAILED=0
 LOSS_PCT=""
@@ -28,6 +29,7 @@ LOSS_PCT=""
 # commercial decision: it is the margin of error on an invoice.
 ACCOUNTING_TOLERANCE=${ACCOUNTING_TOLERANCE:-10}
 AGENT_PIDS=()
+SERVER_PIDS=()
 
 record() {
     local name=$1 status=$2 detail=$3
@@ -53,6 +55,7 @@ check() {
 fixture() {
     local topology=("$@")
 
+    lab::stop_servers
     lab::down_agents
     "$LAB_DIR/topology.sh" "${topology[@]}" >/dev/null
     rm -rf "$RUN/state"
@@ -66,6 +69,7 @@ fixture() {
     local seed
     seed="$(php "$LAB_DIR/lab-setup.php" seed)" || die "could not seed a tenant"
     TENANT="$(awk -F= '/^TENANT=/ {print $2}' <<<"$seed")"
+    NETWORK="$(awk -F= '/^NETWORK=/ {print $2}' <<<"$seed")"
     local code
     code="$(awk -F= '/^JOIN_CODE=/ {print $2}' <<<"$seed")"
 
@@ -95,6 +99,8 @@ cleanup() {
     # Everything below destroys shared state, so a cleanup that no longer owns
     # the lock stops after its own agents rather than tearing down a later
     # run's environment from underneath it.
+    lab::stop_servers
+
     if ! lab::owns; then
         lab::down_agents
         return
@@ -149,9 +155,11 @@ declare -A SCENARIOS=(
     [relay-down]=scenario_relay_down
     [relay-failover]=scenario_relay_failover
     [accounting]=scenario_accounting
+    [acl]=scenario_acl
+    [acl-tamper]=scenario_acl_tamper
     [revocation]=scenario_revocation
 )
-ORDER=(cone relay cone-sym sym-cone controller-down relay-down relay-failover accounting revocation)
+ORDER=(cone relay cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-tamper revocation)
 
 if [ "${1:-}" = "--list" ]; then
     printf '%s\n' "${ORDER[@]}"

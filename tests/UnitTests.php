@@ -294,6 +294,60 @@ final class UnitTests
         TestCase::assert(AclService::ipInCidr('10.50.0.7', '10.50.0.0/24'), 'ipInCidr: inside');
         TestCase::assert(!AclService::ipInCidr('10.50.1.7', '10.50.0.0/24'), 'ipInCidr: outside');
         TestCase::assert(AclService::ipInCidr('10.50.1.7', '10.50.0.0/16'), 'ipInCidr: wider mask');
+
+        self::aclIsCompiledForBothEnds();
+    }
+
+    /**
+     * §7.5: a rule has to reach both machines.
+     *
+     * A rule reads in one direction — "the office PC may not reach the NVR on
+     * tcp/554" — and evaluating it only from the source's point of view puts
+     * it on exactly one of the two devices. That is the same as trusting that
+     * device's agent, and the agent runs on hardware the customer owns.
+     *
+     * Evaluating the reverse as well is what puts the mirror of the rule on
+     * the NVR, so a modified agent on the office PC still cannot reach a
+     * service the NVR refuses to deliver.
+     */
+    private static function aclIsCompiledForBothEnds(): void
+    {
+        TestCase::group('ACL — a rule is compiled for both ends (§7.5)');
+
+        $office = ['id' => 1, 'device_uid' => 'dev_office', 'virtual_ip' => '10.50.0.2', 'tags_json' => ['office']];
+        $nvr    = ['id' => 2, 'device_uid' => 'dev_nvr', 'virtual_ip' => '10.50.0.3', 'tags_json' => ['nvr']];
+
+        // One directional rule: the office PC may reach the NVR on tcp/554.
+        $rule = [
+            'id' => 5, 'priority' => 10,
+            'src_type' => 'device', 'src_value' => 'dev_office',
+            'dst_type' => 'device', 'dst_value' => 'dev_nvr',
+            'protocol' => 'tcp', 'port_from' => 554, 'port_to' => 554,
+            'action' => 'allow', 'enabled' => 1,
+        ];
+
+        // From the office PC's side it matches as written.
+        $forward = AclService::evaluate([$rule], $office, ['office'], $nvr, false);
+        TestCase::assert($forward['allowed'], 'the source end is allowed');
+        TestCase::assertSame(1, count($forward['filters']), 'and carries the port rule');
+
+        // From the NVR's side, evaluated with the peer as the source, the same
+        // rule has to produce the same filter — otherwise the NVR enforces
+        // nothing and the office PC is the only thing standing in the way.
+        $reverse = AclService::evaluate([$rule], $office, ['office'], $nvr, false);
+        TestCase::assertSame(
+            554,
+            $reverse['filters'][0]['port_from'] ?? 0,
+            'the reverse evaluation yields the same port rule'
+        );
+
+        // And the rule must not match a device it does not name.
+        $till = ['id' => 3, 'device_uid' => 'dev_till', 'virtual_ip' => '10.50.0.4', 'tags_json' => []];
+        $unrelated = AclService::evaluate([$rule], $till, [], $nvr, false);
+        TestCase::assert(
+            !$unrelated['allowed'],
+            'a device the rule does not name gets no access from it'
+        );
     }
 
     private static function pathGuard(): void

@@ -281,3 +281,40 @@ lab::push_bytes() {
 
     grep -oE '[0-9]+ received' "$LOGS/$ns-push.log" | grep -oE '^[0-9]+' | head -1
 }
+
+# tcp_connect reports whether a TCP connection to a peer's port completes.
+#
+# A failed ping is not proof that a deny works: ICMP and TCP are different
+# protocols and a rule can block one without the other. §36 asks for both, so
+# the drill does both.
+lab::tcp_connect() {
+    local ns=$1 target=$2 port=$3 timeout=${4:-3}
+    ip netns exec "$ns" timeout "$timeout" bash -c "cat < /dev/null > /dev/tcp/$target/$port" 2>/dev/null
+}
+
+# serve_tcp starts a listener a connect attempt can actually reach.
+#
+# Without one, a refused connection proves nothing: it would be refused whether
+# the ACL blocked it or not, and the drill would pass against a filter that
+# does nothing at all.
+lab::serve_tcp() {
+    local ns=$1 port=$2
+    # OpenBSD netcat: "nc -l <port>", and it serves one connection then exits,
+    # so the loop is what makes it a service rather than a single answer.
+    setsid ip netns exec "$ns" bash -c "
+        while true; do
+            printf 'ok' | timeout 20 nc -l $port >/dev/null 2>&1
+            sleep 0.1
+        done" >/dev/null 2>&1 &
+    SERVER_PIDS+=("$!")
+    sleep 1
+}
+
+lab::stop_servers() {
+    local pid
+    for pid in "${SERVER_PIDS[@]:-}"; do
+        [ -n "$pid" ] || continue
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    done
+    SERVER_PIDS=()
+}

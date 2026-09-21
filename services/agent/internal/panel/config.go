@@ -68,6 +68,23 @@ type Peer struct {
 	AllowedIPs  []string `json:"allowed_ips"`
 	IsGateway   bool     `json:"is_gateway"`
 	LastSeenAt  string   `json:"last_seen_at"`
+	// Filters are the port and protocol rules the agent applies above the peer
+	// link. The panel has already decided *whether* these two devices may
+	// talk; these decide which packets between them may pass.
+	Filters []Filter `json:"filters"`
+}
+
+// Filter is one compiled ACL rule, as AclService::toFilter() emits it.
+//
+// PortFrom and PortTo are pointers because the panel sends null for a rule
+// that is about a protocol and not about any port, and "no port" has to stay
+// distinguishable from "port 0".
+type Filter struct {
+	Action   string `json:"action"`
+	Protocol string `json:"protocol"`
+	PortFrom *int   `json:"port_from"`
+	PortTo   *int   `json:"port_to"`
+	RuleID   int    `json:"rule_id"`
 }
 
 // Route is a subnet reachable through a gateway device.

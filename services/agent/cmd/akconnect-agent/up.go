@@ -165,6 +165,7 @@ func (s *session) applyConfig(priv wgPrivate, cfg *panel.Config) error {
 			ListenPort:    s.port,
 			Verbose:       s.verbose,
 			Logf:          s.logf,
+			OnFilterDrop:  newDropReporter(s.logf).report,
 		})
 		if err != nil {
 			return err
@@ -178,6 +179,16 @@ func (s *session) applyConfig(priv wgPrivate, cfg *panel.Config) error {
 
 	if err := netcfg.Apply(s.tun.Name(), plan); err != nil {
 		return fmt.Errorf("configuring the interface: %w", err)
+	}
+
+	// ACL last, and deliberately after the interface is configured: the table
+	// is swapped atomically, so there is no window where traffic flows
+	// unfiltered between a new configuration arriving and its rules applying.
+	table := buildFilterTable(cfg)
+	s.tun.SetFilters(table)
+	if table.Restricted() > 0 {
+		s.logf("acl: %d of %d peer(s) carry port rules, enforced in both directions",
+			table.Restricted(), len(cfg.Peers))
 	}
 
 	s.plan = plan

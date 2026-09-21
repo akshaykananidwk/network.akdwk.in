@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"fmt"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/acl"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -31,6 +32,9 @@ type Tunnel struct {
 	name   string
 	port   int
 	closed bool
+	// filter sits between wireguard-go and the operating system and drops
+	// packets the panel's ACL forbids, in both directions.
+	filter *acl.Device
 }
 
 // Options configures Open.
@@ -43,6 +47,11 @@ type Options struct {
 	Verbose bool
 	// Logf receives log lines. Required.
 	Logf func(format string, args ...any)
+	// OnFilterDrop is called for every packet the ACL refuses. Optional; the
+	// caller owns any rate limiting, because a misconfigured rule can drop
+	// thousands of packets a second and the log is the wrong place to discover
+	// that.
+	OnFilterDrop func(acl.Direction, acl.Verdict)
 }
 
 // Open creates the interface and starts the device, but configures no peers:
@@ -90,9 +99,40 @@ func Open(opts Options) (*Tunnel, error) {
 	// share this exact socket. Anything else would get its own NAT mapping and
 	// teach peers an address that does not work.
 	bind := disconn.New()
-	dev := device.NewDevice(tunDev, bind, logger)
 
-	return &Tunnel{dev: dev, tunDev: tunDev, bind: bind, name: actualName, port: port}, nil
+	// The ACL filter wraps the interface rather than the device, so
+	// wireguard-go reads and writes through it without knowing it is there.
+	// This is the only point on the machine where packets are both plaintext
+	// and attributable to a peer.
+	filter := acl.Wrap(tunDev, opts.OnFilterDrop)
+
+	dev := device.NewDevice(filter, bind, logger)
+
+	return &Tunnel{
+		dev:    dev,
+		tunDev: tunDev,
+		bind:   bind,
+		name:   actualName,
+		port:   port,
+		filter: filter,
+	}, nil
+}
+
+// SetFilters replaces the ACL table. Safe while traffic is flowing, and it
+// takes effect on the next packet rather than the next reconnection.
+func (t *Tunnel) SetFilters(table *acl.Table) {
+	if t.filter != nil {
+		t.filter.SetTable(table)
+	}
+}
+
+// FilterDrops is how many packets the ACL has refused since startup.
+func (t *Tunnel) FilterDrops() uint64 {
+	if t.filter == nil {
+		return 0
+	}
+
+	return t.filter.Dropped()
 }
 
 // Name is the interface name the OS actually gave us.

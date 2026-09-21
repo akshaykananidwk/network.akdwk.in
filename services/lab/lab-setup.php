@@ -18,6 +18,7 @@ declare(strict_types=1);
  *   lab-setup.php reapprove <uid>      put a revoked device back
  *   lab-setup.php relays <host> <port>... register the lab relay fleet
  *   lab-setup.php unthrottle           clear the rate limiter
+ *   lab-setup.php acl <net> <action> <src> <dst> [proto] [port]
  *   lab-setup.php usage <tenant>       print relayed byte counters
  *   lab-setup.php teardown <tenant>    remove everything the drill created
  */
@@ -43,6 +44,7 @@ use App\Models\Plan;
 use App\Models\Relay;
 use App\Models\Tenant;
 use App\Models\UsageCounter;
+use App\Services\AclService;
 use App\Services\DeviceService;
 use App\Services\IpamService;
 
@@ -56,6 +58,7 @@ exit(match ($command) {
     'reapprove' => labReapprove($args[0] ?? ''),
     'relays'    => labRelays($args),
     'unthrottle' => labUnthrottle(),
+    'acl'       => labAcl($args),
     'usage'     => labUsage((int) ($args[0] ?? 0)),
     'teardown'  => labTeardown((int) ($args[0] ?? 0)),
     default     => fail('unknown command: ' . $command),
@@ -225,6 +228,63 @@ function labRelays(array $args): int
  * The limit itself is a real question for a customer rolling out a site in one
  * afternoon — see VERIFICATION_REPORT.md.
  */
+/**
+ * Author one ACL rule, the way an administrator would.
+ *
+ * Through AclService rather than an INSERT, because the thing being tested is
+ * that authoring a rule reaches the agents — and that path includes bumping
+ * the network's config revision, which is what the agents poll on.
+ *
+ * @param list<string> $args
+ */
+function labAcl(array $args): int
+{
+    $networkId = (int) ($args[0] ?? 0);
+    $action = (string) ($args[1] ?? '');
+    $src = (string) ($args[2] ?? '');
+    $dst = (string) ($args[3] ?? '');
+    $protocol = (string) ($args[4] ?? 'any');
+    $port = (string) ($args[5] ?? '');
+
+    if ($networkId <= 0 || $action === '' || $src === '' || $dst === '') {
+        return fail('usage: acl <network> <allow|deny> <src-uid|any> <dst-uid|any> [protocol] [port]');
+    }
+
+    $network = TenantScope::acrossAllTenants(
+        'lab harness',
+        static fn (): ?array => Network::find($networkId)
+    );
+    if ($network === null) {
+        return fail("network {$networkId} not found");
+    }
+
+    $result = TenantScope::asTenant((int) $network['tenant_id'], static function () use ($networkId, $action, $src, $dst, $protocol, $port): array {
+        $rule = AclService::createRule($networkId, [
+            'action'    => $action,
+            'src_type'  => $src === 'any' ? 'any' : 'device',
+            'src_value' => $src === 'any' ? null : $src,
+            'dst_type'  => $dst === 'any' ? 'any' : 'device',
+            'dst_value' => $dst === 'any' ? null : $dst,
+            'protocol'  => $protocol,
+            'port_from' => $port === '' ? null : $port,
+            'port_to'   => $port === '' ? null : $port,
+            'enabled'   => 1,
+        ]);
+
+        // Read the revision inside the same scope: a tenant-scoped model has
+        // no business being queried once the scope has closed, and it throws
+        // rather than quietly returning another tenant's row.
+        return [
+            'rule'     => (int) $rule['id'],
+            'revision' => (int) (Network::find($networkId)['config_revision'] ?? 0),
+        ];
+    });
+
+    printf("RULE=%d\nREVISION=%d\nAT=%.3f\n", $result['rule'], $result['revision'], microtime(true));
+
+    return 0;
+}
+
 function labUnthrottle(): int
 {
     TenantScope::acrossAllTenants('lab harness', static function (): void {
