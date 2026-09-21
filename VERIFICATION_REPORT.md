@@ -774,27 +774,59 @@ $ ./services/lab/run-all.sh
   cone-sym/R1             PASS    default route stays on veth-alpha; 1.1.1.1 does not enter the tunnel
   sym-cone/tunnel         PASS    connected via direct
   sym-cone/R1             PASS    default route stays on veth-alpha; 1.1.1.1 does not enter the tunnel
-  ctrl-down/traffic       PASS    coordinator killed mid-ping; 0% loss (handshake 5s → 25s)
-  relay-down/recovery     PASS    traffic resumed after the relay was killed mid-stream (37% loss over 40s)
-  failover/recovery       PASS    moved from lab-a to lab-b and traffic resumed (49% loss over 40s)
+  ctrl-down/traffic       PASS    coordinator killed mid-ping; 0% loss (handshake 3m20s -> 15s)
+  relay-down/recovery     PASS    traffic resumed after the relay was killed mid-stream (36.5% loss over 40s)
+  failover/recovery       PASS    moved from lab-a to lab-b and traffic resumed (49.5% loss over 40s)
   accounting/load         PASS    pushed 400 packets of 1000B each, all received
-  accounting/agree        PASS    panel billed 1717684 bytes, relay carried 1717704 — within 0% (tolerance 10%)
+  accounting/source       PASS    the billed figure came from the relay (agents separately reported 1717684 bytes)
+  accounting/agree        PASS    panel billed 1717704 bytes, relay carried 1717704 - within 0% (tolerance 10%)
+  acl/baseline            PASS    alpha reaches beta:8080 with no rules in force
+  acl/deny-tcp            PASS    TCP to beta:8080 stopped 4s after the rule was written, service still listening
+  acl/scope               PASS    the deny named tcp/8080 and left ping alone
+  srcport/allowed         PASS    alpha reaches the allowed port tcp/554
+  srcport/bypass          PASS    source port 554 did not open tcp/8080; the rule is about the destination
+  tamper/blocked          PASS    the deny held after alpha rewrote its state and restarted, service still listening
+  enrol/guessing          PASS    4 of 20 bad codes throttled after 16 rejections
+  enrol/blocked-after     PASS    the address stays blocked while the failure window holds
+  enrol/bulk              PASS    50 devices enrolled from one address, none throttled
+  gw/approval             PASS    an unapproved route carries nothing
+  gw/reach                PASS    alpha reached the agentless NVR at 192.168.77.50:554 through beta
+  gw/denied               PASS    tcp/8080 on the NVR is refused; the rule named 554 and meant it
+  gw/no-reverse           PASS    the NVR cannot reach the overlay; forwarding is one-way
+  clash/refused           PASS    the agent refused the colliding route and named the prefix
+  clash/local-lan         PASS    the technician's own LAN route survived the advertisement
+  clash/overlay           PASS    the overlay still carries traffic after the refusal
+  gwtamper/tunnel         PASS    the tampered agent enrolled and handshaked exactly like the real one
+  gwtamper/allowed        PASS    the tampered agent still reaches tcp/554, so the path is working
+  gwtamper/blocked        PASS    tcp/8080 refused at the gateway, with the client's own enforcement removed
   revoke/cutoff           PASS    traffic stopped 4s after revocation
 
-  16 checks, all passed. The networking proof holds for this build.
+  36 checks, all passed. The networking proof holds for this build.
 
 $ echo $?
 0
 ```
 
+That is the 1.6.0 gate, run 2026-09-21, and it is the table the release is
+allowed to ship on. The build before it — 1.5.0 — did **not** ship: `gw/reach`
+failed, and the section on subnet-router mode below says why.
+
 Several results in that table are worth reading twice.
 
-**The controller-down figure is 0% loss, and the handshake simply got older.**
-Not "the ping kept working" — the WireGuard session was never renegotiated at
-all. The drill records the handshake age either side of the kill, and it goes
-from 5s to 25s across a twenty-second window: exactly twenty seconds of ageing
-and no new handshake. That is R6 demonstrated rather than asserted, and the
-handshake age is what makes it a demonstration rather than an assertion.
+**The controller-down figure is 0% loss, and the handshake tells you why.**
+Not "the ping kept working" — the drill records the WireGuard handshake age
+either side of the kill, which is what turns the result from an assertion into
+a demonstration. Two outcomes have both been observed, and both prove R6:
+
+- **Ageing, no renegotiation** (an earlier run: 5s → 25s across a twenty-second
+  window). The session simply continued.
+- **Renegotiation with the controller dead** (the 1.6.0 run above: 3m20s → 15s,
+  so the age went *down*). The two agents rekeyed with each other while the
+  coordinator was not running.
+
+The second is the stronger result. A tunnel that coasts on an existing session
+might still be depending on the control plane for its next handshake; one that
+rekeys without it is not depending on it at all.
 
 **The mixed-NAT cases are not deterministic.** `cone-sym` came up *direct* on
 one run and *relayed* on the next, from identical topology. Whether punching
@@ -1149,6 +1181,148 @@ connection, and refuses a sub-second result outright.
 
 ---
 
+### Phase 4 — subnet-router mode, and the failure that looked like everything else
+
+§16–17, and the case that sells the product: an NVR, a printer or a DVR that
+will never run our agent, reached through one PC at the site that can.
+
+| Check | Result | Evidence |
+|---|---|---|
+| An unapproved route carries nothing | **PASS** | `gw/approval` — the route exists in the panel, the NVR is unreachable |
+| An agentless machine is reachable through the gateway | **PASS** | `gw/reach` — namespace `nvr`, 192.168.77.50, no agent, no overlay address, reached on tcp/554 |
+| The rule names one port and means it | **PASS** | `gw/denied` — tcp/8080 on the same machine refused |
+| Forwarding is one-way | **PASS** | `gw/no-reverse` — the NVR cannot reach into the overlay |
+| A route colliding with the technician's own LAN is refused | **PASS** | `clash/refused`, `clash/local-lan` |
+| Refusing a route does not cost the overlay | **PASS** | `clash/overlay` |
+| The gateway enforces the rule itself | **PASS** | `gwtamper/blocked` — see below |
+| Two customers on identical prefixes stay separate | **PASS** | `GatewayTests.php`, 12 assertions |
+| Windows gateway mode | **NOT RUN** | No Windows hardware. Stage 13 of the test pack covers it |
+
+#### The defect, and why it took so long to see
+
+`gw/reach` failed for two days. Everything you would check was right: the
+tunnel was up, WireGuard was handshaking, the client's routing table sent
+192.168.77.50 down the tunnel and kept its default route on the physical
+interface, and the gateway's iptables rules were exactly as designed —
+`FORWARD` accepting overlay-to-prefix, conntrack allowing the answers back,
+`MASQUERADE` on the way out. The gateway even logged that it had configured
+itself.
+
+The gateway had installed a tunnel route for its own LAN.
+
+The panel sends every gateway's prefixes in the routes list, because every
+device needs to know which prefixes exist and through whom. The agent installed
+all of them without asking whether it was itself the gateway for any. On the
+gateway, `ip route replace 192.168.77.0/24 dev akc0` did two bad things at
+once:
+
+- it **replaced** the interface route the kernel had installed for the LAN the
+  PC was sitting on, so the gateway lost its own site; and
+- it pointed packets the PC was supposed to be forwarding *back down the tunnel
+  they had arrived on*.
+
+So the packet arrived from the support laptop, the kernel looked up
+192.168.77.50, found the tunnel, and the NVR was never reached. Nothing in the
+logs said "routing loop"; it said the tunnel was healthy, which it was.
+
+It was found by leaving the lab standing after the failure — a `KEEP=1` escape
+added to the drill's cleanup for exactly this — and reading `ip route` on the
+gateway. Reading the code had not found it, twice, because each piece of the
+code is correct on its own.
+
+Two regression tests now cover it, and both fail against the pre-fix code:
+
+```
+$ go test ./internal/netcfg/ -run TestBuildSkips     # against the old Build()
+--- FAIL: TestBuildSkipsPrefixesThisDeviceServes
+    policy_test.go:163: plan routes this device's own LAN through the tunnel:
+        [10.99.0.0/24 192.168.77.0/24 192.168.88.0/24]
+--- FAIL: TestBuildSkipsAdvertisedPrefixWithoutVia
+    policy_test.go:194: expected the overlay alone, got [10.99.0.0/24 192.168.77.0/24]
+```
+
+#### The gateway now enforces the rule, not just the device it restricts
+
+The first version compiled routed rules into the client only. That put every
+rule about the NVR on the machine the rule restricts — a customer's laptop, on
+hardware they own, running a binary they can rebuild. It is the same shape of
+hole as matching a source port, reached from a different direction, and it was
+found by asking the question the source-port fix had taught rather than by a
+failing test.
+
+Each peer now carries, in the **gateway's** configuration, what that peer may
+reach inside the LANs the gateway routes for. The gateway reaches its own
+verdict.
+
+Proven with a client built `-tags labtamper`, which has rule enforcement
+compiled out. A build tag rather than a runtime flag, so no binary we ship can
+contain it, and it prints a warning to stderr on startup so a tampered binary
+cannot be mistaken for a real one in a log.
+
+```
+gwtamper/tunnel    PASS  the tampered agent enrolled and handshaked exactly like the real one
+gwtamper/allowed   PASS  the tampered agent still reaches tcp/554, so the path is working
+gwtamper/blocked   PASS  tcp/8080 refused at the gateway, with the client's own enforcement removed
+```
+
+And the logs say which machine made the decision:
+
+```
+$ grep -c "acl: dropped" beta-up.log     # the gateway
+1
+$ grep -c "acl: dropped" alpha-up.log    # the tampered client
+0
+```
+
+One drop, at the gateway. The client refused nothing, because it could not.
+
+#### Forwarding is one-way in the filter, not only in iptables
+
+A machine behind a gateway could not open a connection into the overlay,
+because the Linux conntrack rule stopped it. But the **filter** would have
+allowed it — and the machines behind a gateway are precisely the ones nobody
+could install an agent on, usually because nobody can patch them either. An NVR
+on five-year-old firmware is not a thing to leave with a route into every
+customer a support laptop touches.
+
+Found by a unit test written for the *reply* path, which is the only reason it
+was found at all: the test asserted that an unsolicited connection from the
+same LAN address is not a reply, and it failed.
+
+A packet whose source is inside a prefix this device serves is now refused
+unless it belongs to a flow the overlay started.
+
+#### Overlapping LAN ranges
+
+Every consumer router hands out 192.168.0.0/24 or 192.168.1.0/24, so this is
+the normal state of the product rather than an edge case.
+
+Across tenants it does not arise: a device belongs to one tenant and the routes
+list is tenant-scoped. `GatewayTests.php` proves it rather than asserting it —
+two customers advertise byte-identical 192.168.1.0/24, and neither customer's
+gateway UID or overlay address appears anywhere in the other's configuration.
+
+Within one network, a second gateway for the same prefix is refused, because a
+client has one routing table and cannot hold two routes for one destination.
+
+On one machine, an advertised prefix can collide with a LAN the machine is
+physically on, and there the agent loses the contest deliberately:
+
+```
+route 192.168.77.0/24 not installed: this machine is already on that network.
+Devices in the remote 192.168.77.0/24 are unreachable from here until one side
+is renumbered
+```
+
+Taking that route would cut a technician off from the printer beside them and
+often from their own default gateway. `Remove` now deletes only the routes
+`Apply` installed, so a stopping agent cannot take a site's own LAN route with
+it either.
+
+**This is a limitation, not a fix, and the log line does not make it smaller.**
+
+---
+
 ## What this verification found
 
 The single most important result is not in the table above. It is that **three
@@ -1291,6 +1465,28 @@ These are real and currently shipped.
    uses Server-Sent Events. This was a deliberate choice, stated when it was
    made, not a limitation discovered late.
 
+10. **A machine cannot reach a remote LAN that duplicates its own.** When a
+    support laptop sits on 192.168.1.0/24 and the customer's gateway
+    advertises 192.168.1.0/24, the agent refuses the advertised route and
+    keeps the local one, logging which prefix clashed. One side has to be
+    renumbered. This is the single most likely gateway-mode complaint, because
+    that prefix is the default on most consumer routers.
+
+11. **One agent install belongs to one customer.** `devices.network_id` is a
+    single column, so a support laptop that services twenty customers needs
+    twenty enrolments and one install holds one. Multi-network membership is
+    not implemented, and would still need per-network routing tables before
+    twenty hotels on 192.168.1.0/24 could work. This is the architectural
+    question after subnet-router mode, not a defect in it.
+
+12. **Gateway mode has never run on Windows.** `New-NetNat` plus per-interface
+    forwarding is the only mechanism available on the Windows 10 and 11
+    machines customers have — RRAS is Server-only, ICS cannot target a prefix
+    — and none of it has executed. Stage 13 of the test pack covers it,
+    including the case where Internet Connection Sharing already owns NAT and
+    Windows reports the failure as "The parameter is incorrect". Until those
+    results come back, subnet-router mode is proven on Linux only.
+
 6. **`UNLOCK TABLES` commits.** The restore path issues it only when locks are
    actually held, precisely because issuing it unconditionally would commit a
    caller's open transaction. Callers that restore inside a transaction should
@@ -1376,7 +1572,10 @@ In the order I would do them.
 3. **Run the agent on Windows.** It cross-compiles and has never executed.
    DPAPI, the ACL and the Wintun adapter are all places where code that
    compiles can still be wrong, and `route print` on a real Windows host is
-   one of the acceptance criteria.
+   one of the acceptance criteria. Stage 13 — gateway mode — is the newest and
+   the least certain: `New-NetNat` is the only mechanism that works on the
+   Windows versions customers have, and a PC where Internet Connection Sharing
+   already owns NAT is a case I expect to have to handle in code.
 
 4. **Test against a real CGNAT path** — a 4G connection is the cheapest way.
    The lab's `MASQUERADE` is the easy case; a symmetric carrier NAT defeats
@@ -1392,3 +1591,10 @@ In the order I would do them.
 7. **Run the update pipeline once through the web UI**, not only the CLI. The
    two share `UpdateManager` and the CLI path is thoroughly exercised, but the
    step-per-request path has been reasoned about rather than run.
+
+8. **Decide what multi-network membership looks like.** One support laptop
+   reaching twenty customers is the thing AK Support is for, and it needs two
+   changes that are not small: a device belonging to more than one network,
+   and per-network routing so twenty identical 192.168.1.0/24 ranges do not
+   collide in one table. Worth designing before more is built on the
+   assumption that a device has exactly one network.

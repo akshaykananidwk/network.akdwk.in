@@ -100,7 +100,7 @@ final class AclService
                 // same shape of hole as matching a source port. The gateway is
                 // the one device in the path that the customer being
                 // restricted does not control, so it checks too.
-                'routes'       => self::routeFiltersFor($networkId, $peer, $serves),
+                'routes'       => AclRouteFilters::forEachRoute($networkId, $peer, $serves),
                 'name'         => $peer['name'],
                 'public_key'   => $peer['public_key'],
                 'virtual_ip'   => $peer['virtual_ip'],
@@ -110,27 +110,6 @@ final class AclService
                 'is_gateway'   => (int) $peer['is_gateway'] === 1,
                 'filters'      => $decision['filters'],
                 'last_seen_at' => $peer['last_seen_at'],
-            ];
-        }
-
-        return $out;
-    }
-
-    /**
-     * What one peer may reach inside each prefix this device routes for.
-     *
-     * @param array<string,mixed> $peer
-     * @param list<string> $serves
-     * @return list<array<string,mixed>>
-     */
-    private static function routeFiltersFor(int $networkId, array $peer, array $serves): array
-    {
-        $out = [];
-
-        foreach ($serves as $cidr) {
-            $out[] = [
-                'destination' => $cidr,
-                'filters'     => AclRouteFilters::forRoute($networkId, $peer, $cidr),
             ];
         }
 

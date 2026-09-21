@@ -57,6 +57,34 @@ final class AclRouteFilters
     }
 
     /**
+     * The same question asked of several prefixes at once: what may this
+     * device reach inside each of the LANs a gateway routes for?
+     *
+     * Compiled into the **gateway's** configuration, keyed by the peer whose
+     * traffic it would be forwarding. Without it the gateway forwards on the
+     * strength of the peer link alone, and every rule about a machine behind
+     * it is enforced only by the agent being restricted — which runs on
+     * hardware the customer owns.
+     *
+     * @param array<string,mixed> $peer
+     * @param list<string> $prefixes
+     * @return list<array<string,mixed>>
+     */
+    public static function forEachRoute(int $networkId, array $peer, array $prefixes): array
+    {
+        $out = [];
+
+        foreach ($prefixes as $cidr) {
+            $out[] = [
+                'destination' => $cidr,
+                'filters'     => self::forRoute($networkId, $peer, $cidr),
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
      * Do two ranges share any address?
      *
      * Compared by masking both to the shorter prefix: two ranges overlap

@@ -119,6 +119,42 @@ The source-port bypass is closed here too, and there is a test that says so:
 binding 554 locally must not open port 80 on a machine behind a gateway any
 more than on a peer.
 
+### Both ends, again
+
+The first version compiled routed rules into the **client** only. That put
+every rule about the NVR on the machine the rule restricts — a customer's
+laptop, on hardware they own, running a binary they can rebuild. It is the same
+hole as matching a source port, reached from a different direction.
+
+So the rules are compiled twice. The client's table refuses to send. The
+gateway's table, keyed by the peer the traffic came from, refuses to forward.
+The gateway is the one device in the path the restricted party does not
+control.
+
+Concretely, a gateway's configuration carries a `routes` list inside each
+**peer** entry — what *that peer* may reach inside the LANs this device routes
+for — separate from the top-level `routes` list, which is what this device may
+reach through somebody else's gateway.
+
+The drill for this uses a client built with `-tags labtamper`, which has rule
+enforcement compiled out. It enrols, handshakes and reaches the allowed port
+exactly like the shipping binary; the denied port is still refused, and the
+gateway is what logs the drop. A build tag rather than a flag, so no binary we
+ship can contain it.
+
+### Forwarding is one-way
+
+A machine behind a gateway must not be able to open a connection *into* the
+overlay. The Linux conntrack rule already stopped that, but the filter itself
+would have allowed it, and the machines behind a gateway are precisely the ones
+nobody could install an agent on — usually because nobody can patch them
+either. An NVR on five-year-old firmware is not a thing to leave with a route
+into every customer a support laptop touches.
+
+A packet whose source is inside a prefix this device serves is now refused
+unless it belongs to a flow the overlay started. Replies still pass, because
+the flow table recognises them.
+
 ## Overlapping LAN subnets
 
 Every hotel uses 192.168.1.0/24. This has to not matter, and mostly it does
@@ -130,6 +166,15 @@ not:
   ambiguous — the client has one routing table and cannot have two routes for
   one destination. The panel must refuse the second, with a message that says
   which device already advertises it.
+
+- **On one machine**, an advertised prefix can collide with a LAN the machine
+  is physically on. This is common, not rare. The agent refuses the advertised
+  route, keeps the local one, and logs which prefix clashed: breaking the LAN a
+  technician is sitting on — their printer, their NAS, often their own default
+  gateway — is worse than not reaching the customer. The remote range stays
+  unreachable from that laptop until one side is renumbered. `Remove` deletes
+  only what `Apply` installed, so a stopping agent cannot take a site's own LAN
+  route with it either.
 
 **The case that does not work today, and it is the one AK Support cares
 about:** a single support laptop connected to *many* customers at once. A
@@ -148,3 +193,27 @@ A namespace called `nvr` with **no agent at all**, on the gateway's LAN,
 reachable on tcp/554 through the gateway and refused on tcp/80. If the NVR
 namespace can be reached without running our software on it, the feature is
 real.
+
+Three scenarios in `services/lab/run-all.sh`:
+
+| Scenario | What it proves |
+|---|---|
+| `gateway` | An unapproved route carries nothing; the agentless NVR is reachable on tcp/554 and refused on tcp/8080; the NVR cannot reach back into the overlay |
+| `gateway-clash` | A route colliding with the technician's own LAN is refused, the local route survives, and the overlay keeps working |
+| `gateway-tamper` | With the client's enforcement compiled out, the gateway still refuses the denied port |
+
+Plus `tests/GatewayTests.php`: two customers advertising byte-identical
+192.168.1.0/24, with neither appearing in the other's configuration, and a
+second gateway for the same prefix in one network refused.
+
+### What this cost to find
+
+`gw/reach` failed for two days looking like a networking problem. The tunnel
+was up, WireGuard was handshaking, the iptables rules were exactly right, and
+the routing on the client was correct. The gateway had installed a tunnel route
+for its own LAN, so the kernel sent forwarded packets back down the tunnel they
+came from — and, worse, the `ip route replace` had destroyed the interface
+route the kernel had for the LAN the PC was sitting on.
+
+It was found by leaving the lab standing after a failure (`KEEP=1`) and reading
+`ip route` on the gateway, not by reading the code. The code looked right.

@@ -1,10 +1,10 @@
 {
-  "version": "1.4.0",
-  "released_at": "2026-09-21T16:00:00Z",
+  "version": "1.6.0",
+  "released_at": "2026-09-21T18:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Phase 4: the panel's access rules are now enforced on the device, at both ends of every conversation. A deny blocks a TCP connect within four seconds and survives a device rewriting its own state.",
+  "notes": "Gateway / subnet-router mode: one PC at a site routes for the machines that cannot run an agent — an NVR, a printer, a DVR. Routes are advertised from the panel and carry nothing until an administrator approves them, access rules name the machine by its LAN address, and the gateway enforces them itself rather than trusting the device being restricted. Also the four 1.5.0 fixes, which were never released on their own: the source-port rule bypass, unparseable packets failing closed, enrolment throttling that no longer cuts off a rollout, and relay-reported billing.",
   "migrations": [],
   "protected": [
     ".env",

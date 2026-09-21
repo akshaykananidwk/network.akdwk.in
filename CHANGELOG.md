@@ -6,10 +6,112 @@ Notable changes per release. This project follows
 
 ---
 
-## [1.5.0] — 2026-09-21
+## [1.6.0] — 2026-09-21
+
+Phase 4 continues: gateway / subnet-router mode (§16–17). A hotel's NVR, a
+shop's printer, a clinic's DVR — none of them will ever run our agent. One
+Windows or Linux PC at the site routes for them.
+
+### Added
+
+**Subnet-router mode.** A gateway device advertises a LAN prefix from the
+panel; an administrator approves it; agents in that network then route that
+prefix through the tunnel. Unapproved, it carries nothing — R4's reasoning
+applies to subnets as much as to devices.
+
+On Linux the gateway sets `net.ipv4.ip_forward` and three narrow iptables
+rules per prefix: forward from the overlay to the prefix on the tunnel
+interface, allow the answers back only for conversations that started in the
+overlay, and SNAT so the LAN device — which has no route back to the overlay —
+can reply at all. A FORWARD rule without those matches would make the PC an
+open router for whatever else is on the site's LAN.
+
+On Windows it is `netsh interface ipv4 set interface forwarding=enabled` plus
+`New-NetNat`. RRAS is Server-only and ICS cannot target a prefix, so `New-NetNat`
+is the only option that works on the Windows 10 and 11 machines our customers
+actually have. **This has not run on real Windows hardware yet.** Stage 13 of
+the Windows test pack covers it, including the case where Internet Connection
+Sharing already owns NAT on the machine and `New-NetNat` fails with a message
+that explains nothing.
+
+**Rules about machines behind a gateway** name the LAN address, not the
+device: "AK Support may reach 192.168.1.50 on tcp/554" is about the recorder,
+and the PC routing for it is incidental. The most specific advertised prefix
+covering an address decides, so "the LAN is reachable, except the till" means
+the exception.
+
+**Four drills**, all against a namespace with no agent on it:
+`gateway` (reached on tcp/554, refused on tcp/8080, and the NVR cannot reach
+back into the overlay), `gateway-clash` (below), `gateway-tamper` (below), and
+`GatewayTests.php` for two customers advertising identical prefixes.
+
+### Fixed
+
+**A gateway routed its own LAN down the tunnel, so it forwarded nothing.**
+The panel sends every gateway's prefixes in the routes list and the agent
+installed all of them, its own included. `ip route replace 192.168.77.0/24 dev
+akc0` on the gateway then did two bad things at once: it destroyed the kernel's
+interface route for the LAN the PC was sitting on, and it pointed packets the
+PC was supposed to be forwarding back down the tunnel they had arrived on. The
+tunnel was up, the iptables rules were right, WireGuard was handshaking, and
+the NVR was unreachable — the failure looked like everything except what it
+was. `netcfg.Build` now skips prefixes this device serves, and two tests fail
+against the old code.
+
+**A route that collides with a network the machine is already on is refused,
+not installed.** Overlapping private ranges are the normal state of this
+product, not an edge case: most consumer routers hand out 192.168.1.0/24, so a
+technician will regularly be offered a route to another customer's identical
+range. Replacing the machine's own LAN route would cut it off from the printer
+beside it and often from its own default gateway, so the tunnel loses that
+contest and the agent logs which prefix clashed. `Remove` now deletes only the
+routes `Apply` installed, so a stopping agent cannot take a site's own LAN
+route with it.
+
+**The gateway enforced nothing of its own.** It forwarded on the strength of
+the peer link alone, so a rule about the NVR was enforced only by the agent
+being restricted — which runs on hardware the customer owns. That is the same
+shape of hole as matching a source port, reached from a different direction.
+Each peer now carries, in the gateway's configuration, what it may reach inside
+the LANs that gateway routes for, and the gateway reaches its own verdict.
+
+Proven with a client built `-tags labtamper`, with rule enforcement compiled
+out: it enrolled, handshaked and reached tcp/554 exactly like the real binary,
+and tcp/8080 on the NVR was still refused. The gateway logged the drop; the
+tampered client logged none.
+
+**Forwarding is one-way in the ACL, not only in iptables.** A machine behind a
+gateway could not open a connection into the overlay because a conntrack rule
+stopped it — but the filter itself would have allowed it, and the machines
+behind a gateway are the ones nobody could put an agent on, usually because
+nobody can patch them either. A packet whose source is inside a served prefix
+is now refused unless it belongs to a flow the overlay started. Caught by a
+test written for the reply path, which is the only reason it was found.
+
+### Known limitations
+
+**Two identical LAN prefixes cannot both be reached from one machine.** When a
+technician's own LAN is 192.168.1.0/24 and the customer's is too, the remote
+one is unreachable from that laptop until one side is renumbered. The agent
+says so in its log and leaves the local LAN alone. This is not fixed and the
+log line is not a fix.
+
+**Windows gateway mode is untested on real hardware.** Stage 13 of the test
+pack exists for it. Until that comes back, gateway mode is proven on Linux
+only.
+
+---
+
+## [1.5.0] — 2026-09-21 — **never released**
 
 Four fixes to things that were wrong rather than merely incomplete. The first
 was a bypass I had written up as a design trade-off.
+
+These were finished, but `services/lab/run-all.sh` was not clean when they
+were: `gw/reach` was failing while subnet-router mode was being built, and no
+release ships on a red table. They went out in 1.6.0 instead. The entry is
+kept because the work and the reasoning are worth reading in their own right,
+not because a 1.6.0 upgrade skips anything.
 
 ### Fixed
 

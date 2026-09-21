@@ -57,11 +57,12 @@ now checks for it and says where to get it.
 | **P1 Foundation** | Installer, framework, auth, multi-tenancy, CRUD, audit, **auto-update**, backups | **Complete and verified** |
 | P2 Networking | Go agent, enrolment-to-tunnel, IPAM wiring, WireGuard, split tunnel, coordinator, NAT traversal | **Working in a Linux lab**; Windows compiles but is untested, real ISPs untested |
 | P3 Relay | Relay service, fallback and silent upgrade to direct, RTT-based selection, failover, usage accounting | **Working in the lab**, selection on measured RTT, failover drilled; accounting verified against the relay's own count |
-| P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | **ACL enforced on the device, both ends, drilled**; routes, DNS, subnet router and site-to-site not started |
+| P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | **ACL enforced on the device, both ends, drilled. Subnet-router mode working and drilled on Linux, including against a client with its enforcement compiled out**; Windows gateway untested on hardware; DNS and site-to-site not started |
 | P5 Commercial | Plans, limits, billing, invoices, API keys, OpenAPI, white-label | Mostly done (see below) |
 | P6 Enterprise | HA, multi-region relays, SSO/SAML, staged agent rollout | Not started |
 
-**471 assertions pass** (`php tests/run.php --url=…`), and
+**494 assertions pass** (`php tests/run.php --url=…`; 376 without an HTTP
+server), and
 **`services/lab/run-all.sh` is the networking gate** — it builds the
 namespaces, runs every scenario, prints one table and exits non-zero on any
 failure. No release ships without a clean table.
@@ -179,6 +180,33 @@ traceroute does not pass through our infrastructure.
 
 ---
 
+## Phase 4 — ACL and subnet router done; DNS and site-to-site not started
+
+| | |
+|---|---|
+| ACL enforcement on the agent | Done, both ends of every conversation, stateful |
+| Advertised routes | Done — advertised from the panel, approved by an administrator, carried by agents |
+| Subnet-router mode, Linux | Done and drilled: an agentless NVR reached through a site PC on one port |
+| Subnet-router mode, Windows | **Code written, never run on Windows.** `New-NetNat` + per-interface forwarding. Stage 13 of the test pack covers it |
+| ACLs on routed traffic | Done, per destination LAN IP and port, enforced on the client **and** on the gateway |
+| Overlapping LAN subnets | Handled across tenants and within a network. On one machine, a collision with the technician's own LAN is refused and logged — see the limitation below |
+| Split DNS | **Not started** |
+| Site-to-site | **Not started** |
+
+### The limitation to say out loud
+
+A support laptop whose own LAN is 192.168.1.0/24 cannot reach a customer's
+192.168.1.0/24. The agent refuses the advertised route rather than taking over
+the LAN the machine is sitting on, and logs which prefix clashed. One side has
+to be renumbered. This is not solved.
+
+Related and larger: a device belongs to exactly one network
+(`devices.network_id` is a single column), so one support laptop cannot be a
+member of twenty customers' networks at once. That is the architectural
+question after this feature, not a bug in it.
+
+---
+
 ## Phase 5 — mostly done
 
 | | |
@@ -219,15 +247,18 @@ Listed so nobody discovers them the hard way.
    item that decides whether the product can be sold at all.
 2. **Two sites on real ISPs, one on 4G.** Everything in §D and §H is one
    machine's network namespaces. It is real networking and it is not two ISPs.
-3. **Enrolment throttling.** 60 requests an hour per IP will cut off a
-   forty-machine rollout from one office partway through. BACKLOG.md B3 has the
-   shape of the fix: strict on failed enrolments, generous on successful ones.
-4. **Relay-reported billing.** The figure the panel meters agrees with the
-   relay's own count to 20 bytes on 1.7 MB, so the arithmetic is right — but it
-   still comes from the agents, and a modified agent can under-report.
-5. **The rest of Phase 4** — routes, DNS, subnet router, site-to-site.
+3. **Windows gateway mode, on real hardware.** Stage 13 of the test pack.
+   `New-NetNat` is the only mechanism that works on the Windows 10 and 11
+   machines customers have — RRAS is Server-only and ICS cannot target a
+   prefix — and it has never run. The case I expect to hurt is a PC where
+   Internet Connection Sharing already owns NAT, where Windows reports the
+   failure as "The parameter is incorrect".
+4. **Multi-network membership.** One support laptop, many customers. Blocked
+   on `devices.network_id` being a single column, and on the fact that twenty
+   customers all using 192.168.1.0/24 would collide in one routing table even
+   if it were not.
+5. **Split DNS and site-to-site** — the rest of Phase 4.
 6. Then Phase 6.
 
-The order is deliberate: item 1 decides whether any of the rest matters
-commercially, and item 3 is the one that will embarrass us in front of a
-customer first.
+The order is deliberate: items 1 and 3 decide whether any of the rest matters
+commercially.
