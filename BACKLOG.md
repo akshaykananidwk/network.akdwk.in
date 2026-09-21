@@ -79,16 +79,21 @@ failures and the update/rollback drills still passing.
 
 ---
 
-## Rules for this file
+---
 
-An entry belongs here only if it is **measured**, **not a correctness bug**, and
-**not blocking**. Anything that fails, corrupts, or misreports gets fixed when
-it is found — that is what the eight defects in `VERIFICATION_REPORT.md` were,
-and none of them was ever a candidate for this list.
-
-## B3 — Enrolment throttling blocks a bulk rollout
+## B3 — Enrolment throttling blocks a bulk rollout — **DONE in 1.6.0**
 
 **Found:** 21 September 2026, by the lab gate running out of enrolments.
+**Fixed:** 21 September 2026. Pulled forward out of the backlog as a launch
+blocker. Failures are limited strictly (15 per 15 minutes per address, recorded
+after the attempt); volume is limited generously (1,200 an hour, a flood
+ceiling rather than an abuse control); join codes carry their own use limit.
+
+Drilled in `enrol-throttle`: 50 devices from one address all enrol, and 20 bad
+join codes from that same address get throttled. Both in the same run, so
+neither result can be an artefact of the other.
+
+The original entry follows, because the reasoning is what made the fix right.
 
 Enrolment and claim share a limit of 60 requests per hour per IP address
 (`security.enroll_rate_per_hour`). A customer installing the agent on forty
@@ -104,6 +109,8 @@ generous on successes.
 
 **Cost of leaving it:** the first multi-seat installation fails partway, in
 front of the customer, with a message that sounds like our fault because it is.
+
+---
 
 ## B4 — Relay recovery takes 15–20 seconds
 
@@ -139,3 +146,60 @@ for a shop's CCTV, visibly worse than what Tailscale and ZeroTier manage, and
 the kind of thing a customer notices once and remembers.
 
 Deferred deliberately, 21 September 2026.
+
+---
+
+## B5 — One agent install belongs to exactly one customer
+
+**Found:** 21 September 2026, while building subnet-router mode.
+**Severity:** architectural. Nothing is broken; a thing AK Support needs does
+not exist.
+
+`devices.network_id` is a single column, so a support laptop that services
+twenty customers needs twenty enrolments, and one agent install holds one. The
+overlay works perfectly for each customer in turn and cannot hold two at once.
+
+Two changes, and the second is the harder one:
+
+1. **Membership.** A device belongs to many networks: a join table, a peer set
+   per network, and an identity per network or one shared across them — that
+   choice has consequences for revocation, because revoking a laptop from one
+   customer must not touch the others.
+2. **Routing.** Twenty hotels all on 192.168.1.0/24 collide in one routing
+   table however good the membership model is. Reaching two of them at once
+   needs per-network routing — policy routing with a table per network on
+   Linux, and on Windows a mechanism that does not obviously exist. It may be
+   that the honest answer is "one customer connected at a time, switched from
+   the tray", which is a product decision rather than an engineering one.
+
+**Cost of leaving it:** a technician disconnects from one customer to reach
+another. Annoying, not blocking, and every competitor has the same problem with
+duplicate private ranges.
+
+## B6 — A zero-file update does not exercise the paths that broke before
+
+**Found:** 21 September 2026, dogfooding 1.6.0.
+
+The release is built on the machine it is installed on, so APPLY had no files
+to write and the file-writing and file-removing paths were skipped. Those are
+the paths the 1.3.x P1 lived in — FINALISE pruning its own rollback journal,
+leaving new files on an old schema and reporting success.
+
+**What done looks like:** a second installation, checked out at the previous
+release with a database of its own, updated forward to the release being
+shipped, and then rolled back — with a checksum manifest either side proving
+the files genuinely changed and genuinely came back. Attempted for 1.6.0 and
+not completed: the drill needs a scratch database, which this environment does
+not let a script create.
+
+**Cost of leaving it:** a regression in APPLY or in the rollback journal would
+not be caught by the release gate, only by a customer.
+
+---
+
+## Rules for this file
+
+An entry belongs here only if it is **measured**, **not a correctness bug**, and
+**not blocking**. Anything that fails, corrupts, or misreports gets fixed when
+it is found — that is what the eight defects in `VERIFICATION_REPORT.md` were,
+and none of them was ever a candidate for this list.

@@ -1323,6 +1323,57 @@ it either.
 
 ---
 
+### The 1.6.0 dogfood, and what it did not exercise
+
+Every release goes out through our own updater. 1.6.0 did:
+
+```
+  ✓ PRECHECK       Pre-flight passed. 27.2 GB free, PHP 8.4.19, 10.11.14-MariaDB.
+  ✓ MAINTENANCE    Maintenance mode on. Visitors see a 503 with a retry hint.
+  ✓ BACKUP_FILES   Backup #25 written (45.7 MB).
+  ✓ BACKUP_DB      Backup verified — both artefacts were read back, not just checksummed.
+  ✓ DOWNLOAD       Archive downloaded: 6.3 MB.
+  ✓ STAGE          Staged and verified: 340 files, 192 PHP files parse cleanly.
+  ✓ MIGRATE        No pending migrations.
+  ✓ APPLY          Applied: 0 file(s) written (0 new), 0 removed, 8 protected path(s) left untouched.
+  ✓ POST           Post-update complete: 1 script(s) ran, caches cleared.
+  ✓ HEALTH         Health check passed (10 checks).
+  ✓ FINALISE       Update complete. Now running 1.6.0.
+```
+
+Then the rollback drill, on that same run:
+
+```
+$ php cli/update.php --rollback=1 --yes
+  ✓ Files: 0 restored, 0 removed.
+  ✓ Database restore not needed — no migrations ran.
+  ✓ Rollback complete. The previous version is live again.
+
+$ php cli/update.php --status
+No update running. Last: #1 1.6.0 → 1.6.0 (rolled_back)
+```
+
+160 PHP files checksummed before and after: **byte-identical**, and the run is
+correctly recorded as `rolled_back` rather than `success`.
+
+**What this run did not prove.** APPLY wrote **zero files**, because the
+installed tree was already identical to the target commit — this machine is
+where the release was built. So the eleven steps, the backup, the verification
+and the rollback bookkeeping were all exercised; the file-writing and
+file-removing paths were not, on this release.
+
+That is not a small caveat. The 1.3.x P1 — FINALISE pruning its own rollback
+journal, leaving 1.3.0 files on a 1.2.1 schema and reporting success — lived in
+exactly the paths a zero-file apply skips. Those paths were exercised on 1.3.3
+and have not regressed in any test, but "not regressed in a test" is weaker
+than "ran".
+
+The drill for it is a second installation checked out at the previous release
+and updated forward, which needs a database of its own. It is not done, and it
+belongs in the next release's checks rather than in a claim about this one.
+
+---
+
 ## What this verification found
 
 The single most important result is not in the table above. It is that **three
