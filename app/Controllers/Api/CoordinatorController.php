@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Controllers\Api;
 
 use App\Core\Logger;
+use App\Models\UsageCounter;
 use App\Core\Request;
 use App\Core\Response;
 use App\Middleware\TenantScope;
@@ -95,6 +96,93 @@ final class CoordinatorController
             'peers'      => $peers,
         ]);
     }
+
+    /**
+     * Record what a relay carried, per tenant.
+     *
+     * This is the source of record for relayed-byte billing. It arrives from
+     * the coordinator, which authenticates with the shared secret, and carries
+     * figures the relay measured on our own hardware.
+     *
+     * The agents report the same traffic from their side under a separate
+     * metric. The two are compared here rather than silently reconciled: a
+     * disagreement beyond the tolerance means either a modified agent or a
+     * fault in our own accounting, and both are worth an operator's attention.
+     */
+    public function reportRelayUsage(Request $request): Response
+    {
+        $input = $request->all();
+        $relay = (string) ($input['relay'] ?? '');
+        $tenants = $input['tenants'] ?? [];
+
+        if ($relay === '' || !is_array($tenants)) {
+            return Response::apiError('relay and tenants are required.', 400);
+        }
+
+        $recorded = 0;
+        foreach ($tenants as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+
+            $tenantId = (int) ($entry['tenant_id'] ?? 0);
+            $bytes = (int) ($entry['bytes'] ?? 0);
+            if ($tenantId <= 0 || $bytes <= 0) {
+                continue;
+            }
+
+            UsageCounter::increment($tenantId, UsageCounter::METRIC_RELAY_BYTES, $bytes);
+            $recorded++;
+
+            self::flagUsageDisagreement($tenantId, $relay);
+        }
+
+        Logger::info('billing', 'Relay usage recorded', ['relay' => $relay, 'tenants' => $recorded]);
+
+        return Response::api(['ok' => true, 'tenants' => $recorded]);
+    }
+
+    /**
+     * Compare the billed figure against the agents' own view of it.
+     *
+     * The tolerance is the one the lab measured the two counts agreeing
+     * within, rounded up to a round number. Below it the difference is
+     * sampling; above it something is wrong and saying so is more use than
+     * picking a winner.
+     */
+    private static function flagUsageDisagreement(int $tenantId, string $relay): void
+    {
+        $billed = UsageCounter::valueFor($tenantId, UsageCounter::METRIC_RELAY_BYTES);
+        $reported = UsageCounter::valueFor($tenantId, UsageCounter::METRIC_RELAY_BYTES_AGENT);
+
+        // Nothing to compare until both sides have said something. Early in a
+        // period one of them is always ahead.
+        if ($billed < self::USAGE_COMPARE_FLOOR || $reported < self::USAGE_COMPARE_FLOOR) {
+            return;
+        }
+
+        $spread = (int) round(abs($billed - $reported) * 100 / max($billed, 1));
+        if ($spread <= self::USAGE_TOLERANCE_PERCENT) {
+            return;
+        }
+
+        Logger::warning('billing', 'Relay and agent byte counts disagree', [
+            'tenant_id'     => $tenantId,
+            'relay'         => $relay,
+            'billed_bytes'  => $billed,
+            'agent_bytes'   => $reported,
+            'spread_percent' => $spread,
+            'note'          => $reported < $billed
+                ? 'agents are reporting less than the relay carried'
+                : 'agents are reporting more than the relay carried',
+        ]);
+    }
+
+    /** Below this many bytes the comparison is noise, not evidence. */
+    private const USAGE_COMPARE_FLOOR = 1048576;
+
+    /** Measured agreement in the lab was 0%; this is the alarm threshold. */
+    private const USAGE_TOLERANCE_PERCENT = 10;
 
     private function deny(string $deviceUid, string $why): Response
     {

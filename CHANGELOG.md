@@ -6,6 +6,74 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.5.0] — 2026-09-21
+
+Four fixes to things that were wrong rather than merely incomplete. The first
+was a bypass I had written up as a design trade-off.
+
+### Fixed
+
+**A rule naming a service port could be bypassed by binding that port as a
+source.** "AK Support may reach the NVR on tcp/554" matched any packet whose
+source *or* destination port was 554, so a device need only bind 554 locally to
+reach every port on the NVR. The rule then permitted precisely what it was
+written to forbid.
+
+I had documented this as a stateless trade-off. It is not a trade-off; it is a
+hole, and writing it down did not make it smaller.
+
+Rules now match the **destination port only**, and replies are recognised by
+the flow they belong to: `services/agent/internal/acl/conntrack.go` keeps a
+bounded, LRU-evicted table keyed on the 5-tuple, with TCP flags retiring a
+conversation on FIN or RST and idle timeouts for UDP and ICMP. ICMP echoes are
+matched on their identifier, so a ping reply belongs to the ping that asked for
+it. Flows survive a configuration change, because an operator editing one rule
+should not drop every open connection on every device.
+
+**10,000 flows cost 2.8 MB — 286 bytes each**, measured in
+`TestMemoryAtTenThousandFlows`, which fails if a future change makes a flow
+substantially more expensive.
+
+**An unreadable packet could walk past a port rule.** An IPv6 packet wearing a
+hop-by-hop or routing header was treated as having no ports, so no port rule
+matched it and a deny-only rule set would forward it. Extension headers are not
+walked, so such a packet is now refused outright — fail closed, never open. A
+truncated TCP header is likewise malformed rather than port-less.
+
+**Enrolment throttling counted a rollout the same way it counts an attack.**
+Sixty requests an hour per IP cut off a forty-machine installation from one
+office partway through, in front of the customer. What is worth limiting
+tightly is a *failed* enrolment — a join code that does not exist, has expired
+or is used up, which is the only shape enumeration takes. Successful enrolments
+required a code an administrator issued, and every code carries its own use
+limit.
+
+So: failures are limited strictly (15 per 15 minutes per address, recorded by
+the controller after the attempt), volume generously (1,200 an hour, a flood
+ceiling rather than an abuse control), and a claim for a public key nobody
+enrolled counts as a failure because it is a probe rather than a poll.
+
+**Join code redemption was not atomic.** It selected the row, checked the use
+count and then incremented, so two devices enrolling in the same moment could
+both take the last use. Academic when devices trickled in; not when fifty
+machines in one office enrol together. The claim is now a single conditional
+UPDATE and the row is read only if it succeeded.
+
+**Relayed-byte billing came from the party being billed.** The panel metered
+`rx_delta` + `tx_delta` out of each agent's heartbeat — so a customer running a
+modified agent could lower their own invoice. It is the one number in the
+system where the party paying was also the party measuring.
+
+The relay now reports what it carried, over an authenticated UDP message to
+the coordinator, which already holds a panel credential so no relay needs one.
+Totals are cumulative, so a lost report costs nothing; the coordinator takes
+the difference and treats a decrease as a relay restart. The agents' figure is
+kept under its own metric for display and as a cross-check, and a disagreement
+beyond 10% — the lab measured the two agreeing to 20 bytes in 1.7 MB — is
+logged with which side is reporting less.
+
+---
+
 ## [1.4.0] — 2026-09-21
 
 Phase 4. The panel has been able to author access rules since Phase 1 and

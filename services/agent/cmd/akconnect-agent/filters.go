@@ -22,6 +22,19 @@ func buildFilterTable(cfg *panel.Config) *acl.Table {
 		table.Add(peer.VirtualIP, convertFilters(peer.Filters))
 	}
 
+	// Prefixes reachable through a gateway. The machines inside them have no
+	// overlay address and are not peers, so without this the filter refuses
+	// them as unknown — the right answer to the wrong question.
+	for _, route := range cfg.Routes {
+		if route.Via == "" {
+			// A route with no gateway is one nothing can deliver, and
+			// accepting traffic for it would be accepting traffic that goes
+			// nowhere.
+			continue
+		}
+		table.AddRoute(route.Destination, route.Via, convertFilters(route.Filters))
+	}
+
 	return table
 }
 

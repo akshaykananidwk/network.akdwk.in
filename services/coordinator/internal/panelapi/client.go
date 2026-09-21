@@ -98,6 +98,29 @@ func (c *Client) ReportEndpoints(ctx context.Context, reports []EndpointReport) 
 // The signature covers the timestamp and the body together, so neither can be
 // changed without invalidating it, and a captured request is useless once the
 // panel's clock has moved past its window.
+// ReportRelayUsage sends per-tenant relayed byte deltas to the panel.
+//
+// This is the billing figure, and it comes from our own hardware. The agents'
+// heartbeats still carry their own view of the same traffic; the panel keeps
+// both and flags a disagreement, because two numbers that should match and do
+// not is information, and quietly preferring one of them is not.
+func (c *Client) ReportRelayUsage(ctx context.Context, relay string, deltas map[uint64]uint64) error {
+	tenants := make([]relayUsageTenant, 0, len(deltas))
+	for tenant, bytes := range deltas {
+		tenants = append(tenants, relayUsageTenant{TenantID: tenant, Bytes: bytes})
+	}
+
+	return c.post(ctx, "/api/v1/coordinator/relay-usage", map[string]any{
+		"relay":   relay,
+		"tenants": tenants,
+	}, nil)
+}
+
+type relayUsageTenant struct {
+	TenantID uint64 `json:"tenant_id"`
+	Bytes    uint64 `json:"bytes"`
+}
+
 func (c *Client) post(ctx context.Context, path string, body any, out any) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {

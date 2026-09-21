@@ -263,10 +263,17 @@ lab::relay_reported_bytes() {
     printf '%s\n' "$total"
 }
 
-# panel_relay_bytes is the metered figure — the one that becomes an invoice.
+# panel_relay_bytes is the billed figure — reported by the relay itself.
 lab::panel_relay_bytes() {
     php "$LAB_DIR/lab-setup.php" usage "$1" 2>/dev/null \
         | awk -F= '/^RELAY_BYTES=/ {print $2}'
+}
+
+# panel_agent_bytes is the same traffic as the agents reported it, kept as a
+# cross-check. A customer can influence this one and not the one above.
+lab::panel_agent_bytes() {
+    php "$LAB_DIR/lab-setup.php" usage "$1" 2>/dev/null \
+        | awk -F= '/^AGENT_BYTES=/ {print $2}'
 }
 
 # push_bytes sends a known, countable load through the tunnel.
@@ -337,4 +344,28 @@ lab::stop_servers() {
         kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
     done
     SERVER_PIDS=()
+}
+
+# tcp_connect_from binds a specific source port before connecting.
+#
+# This is the bypass check. A rule naming a service port must be about the port
+# being connected *to*; if it also matches the source, a device binds the
+# service port locally and reaches everything on the target.
+lab::tcp_connect_from() {
+    local ns=$1 target=$2 port=$3 source_port=$4 timeout=${5:-4}
+    ip netns exec "$ns" timeout "$timeout" nc -p "$source_port" -w 2 -z "$target" "$port" >/dev/null 2>&1
+}
+
+# wait_reachable blocks until a TCP connect succeeds, or the timeout expires.
+#
+# Used where a route has just been approved: the agent learns about it on its
+# next configuration poll, so the first attempt is expected to fail.
+lab::wait_reachable() {
+    local ns=$1 target=$2 port=$3 timeout=${4:-45} deadline
+    deadline=$(( $(date +%s) + timeout ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        lab::tcp_connect "$ns" "$target" "$port" 2 && return 0
+        sleep 2
+    done
+    return 1
 }

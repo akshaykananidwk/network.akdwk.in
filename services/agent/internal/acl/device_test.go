@@ -104,9 +104,22 @@ func TestInboundPacketsAreFilteredAsWell(t *testing.T) {
 	inner := &fakeTun{}
 	d := restrictedDevice(inner)
 
+	// Open a conversation the rules permit, so there is a real flow for the
+	// reply to belong to. Without this the reply would be an unsolicited
+	// packet from port 554, which is exactly what must not be let through.
+	outbound := &fakeTun{outgoing: [][]byte{
+		ipv4Flags(ipProtoTCP, self, nvr, 40001, 554, tcpSYN),
+	}}
+	d.Device = outbound
+	bufs := [][]byte{make([]byte, 128)}
+	if n, _ := d.Read(bufs, make([]int, 1), 0); n != 1 {
+		t.Fatal("precondition: the allowed request was blocked")
+	}
+	d.Device = inner
+
 	_, err := d.Write([][]byte{
 		ipv4(ipProtoTCP, nvr, self, 40000, 445), // peer probing a port it may not
-		ipv4(ipProtoTCP, nvr, self, 554, 40001), // the allowed service replying
+		ipv4(ipProtoTCP, nvr, self, 554, 40001), // the reply to the request above
 	}, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +162,7 @@ func TestReplacingTheTableTakesEffectImmediately(t *testing.T) {
 	inner := &fakeTun{}
 	d := restrictedDevice(inner)
 
-	blocked := ipv4(ipProtoTCP, nvr, self, 3389, 40000)
+	blocked := ipv4Flags(ipProtoTCP, nvr, self, 40000, 3389, tcpSYN)
 	if _, _ = d.Write([][]byte{blocked}, 0); len(inner.written) != 0 {
 		t.Fatal("precondition: that port should start blocked")
 	}

@@ -44,6 +44,7 @@ type Server struct {
 	conn      *net.UDPConn
 	reg       *registry.Registry
 	health    *relayHealth
+	usage     *usageLedger
 
 	mu      sync.Mutex
 	pending map[string]panelapi.EndpointReport
@@ -71,6 +72,7 @@ func New(opts Options) (*Server, error) {
 		publicKey: pub,
 		reg:       registry.New(opts.PresenceTTL),
 		health:    newRelayHealth(),
+		usage:     newUsageLedger(),
 		pending:   make(map[string]panelapi.EndpointReport),
 	}, nil
 }

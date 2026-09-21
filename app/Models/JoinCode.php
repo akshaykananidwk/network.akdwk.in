@@ -58,23 +58,30 @@ final class JoinCode extends Model
     public static function redeem(string $code): ?array
     {
         return TenantScope::acrossAllTenants('enrolment code redemption', static function () use ($code): ?array {
-            $row = DB::selectOne(
-                'SELECT * FROM ' . self::tableName() . '
+            $normalised = strtoupper(trim($code));
+
+            // Claim the use first, in one statement, and read the row only if
+            // the claim succeeded. Selecting and then incrementing left a
+            // window where two devices enrolling at the same moment both saw
+            // the same remaining use and both took it — which was academic
+            // when devices trickled in one at a time, and is not when fifty
+            // machines in one office enrol together.
+            $claimed = DB::execute(
+                'UPDATE ' . self::tableName() . '
+                 SET uses = uses + 1, updated_at = UTC_TIMESTAMP()
                  WHERE code = :c AND revoked_at IS NULL AND expires_at > UTC_TIMESTAMP()
-                   AND (max_uses = 0 OR uses < max_uses)
-                 LIMIT 1',
-                ['c' => strtoupper(trim($code))]
+                   AND (max_uses = 0 OR uses < max_uses)',
+                ['c' => $normalised]
             );
-            if ($row === null) {
+
+            if ($claimed === 0) {
                 return null;
             }
 
-            DB::execute(
-                'UPDATE ' . self::tableName() . ' SET uses = uses + 1, updated_at = UTC_TIMESTAMP() WHERE id = :id',
-                ['id' => $row['id']]
+            return DB::selectOne(
+                'SELECT * FROM ' . self::tableName() . ' WHERE code = :c LIMIT 1',
+                ['c' => $normalised]
             );
-
-            return $row;
         });
     }
 

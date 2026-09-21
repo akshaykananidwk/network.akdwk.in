@@ -7,6 +7,7 @@ namespace App\Controllers\Api;
 use App\Core\Config;
 use App\Core\Crypto;
 use App\Core\Logger;
+use App\Middleware\RateLimitMiddleware;
 use App\Core\Request;
 use App\Core\Response;
 use App\Models\AgentRelease;
@@ -32,16 +33,26 @@ final class AgentController
     {
         $input = $request->all();
 
-        $result = DeviceService::enroll([
-            'join_code'      => $input['join_code'] ?? '',
-            'public_key'     => $input['public_key'] ?? '',
-            'hostname'       => $input['hostname'] ?? null,
-            'os'             => $input['os'] ?? null,
-            'os_version'     => $input['os_version'] ?? null,
-            'arch'           => $input['arch'] ?? null,
-            'agent_version'  => $input['agent_version'] ?? null,
-            'hw_fingerprint' => $input['hw_fingerprint'] ?? null,
-        ]);
+        // A failed enrolment is the thing worth throttling: it means a join
+        // code that does not exist, has expired or is used up, which is the
+        // only shape enumeration can take. A successful one required a code an
+        // administrator issued, and the code carries its own use limit.
+        try {
+            $result = DeviceService::enroll([
+                'join_code'      => $input['join_code'] ?? '',
+                'public_key'     => $input['public_key'] ?? '',
+                'hostname'       => $input['hostname'] ?? null,
+                'os'             => $input['os'] ?? null,
+                'os_version'     => $input['os_version'] ?? null,
+                'arch'           => $input['arch'] ?? null,
+                'agent_version'  => $input['agent_version'] ?? null,
+                'hw_fingerprint' => $input['hw_fingerprint'] ?? null,
+            ]);
+        } catch (\Throwable $e) {
+            RateLimitMiddleware::recordEnrolmentFailure($request->ip());
+
+            throw $e;
+        }
 
         Logger::info('agent', 'Device enrolled', [
             'device_uid' => $result['device_uid'],
@@ -74,6 +85,9 @@ final class AgentController
         $device = Device::findByPublicKey($publicKey);
 
         if ($device === null || (string) $device['device_uid'] !== $deviceUid) {
+            // A claim for a key nobody enrolled is a probe, not a poll.
+            RateLimitMiddleware::recordEnrolmentFailure($request->ip());
+
             return Response::apiError('No matching enrolment.', 404, 'not_enrolled');
         }
 
@@ -180,8 +194,13 @@ final class AgentController
 
         // Only relayed traffic is metered: direct peer-to-peer bytes never
         // touch our infrastructure, so billing for them would be dishonest.
+        //
+        // The agent's figure is recorded under its own metric and is *not*
+        // what a customer is billed on — the relay reports that, because the
+        // agent runs on hardware the customer owns and the one number they
+        // must not be able to influence is their own invoice.
         if ($connectionType === 'relay' && ($rxDelta + $txDelta) > 0) {
-            UsageCounter::increment((int) $device['tenant_id'], UsageCounter::METRIC_RELAY_BYTES, $rxDelta + $txDelta);
+            UsageCounter::increment((int) $device['tenant_id'], UsageCounter::METRIC_RELAY_BYTES_AGENT, $rxDelta + $txDelta);
         } elseif ($connectionType === 'direct' && ($rxDelta + $txDelta) > 0) {
             UsageCounter::increment((int) $device['tenant_id'], UsageCounter::METRIC_DIRECT_BYTES, $rxDelta + $txDelta);
         }

@@ -422,7 +422,11 @@ final class Installer
                 'require_2fa_super'     => true,
                 'api_rate_per_minute'   => 120,
                 'login_rate_per_15min'  => 20,
-                'enroll_rate_per_hour'  => 60,
+                // Volume ceiling, not the abuse control: forty machines in
+                // one office share one address and every request is real. What
+                // is limited tightly is a *failed* enrolment, below.
+                'enroll_requests_per_hour'    => 1200,
+                'enroll_failures_per_15min'   => 15,
                 'hsts_max_age'          => 31536000,
                 'controller_public_key' => $answers['controller_public_key'] ?? '',
                 'update_public_key'     => '',

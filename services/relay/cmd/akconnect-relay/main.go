@@ -83,6 +83,7 @@ The relay cannot read the traffic it carries.
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	control := fs.String("control", ":9000", "UDP control address")
+	coordinator := fs.String("coordinator", "", "coordinator address for usage reports, e.g. 10.0.0.1:8443")
 	listenIP := fs.String("listen", "", "address for data sockets")
 	idle := fs.Duration("idle", 5*time.Minute, "idle session timeout")
 	name := fs.String("name", "relay", "this relay's name")
@@ -100,6 +101,20 @@ func runServe(args []string) error {
 	logger := log.New(os.Stdout, "["+*name+"] ", log.LstdFlags)
 	logf := func(format string, a ...any) { logger.Printf(format, a...) }
 
+	// Usage reporting is optional so a relay can be run standalone for
+	// testing, but a relay carrying customer traffic without it is a relay
+	// whose bandwidth nobody is billed for.
+	var reporter *forwarder.UsageReporter
+	if *coordinator != "" {
+		created, err := forwarder.NewUsageReporter(*coordinator, *name, []byte(secret), logf)
+		if err != nil {
+			return fmt.Errorf("usage reporting to %s: %w", *coordinator, err)
+		}
+		reporter = created
+	} else {
+		logf("warning: no --coordinator given, so this relay's traffic will not be billed")
+	}
+
 	relay, err := forwarder.New(forwarder.Options{
 		Control:     *control,
 		ListenIP:    *listenIP,
@@ -107,12 +122,14 @@ func runServe(args []string) error {
 		IdleTimeout: *idle,
 		Logf:        logf,
 		OnUsage: func(usage map[uint64]forwarder.Usage) {
-			// Reporting to the panel is the next piece of work; logging it
-			// means the numbers are observable in the meantime rather than
-			// silently accumulating.
+			// Logged as well as reported: the log is what an operator reads
+			// when a customer disputes an invoice, and it is the only copy
+			// that survives the coordinator being unreachable.
 			for tenant, u := range usage {
 				logf("usage tenant=%d sessions=%d bytes=%d", tenant, u.Sessions, u.Bytes)
 			}
+
+			reporter.Report(usage)
 		},
 	})
 	if err != nil {

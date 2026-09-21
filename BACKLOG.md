@@ -104,3 +104,38 @@ generous on successes.
 
 **Cost of leaving it:** the first multi-seat installation fails partway, in
 front of the customer, with a message that sounds like our fault because it is.
+
+## B4 — Relay recovery takes 15–20 seconds
+
+**Measured**, repeatedly, in `services/lab/run-all.sh`:
+
+| Event | Loss over a 40-second window | Outage |
+|---|---|---|
+| Relay killed and restarted, 20-second rebind | 37% | ~15s |
+| Relay killed and restarted, 5-second rebind | 36.5%, 37% | ~15s |
+| Relay killed for good, traffic moves to another | 49%, 49.5%, 50% | ~20s |
+
+Shortening the rebind interval from twenty seconds to five did **not** make a
+restart cheaper — the two figures are the same — so something else dominates
+that recovery, most likely the WireGuard handshake backoff already in progress
+by the time the relay returns. The shorter interval earns its place by making
+*failover* possible in about fifteen seconds instead of a minute.
+
+Fifteen seconds is a floor for the current design: nothing tells an agent a
+relay has died except the absence of a reply, and three missed five-second
+rebinds is how long that takes to establish.
+
+**Two ways to beat it, neither built:**
+
+1. Watch the data path rather than the rebind acknowledgement. Traffic stopping
+   is a faster signal than a keepalive going unanswered, but it needs care not
+   to mistake an idle conversation for a dead relay.
+2. Have the coordinator health-check its own fleet and push a new offer the
+   moment a relay stops answering it, rather than waiting for agents to
+   notice independently.
+
+**Cost of leaving it:** twenty seconds of silence when a relay dies. Tolerable
+for a shop's CCTV, visibly worse than what Tailscale and ZeroTier manage, and
+the kind of thing a customer notices once and remembers.
+
+Deferred deliberately, 21 September 2026.

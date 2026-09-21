@@ -6,8 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/netip"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/acl"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/discovery"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/keystore"
@@ -49,12 +53,18 @@ func runUp(ctx context.Context, args []string) error {
 // session holds everything one "up" needs, so the run loop reads as a sequence
 // of steps rather than a pile of parameters.
 type session struct {
-	client    *panel.Client
-	stateSt   *state.Store
-	st        *state.State
-	keyStore  keystore.Store
-	tun       *tunnel.Tunnel
-	plan      *netcfg.Plan
+	client   *panel.Client
+	stateSt  *state.Store
+	st       *state.State
+	keyStore keystore.Store
+	tun      *tunnel.Tunnel
+	plan     *netcfg.Plan
+	// filters is the ACL table currently in force, kept so the next one can
+	// inherit its open flows.
+	filters *acl.Table
+	// gateway is the forwarding configuration in force, kept so it can be
+	// withdrawn when the advertised prefixes change.
+	gateway   *netcfg.GatewayPlan
 	discovery *discovery.Client
 	// peerMeta maps a peer's hex public key to the names the panel gave it,
 	// which the WireGuard device itself does not carry.
@@ -181,10 +191,22 @@ func (s *session) applyConfig(priv wgPrivate, cfg *panel.Config) error {
 		return fmt.Errorf("configuring the interface: %w", err)
 	}
 
+	if err := s.applyGateway(cfg); err != nil {
+		// A gateway that cannot forward is not a gateway, and the site's
+		// cameras are unreachable. Failing loudly beats a tunnel that looks
+		// healthy and routes nothing.
+		return err
+	}
+
 	// ACL last, and deliberately after the interface is configured: the table
 	// is swapped atomically, so there is no window where traffic flows
 	// unfiltered between a new configuration arriving and its rules applying.
 	table := buildFilterTable(cfg)
+	// Conversations the previous rules permitted and the new ones still do
+	// stay open. An operator editing one rule should not drop the customer's
+	// RDP session on every device in the network.
+	table.AdoptFlows(s.filters)
+	s.filters = table
 	s.tun.SetFilters(table)
 	if table.Restricted() > 0 {
 		s.logf("acl: %d of %d peer(s) carry port rules, enforced in both directions",
@@ -198,6 +220,74 @@ func (s *session) applyConfig(priv wgPrivate, cfg *panel.Config) error {
 	s.st.VirtualIP = cfg.Device.VirtualIP
 
 	return s.stateSt.Save(s.st)
+}
+
+// applyGateway turns this device into a subnet router, when the panel says it
+// is one.
+//
+// Idempotent: the plan is rebuilt and reapplied on every configuration change,
+// because the set of advertised prefixes can change and a prefix that has been
+// withdrawn must stop being forwarded.
+func (s *session) applyGateway(cfg *panel.Config) error {
+	next, err := netcfg.BuildGatewayPlan(s.tun.Name(), cfg.Network.CIDR, advertisedBy(cfg))
+	if err != nil {
+		return fmt.Errorf("refusing this gateway configuration: %w", err)
+	}
+
+	// Withdraw what is no longer advertised before adding what is, so a
+	// prefix moved from one gateway to another does not briefly exist on both.
+	if s.gateway != nil {
+		if err := netcfg.RemoveGateway(s.gateway); err != nil {
+			s.logf("gateway: could not withdraw the previous routes: %v", err)
+		}
+	}
+	s.gateway = next
+
+	if next == nil {
+		return nil
+	}
+
+	if err := netcfg.ApplyGateway(next); err != nil {
+		return fmt.Errorf("configuring gateway mode: %w", err)
+	}
+
+	s.logf("gateway: forwarding for %s from the overlay %s",
+		joinPrefixes(next.Advertised), next.Overlay)
+
+	return nil
+}
+
+// advertisedBy is the list of prefixes this device routes for, and only this
+// device: the routes list also carries prefixes other gateways advertise,
+// which this machine installs as routes rather than forwards for.
+func advertisedBy(cfg *panel.Config) []string {
+	if !cfg.Device.IsGateway {
+		return nil
+	}
+
+	if len(cfg.Device.Advertises) > 0 {
+		return cfg.Device.Advertises
+	}
+
+	// Older panels do not send the explicit list, so fall back to the routes
+	// pointing at this device's own overlay address.
+	var out []string
+	for _, route := range cfg.Routes {
+		if route.Via != "" && route.Via == cfg.Device.VirtualIP {
+			out = append(out, route.Destination)
+		}
+	}
+
+	return out
+}
+
+func joinPrefixes(prefixes []netip.Prefix) string {
+	parts := make([]string, 0, len(prefixes))
+	for _, p := range prefixes {
+		parts = append(parts, p.String())
+	}
+
+	return strings.Join(parts, ", ")
 }
 
 // peerNames is the descriptive half of a peer, kept so the status file can

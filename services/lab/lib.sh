@@ -211,6 +211,7 @@ lab::relay_start() {
     AKCONNECT_RELAY_SECRET="$RELAY_SECRET" \
         "$BIN/akconnect-relay" serve \
             --control ":$RELAY_PORT" \
+            --coordinator "$HOST_IP:$COORD_PORT" \
             --name lab-a \
         >"$LOGS/relay-a.log" 2>&1 &
     RELAY_PID=$!
@@ -223,6 +224,7 @@ lab::relay_b_start() {
     AKCONNECT_RELAY_SECRET="$RELAY_B_SECRET" \
         "$BIN/akconnect-relay" serve \
             --control ":$RELAY_B_PORT" \
+            --coordinator "$HOST_IP:$COORD_PORT" \
             --name lab-b \
         >"$LOGS/relay-b.log" 2>&1 &
     RELAY_B_PID=$!

@@ -11,6 +11,7 @@
 #   ./topology.sh down    tear it down
 #   ./topology.sh nat     rebuild with both hosts behind separate NATs
 #   ./topology.sh mixed A B   one side cone, the other symmetric
+#   ./topology.sh gateway     adds an agentless "nvr" on beta's LAN
 #
 # Namespaces:
 #   alpha  10.0.0.2/24  ─┐
@@ -25,7 +26,7 @@ die() { echo "  ✗ $*" >&2; exit 1; }
 note() { echo "  $*"; }
 
 teardown() {
-    for ns in alpha beta natgw-a natgw-b; do
+    for ns in alpha beta natgw-a natgw-b nvr; do
         ip netns del "$ns" 2>/dev/null || true
     done
     ip link del "$BRIDGE" 2>/dev/null || true
@@ -38,7 +39,7 @@ teardown() {
     local link
     for link in br-alpha br-beta br-natgw-a br-natgw-b \
                 veth-alpha veth-beta wan-natgw-a wan-natgw-b \
-                lan-natgw-a lan-natgw-b; do
+                lan-natgw-a lan-natgw-b lan-beta veth-nvr; do
         ip link del "$link" 2>/dev/null || true
     done
 
@@ -223,11 +224,56 @@ build_mixed() {
     note "alpha is behind a $alphaMode NAT, beta behind a $betaMode NAT"
 }
 
+# A site LAN behind beta, with a machine on it that runs no agent.
+#
+# This is the shape of every customer site: one PC that can run our software,
+# and the things that matter — an NVR, a printer, a till — that cannot. If the
+# nvr namespace can be reached without our agent on it, subnet-router mode is
+# real; if it cannot, the feature does not exist however much code it has.
+#
+#   alpha 192.168.10.2 ── natgw-a ─┐
+#                                  ├─ akbr0 (coordinator, relays)
+#   beta  192.168.20.2 ── natgw-b ─┘
+#     └── 192.168.77.1  (beta's LAN side)
+#           └── nvr 192.168.77.50   no agent, no overlay address
+build_gateway() {
+    teardown
+
+    ip link add "$BRIDGE" type bridge
+    ip address add "$HOST_IP/24" dev "$BRIDGE"
+    ip link set "$BRIDGE" up
+
+    build_nat_side alpha natgw-a 10 192.168.10 cone
+    build_nat_side beta  natgw-b 11 192.168.20 cone
+
+    # The site LAN, hanging off beta.
+    ip netns add nvr
+    ip link add lan-beta type veth peer name veth-nvr
+    ip link set lan-beta netns beta
+    ip link set veth-nvr netns nvr
+
+    ip netns exec beta ip address add 192.168.77.1/24 dev lan-beta
+    ip netns exec beta ip link set lan-beta up
+
+    ip netns exec nvr ip link set lo up
+    ip netns exec nvr ip address add 192.168.77.50/24 dev veth-nvr
+    ip netns exec nvr ip link set veth-nvr up
+
+    # Deliberately no route back to the overlay. A camera recorder does not
+    # know about 10.99.0.0/24 and nobody is going to teach it — which is
+    # exactly why the gateway has to translate rather than route.
+    ip netns exec nvr ip route add default via 192.168.77.1
+
+    sysctl -qw net.ipv4.ip_forward=1
+    note "nvr is 192.168.77.50 on beta's LAN, with no agent and no route to the overlay"
+}
+
 case "${1:-up}" in
     up)        build_flat ;;
     nat)       build_nat ;;
     symmetric) build_symmetric ;;
     mixed)     build_mixed "${2:-cone}" "${3:-symmetric}" ;;
+    gateway)   build_gateway ;;
     down)      teardown ;;
-    *)         die "unknown command: $1 (use up, nat, symmetric, mixed or down)" ;;
+    *)         die "unknown command: $1 (use up, nat, symmetric, mixed, gateway or down)" ;;
 esac

@@ -891,11 +891,28 @@ roughly twice that. This is defensible — it is what the relay's bandwidth bill
 looks like — but it is the difference between an invoice and an argument, and
 it belongs in the terms rather than in a customer's inference.
 
-**What this does not show.** The figure is still agent-reported. The drill
-proves the sum is correct when the agents are honest; it cannot prove anything
-about an agent that is not. The relay's counters are the ones a customer cannot
-touch, and they still go to a log file. See
-[Known limitations](#known-limitations).
+**The figure is no longer agent-reported.** It was, and that was the one number
+in the system where the party being charged was also the party doing the
+measuring: a customer running a modified agent could lower their own invoice by
+reporting less.
+
+The relay now reports what it carried — our hardware, our count — over a
+MAC-authenticated message to the coordinator, which already holds a panel
+credential so no relay needs one. Totals are cumulative, so a lost report costs
+nothing: the next one carries the whole figure and the coordinator takes the
+difference, treating a decrease as a relay restart rather than as zero usage.
+
+The agents' own figure is kept under a separate metric for display and as a
+cross-check. The two are compared rather than reconciled, and a disagreement
+beyond 10% is logged with which side is reporting less — because two
+independent counts of one thing that disagree is information, and quietly
+preferring one of them is not. The lab measured them agreeing to **20 bytes in
+1.7 MB**, so 10% is an alarm threshold with a great deal of room in it.
+
+The drill now checks the *source* as well as the sum: `accounting/source`
+fails if the billed figure is empty while the agents have reported traffic,
+which is what would happen if the relay path stopped working and the panel
+silently fell back.
 
 ### Phase 4 — the ACL, enforced on the device
 
@@ -960,20 +977,69 @@ agent enforcing the mirror of the rule, which is why the one-sided compilation
 above was worth fixing and why the drill is run after it. A stronger test would
 run a deliberately modified agent on alpha; that is not built.
 
-#### Honest limits of the filter
+#### The bypass in the first version of this filter
 
-It is **stateless**. Ports match in either direction, so a rule allowing
-tcp/554 also matches a packet merely *originating* from port 554. Connection
-tracking would be tighter and would mean keeping per-flow state on a shop PC.
-The trade is deliberate and is written in the code rather than left to be
-discovered.
+The filter shipped in 1.4.0 matched a rule's port against a packet's source
+*or* destination. I wrote that up as a stateless trade-off. It was not a
+trade-off.
 
-IPv6 extension headers are not walked. The overlay is IPv4, so an IPv6 packet
-carrying them is treated as having no ports, and a port rule will not match it
-— the conservative direction, and a real limit if the overlay ever becomes
-dual-stack.
+"AK Support may reach the NVR on tcp/554" is a rule about the port being
+connected *to*. Matching the source as well means a device binds source port
+554 locally and reaches **every port on the NVR** — the rule permits precisely
+what it was written to forbid, and §36's "and nothing else" becomes "and
+everything else, if you ask in the right voice". Documenting it did not make it
+smaller; it made it a hole with a footnote.
 
-### A commercial problem the gate surfaced by accident
+1.5.0 matches the destination port only, and recognises replies by the flow
+they belong to.
+
+```
+$ go test ./internal/acl/ -run SourcePort -v
+--- PASS: TestBindingTheServicePortAsSourceDoesNotOpenOtherPorts
+```
+
+and in the lab, against a real service on a real tunnel:
+
+```
+srcport/allowed  PASS  alpha reaches the allowed port tcp/554
+srcport/bypass   PASS  source port 554 did not open tcp/8080;
+                       the rule is about the destination
+```
+
+#### What connection tracking costs
+
+A bounded, LRU-evicted table keyed on the 5-tuple. TCP flags retire a
+conversation on FIN or RST rather than waiting out an idle timer; UDP and ICMP
+have their own timeouts; ICMP echoes are matched on their identifier so a ping
+reply belongs to the ping that asked for it.
+
+```
+$ go test ./internal/acl/ -run Memory -v
+    conntrack_test.go:208: 10000 flows: 2801 KB total, 286 bytes per flow
+```
+
+**2.8 MB at ten thousand flows**, which is far more than a shop PC opens. The
+test fails if a future change makes a flow substantially more expensive, so the
+figure is a floor under a regression rather than a note in a document.
+
+Open conversations survive a configuration change. An operator editing one rule
+should not drop the customer's RDP session on every device in the network, and
+`TestOpenFlowsSurviveAConfigurationChange` says so.
+
+#### Failing closed on what cannot be read
+
+An IPv6 packet wearing a hop-by-hop or routing header used to be treated as
+having no ports — so no port rule matched it, and a deny-only rule set would
+forward it. Anyone could put an extension header in front of a TCP segment and
+walk past a port rule.
+
+Extension headers are still not walked. The difference is that such a packet is
+now **refused** rather than forwarded, along with a truncated transport header,
+which is malformed rather than port-less. Walking the chain properly is the fix
+when the overlay becomes dual-stack; until then the safe answer is the honest
+one, and `TestIPv6ExtensionHeadersFailClosed` covers five header types.
+
+### A commercial problem the gate surfaced by accident, and fixed
 
 The ninth scenario failed to enrol a device, and the reason was not the
 network:
@@ -995,15 +1061,32 @@ enrolment and then polls `claim` until an administrator approves it. Forty
 machines is comfortably past sixty requests, and the failure arrives as
 "Too many requests" on a laptop belonging to whoever is doing the installing.
 
-**This is unfixed and it will bite the first multi-seat customer.** The limit
-should not simply be raised: the brute-force vector is *failed* enrolments, and
-those deserve a tight limit. Successful enrolments and claims by a device that
-has already been accepted do not. Counting the two separately — strict on
-failures, generous on successes — is the standard shape and is not built.
+**Fixed in 1.5.0.** The limit was not simply raised. The brute-force vector is
+a *failed* enrolment — a join code that does not exist, has expired or is used
+up — and that is what is now counted strictly: fifteen failures per fifteen
+minutes per address, recorded by the controller after the attempt rather than
+by the middleware before it, because only the controller knows whether the code
+was real. A claim for a public key nobody enrolled counts as a failure too,
+because it is a probe rather than a poll.
 
-Recorded in BACKLOG.md. The drill clears the throttle between scenarios so it
-measures the network rather than this, which is the right thing for a drill and
-would be the wrong thing to do in production.
+Volume is limited generously — 1,200 an hour — which is a flood ceiling rather
+than an abuse control. Fifty devices enrolling and then polling for approval is
+several hundred legitimate requests from one address.
+
+The third leg is the join code's own use limit, which an administrator sets.
+Redemption was selecting the row, checking the count and then incrementing,
+which let two devices enrolling in the same moment both take the last use. That
+was academic while devices trickled in one at a time and is not when fifty
+machines enrol together, so the claim is now a single conditional UPDATE and
+the row is read only if it succeeded.
+
+Drilled:
+
+```
+enrol/bulk           PASS  50 devices enrolled from one address, none throttled
+enrol/guessing       PASS  N of 20 bad join codes were throttled
+enrol/blocked-after  PASS  the address stays blocked while the failure window holds
+```
 
 #### What the gate caught
 
@@ -1178,27 +1261,33 @@ These are real and currently shipped.
    are re-written afterwards, and the run log on disk is authoritative, but
    the row is not a complete account of a rolled-back run.
 
-5. **The billed figure is agent-reported.** The panel meters relayed bytes
-   from `rx_delta` + `tx_delta` in each end's heartbeat. The drill in
-   `run-all.sh` checks that figure against the relay's own count of what it
-   forwarded and they agree, which shows the *arithmetic* is right — but a
-   customer running a modified agent can still under-report and be billed
-   less. The relay's counters are the ones nobody outside our infrastructure
-   can touch, and they currently go to a log file and nowhere else. Making the
-   relay report them is the fix, and it is not done.
+5. **Relayed bytes are counted at ingress *and* egress on each hop.** A byte
+   relayed from A to B is counted when it arrives at the relay and again when
+   it leaves, so the figure is roughly twice the payload. This is defensible —
+   it is what the relay's own bandwidth bill looks like — but it belongs in
+   the terms a customer signs rather than in an inference they make later.
 
-   Both counters use the same convention: a relayed byte is counted where it
-   arrives and again where it leaves, so the figure is ingress plus egress at
-   each hop. That has to be stated on an invoice rather than discovered by a
-   customer.
+   (The billed figure itself is no longer agent-reported; see §H.)
 
-6. **Relay failover costs about fifteen seconds.** Three unanswered rebinds at
-   five-second intervals is the detection time, and it is a floor: nothing
-   tells an agent a relay has died except the absence of a reply. Measured
-   loss when a relay was killed mid-stream, before this work, was 37% of a
-   40-second window.
+6. **Relay failover costs about fifteen to twenty seconds.** Nothing tells an
+   agent a relay has died except the absence of a reply, and three missed
+   five-second rebinds is how long establishing that takes. Measured
+   repeatedly: 37% loss over a 40-second window for a restart, 49–50% for a
+   move to another relay. Deferred deliberately; BACKLOG.md B4 carries the
+   measurements and two ways to beat it.
 
-7. **PHP cannot hold a socket open.** There are no WebSockets; live progress
+7. **The ACL filter is stateful but not a full firewall.** It tracks flows to
+   recognise replies, which closes the source-port bypass, but it does not
+   validate TCP sequence numbers or reassemble streams. A packet that matches
+   an open flow's 5-tuple is accepted on that basis. Closing that gap means a
+   great deal more state for an attack that already requires the ability to
+   inject into an established WireGuard tunnel.
+
+8. **IPv6 extension headers are refused, not parsed.** The overlay is IPv4, so
+   this costs nothing today and would need doing properly before it becomes
+   dual-stack.
+
+9. **PHP cannot hold a socket open.** There are no WebSockets; live progress
    uses Server-Sent Events. This was a deliberate choice, stated when it was
    made, not a limitation discovered late.
 

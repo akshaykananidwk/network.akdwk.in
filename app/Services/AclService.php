@@ -149,10 +149,15 @@ final class AclService
     }
 
     /**
+     * Does a rule's source or destination selector name this device?
+     *
+     * Public because route-filter compilation asks the same question about
+     * the same rules; keeping two copies of this would mean two answers.
+     *
      * @param array<string,mixed> $device
      * @param list<string> $tags
      */
-    private static function matches(string $type, ?string $value, array $device, array $tags): bool
+    public static function matches(string $type, ?string $value, array $device, array $tags): bool
     {
         return match ($type) {
             'any'    => true,
@@ -190,7 +195,7 @@ final class AclService
     }
 
     /** @param array<string,mixed> $rule @return array<string,mixed> */
-    private static function toFilter(array $rule): array
+    public static function toFilter(array $rule): array
     {
         return [
             'action'    => $rule['action'],
@@ -202,7 +207,7 @@ final class AclService
     }
 
     /** @param array<string,mixed> $device @return list<string> */
-    private static function tagsOf(array $device): array
+    public static function tagsOf(array $device): array
     {
         $tags = $device['tags_json'] ?? null;
         if (is_string($tags)) {

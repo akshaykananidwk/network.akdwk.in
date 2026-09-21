@@ -10,19 +10,28 @@ func port(n int) *int { return &n }
 
 // ipv4 builds a datagram with the given protocol, addresses and ports.
 func ipv4(proto uint8, src, dst string, srcPort, dstPort uint16) []byte {
-	b := make([]byte, 20+8)
+	return ipv4Flags(proto, src, dst, srcPort, dstPort, 0)
+}
+
+// ipv4Flags builds a datagram with a full transport header. TCP needs 20
+// bytes, not 8: the flags live at offset 13 and the filter reads them to
+// retire a flow when the conversation ends.
+func ipv4Flags(proto uint8, src, dst string, srcPort, dstPort uint16, flags uint8) []byte {
+	b := make([]byte, 20+20)
 	b[0] = 0x45
 	b[9] = proto
 	copy(b[12:16], netip.MustParseAddr(src).AsSlice())
 	copy(b[16:20], netip.MustParseAddr(dst).AsSlice())
 	binary.BigEndian.PutUint16(b[20:22], srcPort)
 	binary.BigEndian.PutUint16(b[22:24], dstPort)
+	b[33] = flags
 
 	return b
 }
 
 func icmp(src, dst string) []byte {
 	b := make([]byte, 20+8)
+	b[20] = 8 // echo request
 	b[0] = 0x45
 	b[9] = ipProtoICMP
 	copy(b[12:16], netip.MustParseAddr(src).AsSlice())
@@ -85,9 +94,92 @@ func TestRepliesToAnAllowedPortAreNotBlocked(t *testing.T) {
 	table.AddSelf(self)
 	table.Add(nvr, []Filter{{Action: "allow", Protocol: ProtoTCP, PortFrom: port(554), RuleID: 7}})
 
+	// The request opens the flow.
+	if v := table.Check(Outbound, ipv4Flags(ipProtoTCP, self, nvr, 40000, 554, tcpSYN)); !v.Allowed {
+		t.Fatalf("precondition: the allowed request was blocked: %s", v.Reason)
+	}
+
+	// The reply belongs to it, and carries 554 as its source.
 	v := table.Check(Inbound, ipv4(ipProtoTCP, nvr, self, 554, 40000))
 	if !v.Allowed {
 		t.Fatalf("the reply to an allowed connection was dropped: %s", v.Reason)
+	}
+	if v.Reason != "established flow" {
+		t.Fatalf("the reply was allowed for the wrong reason: %s", v.Reason)
+	}
+}
+
+// The bypass this filter was rewritten to close.
+//
+// "AK Support may reach the NVR on tcp/554" must not become "AK Support may
+// reach anything on the NVR, provided it says the traffic came from port 554".
+// Matching a rule against a source port made exactly that possible: bind 554
+// locally and every port on the target is open.
+func TestBindingTheServicePortAsSourceDoesNotOpenOtherPorts(t *testing.T) {
+	table := NewTable()
+	table.AddSelf(self)
+	table.Add(nvr, []Filter{{Action: "allow", Protocol: ProtoTCP, PortFrom: port(554), RuleID: 7}})
+
+	// Source port 554, destination port 80: a device trying to reach the NVR's
+	// web interface while wearing the RTSP port as a disguise.
+	v := table.Check(Outbound, ipv4Flags(ipProtoTCP, self, nvr, 554, 80, tcpSYN))
+	if v.Allowed {
+		t.Fatalf("binding the service port as a source reached a forbidden port: %s", v.Reason)
+	}
+
+	// And the same trick inbound, from a peer that has been let onto the
+	// network but is not allowed at this port.
+	v = table.Check(Inbound, ipv4Flags(ipProtoTCP, nvr, self, 554, 80, tcpSYN))
+	if v.Allowed {
+		t.Fatalf("an inbound packet claiming source port 554 reached port 80: %s", v.Reason)
+	}
+}
+
+// A reply is only a reply if something asked for it. An unsolicited packet
+// from the service port is not part of any flow and must be judged on the
+// rules, which do not cover it.
+func TestAnUnsolicitedPacketFromTheServicePortIsNotTreatedAsAReply(t *testing.T) {
+	table := NewTable()
+	table.AddSelf(self)
+	table.Add(nvr, []Filter{{Action: "allow", Protocol: ProtoTCP, PortFrom: port(554), RuleID: 7}})
+
+	v := table.Check(Inbound, ipv4(ipProtoTCP, nvr, self, 554, 40000))
+	if v.Allowed {
+		t.Fatalf("an unsolicited packet was accepted as a reply: %s", v.Reason)
+	}
+}
+
+// A flow belongs to the pair that opened it. Another peer cannot ride it.
+func TestAnotherPeerCannotUseAnEstablishedFlow(t *testing.T) {
+	table := NewTable()
+	table.AddSelf(self)
+	table.Add(nvr, []Filter{{Action: "allow", Protocol: ProtoTCP, PortFrom: port(554), RuleID: 7}})
+	table.Add(till, nil)
+
+	table.Check(Outbound, ipv4Flags(ipProtoTCP, self, nvr, 40000, 554, tcpSYN))
+
+	// The till reuses the exact ports of the open conversation.
+	v := table.Check(Inbound, ipv4(ipProtoTCP, till, self, 554, 40000))
+	if v.Reason == "established flow" {
+		t.Fatal("a different peer was let in on someone else's flow")
+	}
+}
+
+// A ping reply is attributable to the request by its echo identifier, so
+// "allow icmp" works without also permitting unsolicited ICMP.
+func TestAPingReplyBelongsToItsRequest(t *testing.T) {
+	table := NewTable()
+	table.AddSelf(self)
+	table.Add(nvr, []Filter{{Action: "allow", Protocol: ProtoICMP, RuleID: 9}})
+
+	if v := table.Check(Outbound, icmp(self, nvr)); !v.Allowed {
+		t.Fatalf("the ping was blocked: %s", v.Reason)
+	}
+
+	reply := icmp(nvr, self)
+	reply[20] = 0 // echo reply
+	if v := table.Check(Inbound, reply); !v.Allowed {
+		t.Fatalf("the ping reply was blocked: %s", v.Reason)
 	}
 }
 
@@ -212,3 +304,6 @@ func TestAFragmentWithoutPortsCannotSatisfyAPortRule(t *testing.T) {
 		t.Fatal("a fragment with no transport header satisfied a port rule")
 	}
 }
+
+// mustAddr is a test helper for addresses that are known good.
+func mustAddr(s string) netip.Addr { return netip.MustParseAddr(s) }

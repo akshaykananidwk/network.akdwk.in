@@ -18,6 +18,12 @@ type Config struct {
 		Name      string `json:"name"`
 		VirtualIP string `json:"virtual_ip"`
 		Status    string `json:"status"`
+		// IsGateway says this device routes for machines that cannot run an
+		// agent — an NVR, a printer, a DVR.
+		IsGateway bool `json:"is_gateway"`
+		// Advertises are the LAN prefixes it routes for, as the panel
+		// approved them. Empty unless IsGateway.
+		Advertises []string `json:"advertises"`
 	} `json:"device"`
 
 	Network struct {
@@ -92,6 +98,11 @@ type Route struct {
 	Destination string `json:"destination"`
 	Via         string `json:"via"`
 	Metric      int    `json:"metric"`
+	// Filters govern traffic to machines inside this prefix. They are
+	// separate from the gateway peer's own filters: a rule about the NVR at
+	// 192.168.1.50 is about the NVR, not about the reception PC that happens
+	// to route for it.
+	Filters []Filter `json:"filters"`
 }
 
 // Relay is a fallback path for peers that cannot connect directly.

@@ -153,6 +153,9 @@ $router->group('/api/v1', ['maintenance'], static function (Router $router): voi
     // and it is the only caller allowed to ask about a device it does not own.
     $router->post('/coordinator/verify', 'Api\CoordinatorController@verifyDevice', ['coordinator']);
     $router->post('/coordinator/endpoints', 'Api\CoordinatorController@reportEndpoints', ['coordinator']);
+    // Billing. The relay measured it; the coordinator relays it; nothing a
+    // customer controls is on this path.
+    $router->post('/coordinator/relay-usage', 'Api\CoordinatorController@reportRelayUsage', ['coordinator']);
 
     // Everything else an agent calls needs its device token.
     $router->get('/agent/config', 'Api\AgentController@config', ['device']);

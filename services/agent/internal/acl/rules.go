@@ -31,9 +31,10 @@ const (
 
 // IP protocol numbers, for reading the header rather than guessing from it.
 const (
-	ipProtoICMP = 1
-	ipProtoTCP  = 6
-	ipProtoUDP  = 17
+	ipProtoICMP   = 1
+	ipProtoTCP    = 6
+	ipProtoUDP    = 17
+	ipProtoICMPv6 = 58
 )
 
 // Filter is one compiled rule, as the panel's AclService emits it.
@@ -70,7 +71,20 @@ type packet struct {
 	// hasPorts is false for ICMP and for a fragment that does not carry the
 	// transport header. A rule about ports cannot match what has no ports.
 	hasPorts bool
+	// tcpFlags carries SYN/FIN/RST so a flow can be retired when the
+	// conversation ends rather than when a timer says so.
+	tcpFlags uint8
+	// icmpID is the echo identifier, which is what makes a ping reply
+	// attributable to the request that asked for it.
+	icmpID uint16
 }
+
+// TCP flags this filter cares about.
+const (
+	tcpFIN uint8 = 0x01
+	tcpSYN uint8 = 0x02
+	tcpRST uint8 = 0x04
+)
 
 // Decide applies a peer's filter set to one packet.
 //
@@ -117,13 +131,17 @@ func Decide(filters []Filter, p packet) Verdict {
 
 // matches reports whether one rule is about this packet.
 //
-// Ports are matched in **either** direction. A rule saying "support may reach
-// the NVR on TCP 554" has to permit the NVR's replies too, and those carry 554
-// as the *source* port. Without connection tracking — which is a lot of state
-// to keep on a shop PC, and a lot of ways to leak it — matching either end is
-// what makes a stateless filter usable. It is more permissive than a stateful
-// firewall: a packet that merely originates from port 554 also matches. That
-// is a deliberate trade and it is written down rather than discovered.
+// The **destination** port only. A rule saying "support may reach the NVR on
+// tcp/554" is about the port being connected *to*; 554 appearing as a source
+// port says nothing about what the packet is for.
+//
+// An earlier version matched either end, so that replies — which carry the
+// service port as their source — would be permitted without keeping state.
+// That was a bypass, not a trade-off: a device need only bind source port 554
+// to reach every port on the target, and the rule then permits exactly what it
+// was written to forbid. Replies are now recognised by the flow they belong to
+// (see conntrack.go), which is the only way to tell a reply from a packet that
+// has been dressed up as one.
 func matches(f Filter, p packet) bool {
 	if !protocolMatches(f.Protocol, p.proto) {
 		return false
@@ -147,7 +165,7 @@ func matches(f Filter, p packet) bool {
 		from, to = to, from
 	}
 
-	return inRange(int(p.dstPort), from, to) || inRange(int(p.srcPort), from, to)
+	return inRange(int(p.dstPort), from, to)
 }
 
 func protocolMatches(want Protocol, got uint8) bool {
@@ -159,7 +177,7 @@ func protocolMatches(want Protocol, got uint8) bool {
 	case string(ProtoUDP):
 		return got == ipProtoUDP
 	case string(ProtoICMP):
-		return got == ipProtoICMP
+		return got == ipProtoICMP || got == ipProtoICMPv6
 	default:
 		// An unknown protocol name matches nothing. Treating it as "any" would
 		// turn a typo in the panel into an open door.
@@ -180,6 +198,15 @@ type Table struct {
 	// refuses it cryptographically, and checking again here costs one map
 	// lookup and closes the gap if a peer is ever added without one.
 	known map[netip.Addr]struct{}
+	// flows remembers conversations the rules permitted, so a reply is
+	// recognised by the flow it belongs to rather than by its port numbers.
+	flows *conntrack
+	// routes are prefixes a gateway peer advertised, for machines that cannot
+	// run an agent. Sorted longest-prefix-first.
+	routes []Route
+	// self is this device's own overlay address, needed to tell which end of
+	// a routed packet is the far one.
+	self netip.Addr
 }
 
 // NewTable compiles a table from the panel's peer list.
@@ -187,7 +214,29 @@ func NewTable() *Table {
 	return &Table{
 		byPeer: make(map[netip.Addr][]Filter),
 		known:  make(map[netip.Addr]struct{}),
+		flows:  newConntrack(maxFlows),
 	}
+}
+
+// AdoptFlows carries the flow table across a configuration change.
+//
+// A rule change must not drop conversations the previous rules permitted and
+// the new ones still do — an operator editing an unrelated rule would
+// otherwise reset every open connection on every device. Flows opened under
+// the old rules stay open; new ones are judged by the new rules.
+func (t *Table) AdoptFlows(previous *Table) {
+	if previous != nil && previous.flows != nil {
+		t.flows = previous.flows
+	}
+}
+
+// Flows is how many conversations are currently tracked.
+func (t *Table) Flows() int {
+	if t.flows == nil {
+		return 0
+	}
+
+	return t.flows.Flows()
 }
 
 // Add records one peer's address and the filters that apply to it.
@@ -212,7 +261,8 @@ func (t *Table) Add(virtualIP string, filters []Filter) {
 // against: traffic to and from ourselves is not a conversation with a peer.
 func (t *Table) AddSelf(virtualIP string) {
 	if addr, err := netip.ParseAddr(strings.TrimSpace(virtualIP)); err == nil {
-		t.known[addr.Unmap()] = struct{}{}
+		t.self = addr.Unmap()
+		t.known[t.self] = struct{}{}
 	}
 }
 

@@ -18,13 +18,37 @@ final class UsageCounter extends Model
     protected static bool $softDeletes = false;
     protected static array $fillable = ['tenant_id', 'period', 'metric', 'value_num'];
 
+    /**
+     * The billed figure, reported by the relay that carried the traffic.
+     *
+     * Our hardware, our count. It replaced an agent-reported figure, which a
+     * customer running a modified agent could lower at will — the one number
+     * in the system where the party being charged was also the party doing the
+     * measuring.
+     */
     public const METRIC_RELAY_BYTES = 'relay_bytes';
+    /**
+     * The same traffic as the agents saw it. Kept for display and as a
+     * cross-check: two independent counts of one thing that disagree is
+     * information worth having.
+     */
+    public const METRIC_RELAY_BYTES_AGENT = 'relay_bytes_agent';
     public const METRIC_DIRECT_BYTES = 'direct_bytes';
     public const METRIC_PEAK_DEVICES = 'peak_devices';
 
     public static function currentPeriod(): string
     {
         return gmdate('Y-m');
+    }
+
+    /** One counter's current value for the period, or zero. */
+    public static function valueFor(int $tenantId, string $metric, ?string $period = null): int
+    {
+        return TenantScope::acrossAllTenants('usage metering read', static fn (): int => (int) DB::scalar(
+            'SELECT value_num FROM ' . self::tableName() . '
+             WHERE tenant_id = :t AND period = :p AND metric = :m LIMIT 1',
+            ['t' => $tenantId, 'p' => $period ?? self::currentPeriod(), 'm' => $metric]
+        ));
     }
 
     /** Add to a counter, creating it on first use. */

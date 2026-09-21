@@ -301,6 +301,12 @@ final class DeviceService
                 'name'       => $device['name'],
                 'virtual_ip' => $device['virtual_ip'],
                 'status'     => $device['status'],
+                // Gateway mode. The agent configures forwarding only for the
+                // prefixes named here — the routes list below also carries
+                // prefixes *other* gateways advertise, which this device
+                // installs as routes rather than forwards for.
+                'is_gateway' => (int) $device['is_gateway'] === 1,
+                'advertises' => NetworkRoute::cidrsViaDevice($deviceId),
             ],
             'network'     => [
                 'uid'           => $network['network_uid'],
@@ -323,6 +329,15 @@ final class DeviceService
                     'destination' => $r['destination_cidr'],
                     'via'         => $r['via_device_ip'] ?? null,
                     'metric'      => (int) $r['metric'],
+                    // Rules about machines inside this prefix. They name the
+                    // destination by LAN address, because that is how an
+                    // operator thinks about an NVR: the rule is about the
+                    // recorder, not about the PC that routes for it.
+                    'filters'     => AclRouteFilters::forRoute(
+                        $networkId,
+                        $device,
+                        (string) $r['destination_cidr']
+                    ),
                 ],
                 NetworkRoute::forNetwork($networkId)
             ),

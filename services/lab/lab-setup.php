@@ -19,6 +19,7 @@ declare(strict_types=1);
  *   lab-setup.php relays <host> <port>... register the lab relay fleet
  *   lab-setup.php unthrottle           clear the rate limiter
  *   lab-setup.php acl <net> <action> <src> <dst> [proto] [port]
+ *   lab-setup.php joincode <net> <uses>  issue a code with a use limit
  *   lab-setup.php usage <tenant>       print relayed byte counters
  *   lab-setup.php teardown <tenant>    remove everything the drill created
  */
@@ -34,6 +35,7 @@ $autoloader->addNamespace('App', APP_ROOT . '/app');
 $autoloader->register();
 require APP_ROOT . '/app/Core/helpers.php';
 App\Core\Config::load(APP_ROOT . '/config/config.php');
+require __DIR__ . '/lab-routes.php';
 
 use App\Core\DB;
 use App\Middleware\TenantScope;
@@ -59,6 +61,10 @@ exit(match ($command) {
     'relays'    => labRelays($args),
     'unthrottle' => labUnthrottle(),
     'acl'       => labAcl($args),
+    'acl-cidr'  => labAclCidr($args),
+    'route'     => labRoute($args),
+    'route-approve' => labRouteApprove($args[0] ?? ''),
+    'joincode'  => labJoinCode($args),
     'usage'     => labUsage((int) ($args[0] ?? 0)),
     'teardown'  => labTeardown((int) ($args[0] ?? 0)),
     default     => fail('unknown command: ' . $command),
@@ -169,10 +175,10 @@ function labReapprove(string $uid): int
 /**
  * Print the numbers a customer would be billed on.
  *
- * RELAY_BYTES is the metered figure: the one that turns into an invoice. The
- * per-device totals are printed beside it because a mismatch between them and
- * the counter means the metering, not the tunnel, is wrong — and that is a
- * difference worth being able to see at a glance.
+ * RELAY_BYTES is the invoice figure and comes from the relay — our hardware.
+ * AGENT_BYTES is the same traffic as the agents reported it, kept for display
+ * and as a cross-check. A customer can influence the second and not the first,
+ * which is the whole point of separating them.
  */
 /**
  * Register the lab's relays so agents are told about them.
@@ -285,6 +291,48 @@ function labAcl(array $args): int
     return 0;
 }
 
+/**
+ * Issue a join code with a stated use limit.
+ *
+ * The limit is the third leg of enrolment throttling: failures are limited per
+ * address, volume is limited generously, and how many devices a *code* may
+ * admit is the administrator's decision rather than a rate.
+ *
+ * @param list<string> $args
+ */
+function labJoinCode(array $args): int
+{
+    $networkId = (int) ($args[0] ?? 0);
+    $uses = (int) ($args[1] ?? 20);
+
+    if ($networkId <= 0) {
+        return fail('usage: joincode <network> [max-uses]');
+    }
+
+    $network = TenantScope::acrossAllTenants(
+        'lab harness',
+        static fn (): ?array => Network::find($networkId)
+    );
+    if ($network === null) {
+        return fail("network {$networkId} not found");
+    }
+
+    $code = TenantScope::asTenant(
+        (int) $network['tenant_id'],
+        static fn (): string => (string) JoinCode::issue(
+            (int) $network['tenant_id'],
+            $networkId,
+            null,
+            $uses,
+            1440
+        )['code']
+    );
+
+    printf("JOIN_CODE=%s\nMAX_USES=%d\n", $code, $uses);
+
+    return 0;
+}
+
 function labUnthrottle(): int
 {
     TenantScope::acrossAllTenants('lab harness', static function (): void {
@@ -318,8 +366,9 @@ function labUsage(int $tenantId): int
     ));
 
     printf(
-        "RELAY_BYTES=%d\nDIRECT_BYTES=%d\nDEVICE_RX=%d\nDEVICE_TX=%d\n",
+        "RELAY_BYTES=%d\nAGENT_BYTES=%d\nDIRECT_BYTES=%d\nDEVICE_RX=%d\nDEVICE_TX=%d\n",
         $byMetric[UsageCounter::METRIC_RELAY_BYTES] ?? 0,
+        $byMetric[UsageCounter::METRIC_RELAY_BYTES_AGENT] ?? 0,
         $byMetric[UsageCounter::METRIC_DIRECT_BYTES] ?? 0,
         (int) ($devices['rx'] ?? 0),
         (int) ($devices['tx'] ?? 0)

@@ -160,9 +160,12 @@ declare -A SCENARIOS=(
     [accounting]=scenario_accounting
     [acl]=scenario_acl
     [acl-tamper]=scenario_acl_tamper
+    [acl-srcport]=scenario_acl_source_port
+    [enrol-throttle]=scenario_enrol_throttle
+    [gateway]=scenario_gateway
     [revocation]=scenario_revocation
 )
-ORDER=(cone relay cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-tamper revocation)
+ORDER=(cone relay cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway revocation)
 
 if [ "${1:-}" = "--list" ]; then
     printf '%s\n' "${ORDER[@]}"
