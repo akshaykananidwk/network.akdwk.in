@@ -12,7 +12,7 @@ Last updated: 2026-09-22 · version 1.9.1
 `VERIFICATION_REPORT.md` records what was actually run, against a real
 installation and the real GitHub repository. The short version:
 
-* 469 automated assertions, all passing, repeatable across consecutive runs.
+* 593 automated assertions, all passing, repeatable across consecutive runs.
 * Nine update runs through the panel's own pipeline, six of them rolled back.
 * A rollback that restores 213 of 213 files byte-for-byte and 20 of 20 tables.
 * Byte-exact recovery from damage severe enough that the panel could not boot.
@@ -34,8 +34,9 @@ Two hosts behind separate NATs now ping each other by virtual IP over a real
 WireGuard tunnel, with both default routes still on the physical interface, a
 revoked device cut off in 7.7 seconds, and an established tunnel surviving the
 panel and the coordinator both being killed. All of it in Linux network
-namespaces on one machine — **not on Windows, and not across two real ISPs**,
-which the Phase 2 acceptance criteria both require.
+namespaces on one machine — and, since 1.9.0, on one real Windows laptop over
+the real internet. **Not across two real ISPs**, which the Phase 2 acceptance
+criteria require.
 
 **Windows cannot be tested from this environment.** There is no Windows host,
 no hypervisor and no nested virtualisation, and Wine would give false results
@@ -69,18 +70,21 @@ everything.
 | Phase | Scope | State |
 |---|---|---|
 | **P1 Foundation** | Installer, framework, auth, multi-tenancy, CRUD, audit, **auto-update**, backups | **Complete and verified** |
-| P2 Networking | Go agent, enrolment-to-tunnel, IPAM wiring, WireGuard, split tunnel, coordinator, NAT traversal | **Working in a Linux lab**; Windows compiles but is untested, real ISPs untested |
+| P2 Networking | Go agent, enrolment-to-tunnel, IPAM wiring, WireGuard, split tunnel, coordinator, NAT traversal | **Working in a Linux lab, and on one real Windows laptop over the real internet**; two real ISPs at once still untested |
 | P3 Relay | Relay service, fallback and silent upgrade to direct, RTT-based selection, failover, usage accounting | **Working in the lab**, selection on measured RTT, failover drilled; accounting verified against the relay's own count |
-| P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | **ACL, subnet-router mode with 1:1 subnet mapping, and split DNS all working and drilled on Linux**, including against a client with its enforcement compiled out; Windows untested on hardware; site-to-site not started |
+| P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | **ACL, subnet-router mode with 1:1 subnet mapping, and split DNS all working and drilled on Linux**, including against a client with its enforcement compiled out; NRPT split DNS confirmed on real Windows, gateway mode not; site-to-site not started |
 | P5 Commercial | Plans, limits, billing, invoices, API keys, OpenAPI, white-label | Mostly done (see below) |
-| **Deployment** | Panel on aaPanel, coordinator + relay on a VPS, field kit pointed at both | `DEPLOY.md` and `deploy/`; **not yet run on the real servers** |
+| **Deployment** | Panel on aaPanel, coordinator + relay on a VPS, field kit pointed at both | `DEPLOY.md` and `deploy/`; **the panel has been deployed** — it found ten defects, fixed in 1.9.1. Coordinator and relay on a VPS not yet |
 | P6 Enterprise | HA, multi-region relays, SSO/SAML, staged agent rollout | Not started |
 
-**409 assertions pass** (`php tests/run.php --url=…`; 376 without an HTTP
-server), and
-**`services/lab/run-all.sh` is the networking gate** — it builds the
-namespaces, runs every scenario, prints one table and exits non-zero on any
-failure. No release ships without a clean table.
+**593 assertions pass** (`php tests/run.php --url=…`; 475 without an HTTP
+server), and **`services/lab/release.sh` is the release gate**. It runs the
+test suites, builds and verifies the Windows pack, stands up Apache with
+PHP-FPM and installs the panel into it through the browser installer, runs the
+real `Crypto` class against a PHP whose Argon2 comes from libsodium, runs every
+networking scenario, and drills a cross-version update and rollback in a
+scratch database. One table, non-zero on any failure. No release ships without
+a clean one.
 
 ---
 
@@ -250,7 +254,7 @@ Listed so nobody discovers them the hard way.
 
 | Thing | State |
 |---|---|
-| `services/*` | Empty directories. Phase 2. |
+| Relay monitoring | One relay is a single point of failure and nothing watches it. The panel shows health from the relay's own heartbeat; there is no alert when it stops |
 | Agent release distribution | Schema, model and the `/agent/version` endpoint exist; no upload UI, and no binaries to serve |
 | Off-site backup drivers | `backup.offsite_driver` is read but only `none` is implemented |
 | Job queue | Table, reservation with retry and dead-lettering, and a worker loop all work; only one job type (`notify.email`) is registered |
@@ -263,6 +267,13 @@ Listed so nobody discovers them the hard way.
 ---
 
 ## Next
+
+0. **The gate now runs Apache.** `services/lab/release.sh` stands up Apache
+   with PHP-FPM and MariaDB in a container, installs the panel into it through
+   the browser installer, and runs a PHP whose Argon2 comes from libsodium. It
+   is not aaPanel and it is not Windows, so it narrows the gap rather than
+   closing it — but the class of defect that got through in 1.9.0 cannot get
+   through the same way again.
 
 1. **Put 1.9.1 on the production box, through the updater.** The ten defects
    above are fixed and gated; none of that is worth anything until the panel
@@ -285,10 +296,14 @@ Listed so nobody discovers them the hard way.
    on `devices.network_id` being a single column, and on the fact that twenty
    customers all using 192.168.1.0/24 would collide in one routing table even
    if it were not.
-6. **NRPT, on real hardware.** systemd-resolved is now exercised by the gate;
-   NRPT is the half that remains an argument from the code. Stage 14.
+6. **The coordinator and a relay on a real VPS.** The panel is deployed; its
+   edge is not. One relay is also a single point of failure with nothing
+   watching it, which is fine for a pilot and not for a customer.
 7. **Site-to-site** — the rest of Phase 4.
 8. Then Phase 6.
 
-The order is deliberate: items 1 and 3 decide whether any of the rest matters
-commercially.
+The order is deliberate: items 1, 2 and 3 decide whether any of the rest
+matters commercially.
+
+NRPT is no longer on this list: it was reported working on the real Windows
+laptop that 1.9.0 ran on. Stage 14 still asks for the collected evidence.
