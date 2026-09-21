@@ -123,6 +123,11 @@ lab::build() {
     ( cd "$REPO/services/agent" && go build -tags labtamper -o "$BIN/akconnect-agent-tampered" ./cmd/akconnect-agent ) \
         || die "build failed: tampered agent"
 
+    # And the fixture that drives netcfg's DNS code against a real
+    # systemd-resolved, which cannot be done from inside a namespace.
+    ( cd "$REPO/services/agent" && go build -o "$BIN/akconnect-dnstest" ./cmd/akconnect-dnstest ) \
+        || die "build failed: dnstest"
+
     say "built coordinator, relay and agent (plus the tampered agent the ACL drills need)"
 }
 

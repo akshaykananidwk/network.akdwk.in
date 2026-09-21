@@ -36,6 +36,35 @@ declare(strict_types=1);
         </div>
     </header>
 
+    <?php
+        // What the device says it could not do. Reported by its agent on every
+        // heartbeat, so this clears itself once the cause is fixed rather than
+        // needing somebody to dismiss it.
+        $problems = json_decode((string) ($device['problems_json'] ?? ''), true);
+        $problems = is_array($problems) ? $problems : [];
+    ?>
+    <?php if ($problems !== []): ?>
+        <div class="alert alert-warning">
+            <h3>This device reported <?= count($problems) === 1 ? 'a problem' : count($problems) . ' problems' ?></h3>
+            <p class="text-muted">
+                The agent is running and could not do these things by itself. Nothing here is fixed
+                from the device &mdash; each one needs a change on this panel.
+            </p>
+            <ul>
+                <?php foreach ($problems as $problem): ?>
+                    <li>
+                        <code><?= e((string) ($problem['code'] ?? '')) ?></code>
+                        <?= e((string) ($problem['detail'] ?? '')) ?>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+            <p class="text-muted small">
+                Last reported <?= e((string) ($device['problems_at'] ?? 'unknown')) ?> UTC. This
+                clears on its own once the agent stops reporting it.
+            </p>
+        </div>
+    <?php endif; ?>
+
     <?php if ($device['status'] === 'pending' && can('device.approve')): ?>
         <div class="approve-panel">
             <h3>This device is waiting for approval</h3>

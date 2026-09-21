@@ -207,3 +207,37 @@ function labZone(int $networkId): int
 
     return 0;
 }
+
+/**
+ * Print what a device has reported it could not do.
+ *
+ * The drill needs this because "the agent refused the route" and "somebody
+ * can see that it refused the route" are different claims, and only the second
+ * one gets a customer's problem fixed.
+ */
+function labProblems(string $uid): int
+{
+    if ($uid === '') {
+        return fail('usage: problems <device-uid>');
+    }
+
+    $device = findDevice($uid);
+    if ($device === null) {
+        return fail("device {$uid} not found");
+    }
+
+    $problems = json_decode((string) ($device['problems_json'] ?? ''), true);
+    if (!is_array($problems) || $problems === []) {
+        return 0;
+    }
+
+    foreach ($problems as $problem) {
+        printf(
+            "%s|%s\n",
+            (string) ($problem['code'] ?? ''),
+            (string) ($problem['detail'] ?? '')
+        );
+    }
+
+    return 0;
+}

@@ -71,7 +71,7 @@ func (s *session) loop(ctx context.Context, priv wgPrivate, pollAfter int) error
 
 // heartbeat reports liveness and the device's own view of its traffic.
 func (s *session) heartbeat(ctx context.Context) error {
-	hb := panel.Heartbeat{Revision: s.st.Revision}
+	hb := panel.Heartbeat{Revision: s.st.Revision, Problems: s.problems()}
 
 	if s.tun != nil {
 		if peers, err := s.tun.Status(); err == nil {

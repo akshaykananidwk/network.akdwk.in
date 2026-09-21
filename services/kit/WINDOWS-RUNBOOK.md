@@ -22,16 +22,22 @@ move on.
 
 | File | What it is |
 |---|---|
-| `akconnect-agent.exe` | The agent, 64-bit Intel/AMD |
-| `arm64\akconnect-agent.exe` | The agent, ARM (Surface Pro X and similar) |
+| `akconnect-setup.exe` | **The installer a customer runs.** Double-click, type the join code, done |
+| `akconnect-agent.exe` | The agent itself, 64-bit Intel/AMD. Stages 1–14 drive this directly |
 | `wintun.dll` | The network driver. **Already here — nothing to download.** |
-| `LICENSE-wintun.txt` | Its licence, which must stay with it |
+| `arm64\` | The same two programs for ARM machines (Surface Pro X and similar) |
+| `LICENSE-wintun.txt` | Wintun's licence, which must stay with it |
 | `collect.ps1` | Collects evidence. Run it when told to |
 | `package-results.ps1` | Zips everything up at the end |
 | `SHA256SUMS` | Checksums |
 
-If this machine is ARM, copy `arm64\akconnect-agent.exe` over the one in the
+If this machine is ARM, copy both files out of `arm64\` over the ones in the
 main folder before you start.
+
+**Stages 1–14 use `akconnect-agent.exe` from a command prompt**, because that
+is how you test the pieces. **Stage 15 uses `akconnect-setup.exe`**, because
+that is what a customer will actually do, and it is the stage that decides
+whether this can be sold. If you are short of time, do Stage 15 first.
 
 ---
 
@@ -634,6 +640,129 @@ Start it again: `Start-Service AKConnectAgent`.
 
 ---
 
+## Stage 15 — The installer · 20 min
+
+**This is the stage that decides whether I can sell this.** Everything before it
+tests the agent; this tests what a customer actually experiences. If any part
+of it needs a command prompt, it has failed.
+
+Use a machine that has never had AKConnect on it, or run Stage 15d first to
+clean one.
+
+### 15a — Install, as a customer would
+
+Copy `akconnect-setup.exe` to the desktop. Double-click it. Nothing else.
+
+**Expect, in order:**
+
+1. A UAC prompt — "Do you want to allow this app to make changes?" — showing
+   **Publisher: Unknown**. Say yes.
+2. A box asking for the join code. Type the one from the panel and press OK.
+3. A box saying it is installed and running, with the agent's status in it.
+
+**Time it.** From double-click to the final box should be under a minute.
+
+**The failures I am looking for, in the order they would hurt:**
+
+- **No dialog appears at all.** Worst case: a customer sees the UAC prompt,
+  says yes, and nothing happens. Tell me immediately.
+- **A black console window flashes up.** It is built not to; if one appears,
+  say at which step.
+- **SmartScreen blocks it** with "Windows protected your PC". Expected while
+  unsigned — click More info → Run anyway, and tell me it happened, because it
+  is the single strongest argument for buying a certificate.
+- **The box asks for anything except the join code.** It must not.
+
+```powershell
+.\collect.ps1 -Stage 15a-after-install
+```
+
+### 15b — Check what it actually did
+
+```powershell
+Get-Service AKConnectAgent | Format-List Name, Status, StartType
+Get-ChildItem "$env:ProgramFiles\AKConnect"
+netsh advfirewall firewall show rule name="AKConnect Agent (WireGuard UDP)"
+Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "*Wintun*" }
+.\collect.ps1 -Stage 15b-installed
+```
+
+**Expect:** the service Running and StartType Automatic; `akconnect-agent.exe`,
+`wintun.dll` and `uninstall.txt` in the folder and nothing else; one firewall
+rule; one adapter.
+
+**The failure I am looking for:** `wintun.dll` missing, or anywhere other than
+beside the agent. It is carried inside the installer precisely so a customer
+never downloads a driver themselves.
+
+### 15c — Approve it, and check it works
+
+Approve the device on the panel, wait 30 seconds, then:
+
+```powershell
+.kconnect-agent.exe status
+ping -n 4 <a peer's overlay address>
+.\collect.ps1 -Stage 15c-connected
+```
+
+**Expect:** a peer, a handshake, and a reply. This is the whole product working
+from a customer's point of view: one file, one code, one approval.
+
+### 15d — Uninstall, and prove nothing is left
+
+```powershell
+.kconnect-setup.exe -uninstall
+```
+
+Double-click works too; the flag is here so you can see it in a transcript.
+
+**Expect:** a UAC prompt, then a box saying it has been removed and listing
+what went. Then check, and this is the part that matters:
+
+```powershell
+Get-Service AKConnectAgent -ErrorAction SilentlyContinue
+Test-Path "$env:ProgramFiles\AKConnect"
+Test-Path "$env:ProgramData\AKConnect"
+netsh advfirewall firewall show rule name="AKConnect Agent (WireGuard UDP)"
+Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "*Wintun*" }
+Get-DnsClientNrptRule | Format-Table -AutoSize Namespace, NameServers, Comment
+Get-PnpDevice -Class Net | Where-Object { $_.FriendlyName -like "*Wintun*" } | Format-Table -AutoSize FriendlyName, Status
+.\collect.ps1 -Stage 15d-after-uninstall
+```
+
+**Expect every one of these to come back empty**: no service, neither folder,
+"No rules match the specified criteria", no adapter, no NRPT rule, no device.
+
+**The failures I am looking for.** Any leftover is a finding, and these three
+are the ones that get noticed months later by somebody else's IT person:
+
+- a **Wintun adapter** still in Network Connections;
+- an **NRPT rule** still in the DNS policy table;
+- the **ProgramData folder**, which holds this device's private key and its
+  token. Leaving a credential on a machine somebody has just removed our
+  software from is not acceptable, and I would treat it as a security finding
+  rather than a tidiness one.
+
+### 15e — Install again over the top
+
+```powershell
+.kconnect-setup.exe
+```
+
+**Expect:** it works. A customer who uninstalled and reinstalled, or who ran
+the installer twice by accident, must not end up with two services, two
+firewall rules or a file it could not replace because it was in use.
+
+```powershell
+Get-Service AKConnectAgent | Format-List Name, Status
+netsh advfirewall firewall show rule name="AKConnect Agent (WireGuard UDP)" | Select-String "Rule Name"
+.\collect.ps1 -Stage 15e-reinstall
+```
+
+**Expect:** one service, one rule.
+
+---
+
 ## Finish — send the results · 2 min
 
 ```powershell
@@ -668,3 +797,4 @@ to include them, and I check for that.
 | 13 | Gateway mode: an agentless NVR reached through a site PC | 20 |
 | 13g | Two LANs both on 192.168.1.0/24, both still reachable | (in 13) |
 | 14 | Names resolve, and the machine's own DNS is untouched | 15 |
+| 15 | **The installer: one file, one code, and a clean uninstall** | 20 |

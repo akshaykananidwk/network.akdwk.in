@@ -7,6 +7,7 @@ namespace App\Services;
 use App\Core\Auth;
 use App\Core\Config;
 use App\Core\DB;
+use App\Core\Logger;
 use App\Core\ValidationException;
 use App\Models\AclRule;
 use App\Models\Device;
@@ -52,6 +53,9 @@ final class NetworkService
                 // created without a search domain would silently have no way
                 // to be addressed by name.
                 'search_domain'        => self::zoneFor($input),
+                'mapped_pool'          => isset($input['mapped_pool']) && trim((string) $input['mapped_pool']) !== ''
+                    ? SubnetMapper::validatePool((string) $input['mapped_pool'], $range['cidr'])
+                    : null,
                 'mtu'                  => (int) ($input['mtu'] ?? Config::get('network.default_mtu', 1280)),
                 'keepalive_seconds'    => (int) ($input['keepalive_seconds'] ?? Config::get('network.default_keepalive', 25)),
                 'auto_assign_ip'       => (int) (bool) ($input['auto_assign_ip'] ?? true),
@@ -89,6 +93,29 @@ final class NetworkService
         foreach (['name', 'description', 'search_domain', 'mtu', 'keepalive_seconds'] as $field) {
             if (array_key_exists($field, $input)) {
                 $changes[$field] = $input[$field];
+            }
+        }
+
+        if (array_key_exists('mapped_pool', $input)) {
+            $pool = trim((string) $input['mapped_pool']);
+            // Empty clears it back to the configured default rather than
+            // storing an empty string, so "leave the box blank" means what an
+            // operator expects.
+            $changes['mapped_pool'] = $pool === ''
+                ? null
+                : SubnetMapper::validatePool($pool, (string) ($input['cidr'] ?? $before['cidr']));
+
+            // Routes already allocated keep the prefixes they have. Changing
+            // the pool decides where the *next* one comes from; re-allocating
+            // the existing ones would move addresses out from under every
+            // agent that has them, which is a bigger surprise than the problem
+            // being fixed.
+            if ($changes['mapped_pool'] !== $before['mapped_pool']) {
+                Logger::notice('network', 'Mapping pool changed; existing routes keep their prefixes', [
+                    'network_id' => $networkId,
+                    'from'       => $before['mapped_pool'],
+                    'to'         => $changes['mapped_pool'],
+                ]);
             }
         }
 

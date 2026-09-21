@@ -167,6 +167,30 @@ final class Device extends Model
     }
 
     /**
+     * Record what a device says it could not do.
+     *
+     * Replaced wholesale on every heartbeat rather than appended to, because
+     * the agent reports its *current* problems: one that has been fixed stops
+     * being sent, and a list that only grew would need somebody to clear it by
+     * hand.
+     *
+     * @param list<array{code: string, detail: string}> $problems
+     */
+    public static function recordProblems(int $deviceId, array $problems): void
+    {
+        DB::execute(
+            'UPDATE ' . self::tableName() . '
+             SET problems_json = :p, problems_at = :at
+             WHERE id = :id',
+            [
+                'p'  => $problems === [] ? null : json_encode(array_values($problems)),
+                'at' => $problems === [] ? null : gmdate('Y-m-d H:i:s'),
+                'id' => $deviceId,
+            ]
+        );
+    }
+
+    /**
      * Every authorized device in a network, including the one asking.
      *
      * peersFor() deliberately excludes the caller, because a device is not its

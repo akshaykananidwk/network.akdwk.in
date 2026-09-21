@@ -203,6 +203,21 @@ type Heartbeat struct {
 	RXDelta        int64  `json:"rx_delta,omitempty"`
 	TXDelta        int64  `json:"tx_delta,omitempty"`
 	Revision       int    `json:"revision,omitempty"`
+	// Problems are things this device could not do and cannot fix by itself —
+	// an NRPT rule Windows refused, a prefix that clashed with a network the
+	// machine is already on. They go here because the alternative is a line in
+	// a log file on the customer's machine, which nobody reads until they
+	// telephone.
+	Problems []Problem `json:"problems,omitempty"`
+}
+
+// Problem is one thing that needs a person.
+type Problem struct {
+	// Code is a stable identifier the panel can key messages and help off.
+	Code string `json:"code"`
+	// Detail is a sentence written for whoever has to act on it, naming what
+	// clashed or what refused.
+	Detail string `json:"detail"`
 }
 
 // SendHeartbeat reports liveness and counters, and is how the panel learns the

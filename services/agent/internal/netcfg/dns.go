@@ -24,9 +24,17 @@ import (
 //   - **NRPT** on Windows does the same thing, by namespace, and is what
 //     Windows' own VPN clients use for split DNS.
 //
-// Where neither is available the honest answer is to configure nothing and say
-// so. Names will not resolve; addresses still work; the customer's DNS is
-// untouched. That is a worse feature than the alternative is a bug.
+// On Linux, where neither is available, the hosts file carries it: it is
+// consulted before DNS, affects no other name, and touches no DNS
+// configuration at all.
+//
+// **On Windows there is no fallback**, and that is deliberate. Defender
+// reports hosts-file modification as `SettingsModifier:Win32/HostsFileHijack`
+// and the antivirus products our customers run do the same. A fallback that
+// worked perfectly would still put an alert on a customer's screen on install
+// day, and one support call per install costs more than the feature is worth.
+// Where NRPT refuses, names do not resolve, the agent says so, and the panel
+// shows it.
 
 // DNSPlan is what to point where.
 type DNSPlan struct {
@@ -51,6 +59,10 @@ type DNSResult struct {
 	// Mechanism names what did it — "systemd-resolved", "NRPT" — or, when
 	// nothing did, why not.
 	Mechanism string
+	// Problem is a sentence for the panel, set when something went wrong that
+	// a person has to fix. Empty when nothing did, including when the
+	// mechanism simply is not present and the fallback took over.
+	Problem string
 }
 
 // ApplyDNS routes one zone to our resolver, or reports that it could not.

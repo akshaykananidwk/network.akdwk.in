@@ -38,7 +38,9 @@ func applyPlan(ifaceName string, plan *Plan) ([]netip.Prefix, error) {
 	installed := make([]netip.Prefix, 0, len(plan.Routes))
 
 	for _, route := range plan.Routes {
-		if route != plan.Overlay && occupiedElsewhere(ifaceName, route) {
+		// The overlay too — see the note in apply_linux.go. A machine already
+		// on the range an overlay uses must keep it.
+		if occupiedElsewhere(ifaceName, route) {
 			refused = append(refused, route)
 			continue
 		}

@@ -181,6 +181,107 @@ scenario_gateway_clash() {
     else
         record "clash/overlay" FAIL "refusing one route took the whole tunnel down"
     fi
+
+    # And the panel has to hear about it. A refusal that only reaches a log
+    # file on the customer's machine is one nobody acts on, because the person
+    # who can change the mapping pool never sees it.
+    local deadline reported
+    deadline=$(( $(date +%s) + 45 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        reported="$(php "$LAB_DIR/lab-setup.php" problems "$UID_ALPHA" 2>/dev/null)"
+        [[ "$reported" == *"route.clash"* ]] && break
+        sleep 3
+    done
+
+    if [[ "$reported" == *"route.clash"* ]]; then
+        record "clash/reported" PASS "the panel shows the clash on the device: ${reported%%|*}"
+    else
+        record "clash/reported" FAIL "the agent refused the route and the panel was never told"
+    fi
+}
+
+# §16 and the mapping pool: the pool itself can clash.
+#
+# 10.128.0.0/10 is the half of 10/8 almost nobody numbers a LAN out of, and
+# "almost nobody" is not "nobody" — plenty of offices, and most ISP-managed
+# connections in this market, use 10.x internally. A machine already on the
+# range the *overlay* uses is the worst version of it: taking that over would
+# cut the machine off from its own file server to join a network.
+#
+# The agent has to refuse, name what clashed, and tell the panel.
+scenario_overlay_clash() {
+    step "overlay — a network CIDR that lands on the machine's own network"
+    fixture nat
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 60; then
+        record "oclash/tunnel" FAIL "no tunnel to start from"
+        return
+    fi
+
+    # Polled, not read once: a ping succeeds as soon as the tunnel is up, and
+    # the agent writes its runtime file on its own loop a moment later.
+    # Reading too early gets nothing and reports it as a product failure.
+    local overlay deadline
+    overlay=""
+    deadline=$(( $(date +%s) + 45 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        overlay="$(lab::runtime alpha | jq -r '.overlay_cidr // empty')"
+        [ -n "$overlay" ] && break
+        sleep 2
+    done
+
+    if [ -z "$overlay" ]; then
+        record "oclash/setup" FAIL "the agent never reported which overlay CIDR it installed"
+        return
+    fi
+
+    # Give alpha a second network card on exactly the overlay's range, the way
+    # an office already numbering out of 10.x would have.
+    local office
+    office="$(awk -F/ '{split($1,o,"."); printf "%s.%s.%s.9/%s", o[1], o[2], o[3], $2}' <<<"$overlay")"
+
+    if ! ip netns exec alpha ip link add name lan-office type veth peer name lan-office-far \
+        || ! ip netns exec alpha ip address add "$office" dev lan-office \
+        || ! ip netns exec alpha ip link set dev lan-office up \
+        || ! ip netns exec alpha ip link set dev lan-office-far up; then
+        record "oclash/setup" FAIL "could not put alpha's own network on $overlay"
+        return
+    fi
+    record "oclash/setup" PASS "alpha's own network is now $overlay, the same range as the overlay"
+
+    # Restart the agent so it applies its configuration against the new state.
+    lab::down_agents
+    lab::up alpha
+    lab::up beta
+    sleep 20
+
+    local route
+    route="$(ip netns exec alpha ip -o route show exact "$overlay")"
+    if [[ "$route" == *"dev lan-office"* ]]; then
+        record "oclash/local-kept" PASS "the machine's own $overlay is still on its own adapter"
+    else
+        record "oclash/local-kept" FAIL "the overlay took over the machine's own network: ${route:-none}"
+    fi
+
+    if grep -q "is not installed: this machine is already on that network" "$LOGS/alpha-up.log" 2>/dev/null; then
+        record "oclash/refused" PASS "the agent refused the overlay route and named the clash"
+    else
+        record "oclash/refused" FAIL "the agent did not report refusing the overlay"
+    fi
+
+    local deadline reported
+    deadline=$(( $(date +%s) + 60 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        reported="$(php "$LAB_DIR/lab-setup.php" problems "$UID_ALPHA" 2>/dev/null)"
+        [[ "$reported" == *"overlay.clash"* ]] && break
+        sleep 3
+    done
+
+    if [[ "$reported" == *"overlay.clash"* ]]; then
+        record "oclash/reported" PASS "the panel shows it on the device, with the range named"
+    else
+        record "oclash/reported" FAIL "the agent refused the overlay and the panel was never told"
+    fi
 }
 
 # §16–17 and §36: the gateway enforces the rule, not just the device the rule

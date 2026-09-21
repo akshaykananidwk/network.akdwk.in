@@ -163,6 +163,49 @@ final class AgentController
      * Byte counts are deltas, applied in place, so two heartbeats racing
      * cannot lose one another's increment.
      */
+    /**
+     * Problems, as far as the panel is willing to believe them.
+     *
+     * Five at most, short, and with the code restricted to the shapes the
+     * panel knows how to explain. An agent is not a trusted narrator: this
+     * text ends up on a page an administrator reads, so its length and
+     * character set are ours to decide, not the reporter's.
+     *
+     * @return list<array{code: string, detail: string}>
+     */
+    private static function sanitiseProblems(mixed $raw): array
+    {
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        $out = [];
+        foreach (array_slice($raw, 0, 5) as $problem) {
+            if (!is_array($problem)) {
+                continue;
+            }
+
+            $code = (string) ($problem['code'] ?? '');
+            if (preg_match('/^[a-z][a-z0-9_.]{0,39}$/', $code) !== 1) {
+                continue;
+            }
+
+            $detail = trim((string) ($problem['detail'] ?? ''));
+            // Control characters stripped rather than escaped: there is no
+            // legitimate reason for one here, and the view escapes on output
+            // anyway. Belt and braces on the one field an agent writes that a
+            // person reads.
+            $detail = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $detail) ?? '';
+            if ($detail === '') {
+                continue;
+            }
+
+            $out[] = ['code' => $code, 'detail' => mb_substr($detail, 0, 400)];
+        }
+
+        return $out;
+    }
+
     public function heartbeat(Request $request): Response
     {
         $device = $request->deviceContext();
@@ -191,6 +234,12 @@ final class AgentController
             $txDelta,
             isset($input['agent_version']) ? (string) $input['agent_version'] : null
         );
+
+        // What the device could not do. Bounded and sanitised: this arrives
+        // from an agent on hardware the customer owns, so it is treated as a
+        // claim about that machine and nothing more — it is displayed, never
+        // acted on.
+        Device::recordProblems((int) $device['id'], self::sanitiseProblems($input['problems'] ?? null));
 
         // Only relayed traffic is metered: direct peer-to-peer bytes never
         // touch our infrastructure, so billing for them would be dishonest.

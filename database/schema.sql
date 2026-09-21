@@ -143,6 +143,10 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__networks` (
   `network_uid` CHAR(16) NOT NULL,
   `description` VARCHAR(255) NULL,
   `cidr` VARCHAR(20) NOT NULL,
+  -- Where this network's virtual prefixes come from. NULL uses the
+  -- configured default; a customer already numbering out of it needs a way
+  -- out that does not move every other customer with them.
+  `mapped_pool` VARCHAR(20) NULL DEFAULT NULL,
   `dns_json` JSON NULL,
   `search_domain` VARCHAR(190) NULL,
   `mtu` SMALLINT UNSIGNED NOT NULL DEFAULT 1280,
@@ -214,6 +218,12 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__devices` (
   `latency_ms` INT NULL,
   `tags_json` JSON NULL,
   `is_gateway` TINYINT(1) NOT NULL DEFAULT 0,
+  -- What this device could not do, reported where somebody will see it: an
+  -- NRPT rule Windows refused, a prefix that clashed with a network the
+  -- machine was already on. Neither is something the agent can fix, and a line
+  -- in a log file on the customer's machine is the same as no report at all.
+  `problems_json` JSON NULL DEFAULT NULL,
+  `problems_at` DATETIME NULL DEFAULT NULL,
   `token_hash` CHAR(64) NULL,
   `token_rotated_at` DATETIME NULL,
   `config_revision` BIGINT UNSIGNED NOT NULL DEFAULT 0,

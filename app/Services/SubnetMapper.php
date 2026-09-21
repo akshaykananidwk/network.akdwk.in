@@ -56,6 +56,7 @@ final class SubnetMapper
      */
     public static function allocate(int $networkId, string $realCidr): string
     {
+        $network = Network::find($networkId);
         [$realAddr, $bits] = self::split($realCidr);
         if ($realAddr === null) {
             throw new ValidationException([
@@ -63,7 +64,7 @@ final class SubnetMapper
             ]);
         }
 
-        $pool = self::pool();
+        $pool = self::pool($network);
         [$poolAddr, $poolBits] = self::split($pool);
 
         if ($bits < $poolBits) {
@@ -129,17 +130,101 @@ final class SubnetMapper
         return long2ip(($mapped & $mask) | $host) . '/' . $addrBits;
     }
 
-    /** The configured pool, validated. */
-    public static function pool(): string
+    /**
+     * The pool a network draws from: its own if it has one, else the
+     * configured default.
+     *
+     * Per network rather than global because plenty of offices — and most
+     * ISP-managed connections in this market — number out of 10.x. A customer
+     * who collides with the default needs a way out that does not move every
+     * other customer with them.
+     *
+     * @param array<string,mixed>|null $network
+     */
+    public static function pool(?array $network = null): string
     {
-        $pool = trim((string) Config::get('network.mapped_pool', self::DEFAULT_POOL));
-        [$addr, $bits] = self::split($pool);
+        $candidates = [];
+        if ($network !== null && !empty($network['mapped_pool'])) {
+            $candidates[] = (string) $network['mapped_pool'];
+        }
+        $candidates[] = (string) Config::get('network.mapped_pool', self::DEFAULT_POOL);
+        $candidates[] = self::DEFAULT_POOL;
 
-        if ($addr === null || $bits < self::MIN_PREFIX_BITS || $bits > 30) {
-            return self::DEFAULT_POOL;
+        foreach ($candidates as $candidate) {
+            if (self::usablePool(trim($candidate))) {
+                return trim($candidate);
+            }
+        }
+
+        return self::DEFAULT_POOL;
+    }
+
+    /**
+     * Validate a pool an operator typed.
+     *
+     * @throws ValidationException
+     */
+    public static function validatePool(string $pool, string $networkCidr): string
+    {
+        $pool = trim($pool);
+
+        if (!self::usablePool($pool)) {
+            throw new ValidationException([
+                'mapped_pool' => 'A mapping pool must be a private IPv4 range no wider than a /8 '
+                    . 'and no narrower than a /24, e.g. 10.128.0.0/10 or 172.20.0.0/14.',
+            ]);
+        }
+
+        // A pool overlapping the network's own range would hand out virtual
+        // prefixes that collide with the overlay, which every agent would then
+        // refuse — a setting that breaks the network it is set on.
+        if ($networkCidr !== '' && AclRouteFilters::overlap($pool, $networkCidr)) {
+            throw new ValidationException([
+                'mapped_pool' => sprintf(
+                    '%s overlaps this network\'s own range %s. Virtual prefixes drawn from it would '
+                        . 'collide with the overlay itself.',
+                    $pool,
+                    $networkCidr
+                ),
+            ]);
         }
 
         return $pool;
+    }
+
+    private static function usablePool(string $pool): bool
+    {
+        [$addr, $bits] = self::split($pool);
+
+        if ($addr === null || $bits < self::MIN_PREFIX_BITS || $bits > 24) {
+            return false;
+        }
+
+        // Private space only. A pool out of public address space would have
+        // agents routing somebody else's internet into the tunnel.
+        return self::overlapsAny($pool, ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']);
+    }
+
+    /** @param list<string> $ranges */
+    private static function overlapsAny(string $cidr, array $ranges): bool
+    {
+        [$addr, $bits] = self::split($cidr);
+        if ($addr === null) {
+            return false;
+        }
+
+        foreach ($ranges as $range) {
+            [$rangeAddr, $rangeBits] = self::split($range);
+            if ($rangeAddr === null || $bits < $rangeBits) {
+                // Wider than the private range, so it reaches outside it.
+                continue;
+            }
+            if (AclRouteFilters::overlap($cidr, $range)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

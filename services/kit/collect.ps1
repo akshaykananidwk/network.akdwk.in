@@ -293,6 +293,41 @@ Check "SmartScreen policy" {
         Select-Object EnableSmartScreen | Format-List
 }
 
+# ---- what the installer put here, and what an uninstall must take away -------------
+#
+# Stage 15 is the one that decides whether this can be sold: one file, one join
+# code, and an uninstall that leaves nothing. The leftovers people notice
+# months later are not files — a service registration, a firewall rule, a DNS
+# policy rule, and a network adapter a driver created.
+Check "the program folder" {
+    $dir = Join-Path $env:ProgramFiles "AKConnect"
+    if (Test-Path $dir) { Get-ChildItem $dir -Recurse | Format-Table -AutoSize Name, Length, LastWriteTime }
+    else { "not present: $dir" }
+}
+Check "the data folder, which holds this device's key and token" {
+    if (Test-Path $DataDir) { Get-ChildItem $DataDir -Recurse -Force | Format-Table -AutoSize Name, Length }
+    else { "not present: $DataDir" }
+}
+Check "the service registration" {
+    Get-Service AKConnectAgent -ErrorAction SilentlyContinue | Format-List Name, Status, StartType
+}
+Check "the service's binary path, which must point inside Program Files" {
+    Get-CimInstance Win32_Service -Filter "Name='AKConnectAgent'" -ErrorAction SilentlyContinue |
+        Format-List Name, PathName, StartMode, State
+}
+Check "network devices Windows knows about, Wintun included" {
+    Get-PnpDevice -Class Net -ErrorAction SilentlyContinue |
+        Where-Object { $_.FriendlyName -like "*Wintun*" -or $_.FriendlyName -like "*AKConnect*" } |
+        Format-Table -AutoSize FriendlyName, Status, InstanceId
+}
+Check "SmartScreen and Defender on the installer itself" {
+    $setup = Join-Path $PSScriptRoot "akconnect-setup.exe"
+    if (Test-Path $setup) {
+        Get-AuthenticodeSignature $setup | Format-List Status, StatusMessage
+        Get-Item $setup | Select-Object -ExpandProperty Length
+    } else { "akconnect-setup.exe is not beside this script" }
+}
+
 # ---- logs ---------------------------------------------------------------------------
 Check "agent event log (last 40)" {
     Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'AKConnectAgent' } -MaxEvents 40 -ErrorAction SilentlyContinue |

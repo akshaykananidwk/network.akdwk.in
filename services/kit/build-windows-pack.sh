@@ -55,6 +55,50 @@ cp "$TMP/wintun/LICENSE.txt"          "$STAGE/LICENSE-wintun.txt"
 echo "$WINTUN_AMD64_SHA  $STAGE/wintun.dll"       | sha256sum -c - >/dev/null || die "amd64 wintun.dll checksum mismatch"
 echo "$WINTUN_ARM64_SHA  $STAGE/arm64/wintun.dll" | sha256sum -c - >/dev/null || die "arm64 wintun.dll checksum mismatch"
 
+echo "  building the installer"
+#
+# The payload goes into the source tree, because Go embeds at compile time and
+# there is no way to hand it a file from outside. The placeholders are put back
+# afterwards so a build never leaves real binaries committed by accident.
+PAYLOAD="$ROOT/services/agent/cmd/akconnect-setup/payload"
+restore_payload() {
+    printf 'AKCONNECT-PLACEHOLDER-NOT-A-REAL-BINARY\n' > "$PAYLOAD/akconnect-agent.exe"
+    printf 'AKCONNECT-PLACEHOLDER-NOT-A-REAL-BINARY\n' > "$PAYLOAD/wintun.dll"
+}
+trap 'rm -rf "$TMP"; restore_payload' EXIT
+
+cp "$STAGE/akconnect-agent.exe" "$PAYLOAD/akconnect-agent.exe"
+cp "$STAGE/wintun.dll"          "$PAYLOAD/wintun.dll"
+
+(
+    cd "$ROOT/services/agent"
+    # windowsgui: double-clicking the installer must not open a console
+    # window. Everything a customer sees is a dialog.
+    GOTOOLCHAIN=local GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+        go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$VERSION" \
+        -o "$STAGE/akconnect-setup.exe" ./cmd/akconnect-setup
+) || die "could not build the installer"
+
+cp "$STAGE/arm64/akconnect-agent.exe" "$PAYLOAD/akconnect-agent.exe"
+cp "$STAGE/arm64/wintun.dll"          "$PAYLOAD/wintun.dll"
+
+(
+    cd "$ROOT/services/agent"
+    GOTOOLCHAIN=local GOOS=windows GOARCH=arm64 CGO_ENABLED=0 \
+        go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$VERSION" \
+        -o "$STAGE/arm64/akconnect-setup.exe" ./cmd/akconnect-setup
+) || die "could not build the arm64 installer"
+
+restore_payload
+
+# The installer carries the agent inside it, so a build where the embedding
+# silently did nothing would produce a file a few hundred kilobytes long that
+# fails on a customer's machine. The agent alone is several megabytes.
+setup_size="$(stat -c%s "$STAGE/akconnect-setup.exe")"
+agent_size="$(stat -c%s "$STAGE/akconnect-agent.exe")"
+[ "$setup_size" -gt "$agent_size" ] \
+    || die "akconnect-setup.exe ($setup_size bytes) is not larger than the agent it should contain ($agent_size)"
+
 echo "  adding the runbook and scripts"
 cp "$ROOT/services/kit/WINDOWS-RUNBOOK.md"  "$STAGE/RUNBOOK.md"
 cp "$ROOT/services/kit/collect.ps1"         "$STAGE/"

@@ -35,10 +35,17 @@ func applyPlan(ifaceName string, plan *Plan) ([]netip.Prefix, error) {
 	installed := make([]netip.Prefix, 0, len(plan.Routes))
 
 	for _, route := range plan.Routes {
-		// The overlay is not negotiable: without it the device is not on the
-		// network. An advertised LAN is, and loses to a LAN the machine is
-		// already sitting on.
-		if route != plan.Overlay && occupiedElsewhere(ifaceName, route) {
+		// Every prefix, the overlay included.
+		//
+		// An earlier version exempted the overlay as "not negotiable: without
+		// it the device is not on the network". That is true and it is the
+		// wrong conclusion. A customer whose office already runs 10.50.0.0/16
+		// would have had the agent take that range over, cutting the machine
+		// off from its own file server to join an overlay — and the
+		// alternative, not joining, is the one a person would choose every
+		// time. Refusing is visible and recoverable; taking over a working
+		// network is neither.
+		if occupiedElsewhere(ifaceName, route) {
 			refused = append(refused, route)
 			continue
 		}

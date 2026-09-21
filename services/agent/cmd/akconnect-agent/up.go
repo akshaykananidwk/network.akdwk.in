@@ -76,10 +76,15 @@ type session struct {
 	// is pointing at them" rather than leaving a technician to guess.
 	dnsRoutedBy string
 	dnsNote     string
+	dnsProblem  string
 	// dnsRecords fingerprints the record set, so a device renamed in the panel
 	// reaches the hosts file rather than waiting for the zone itself to change.
 	dnsRecords string
-	discovery  *discovery.Client
+	// refused is every prefix this device would not install because the
+	// machine is already on that network, kept so each heartbeat repeats it:
+	// a problem reported once and then forgotten is a problem nobody fixes.
+	refused   []netip.Prefix
+	discovery *discovery.Client
 	// peerMeta maps a peer's hex public key to the names the panel gave it,
 	// which the WireGuard device itself does not carry.
 	peerMeta  map[string]peerNames
@@ -207,14 +212,24 @@ func (s *session) applyConfig(ctx context.Context, priv wgPrivate, cfg *panel.Co
 	if err != nil {
 		return fmt.Errorf("configuring the interface: %w", err)
 	}
+	s.refused = refused
 	for _, prefix := range refused {
-		// Loud, because the customer will experience it as "the camera at the
-		// hotel does not open" and nothing in the panel will look wrong. The
-		// answer is to renumber one of the two LANs, and nobody can be told
-		// that unless the agent says which prefix clashed.
+		// Loud, and repeated to the panel on every heartbeat. The customer
+		// experiences this as "the camera at the hotel does not open" and
+		// nothing in the panel would look wrong; the answer is to change the
+		// network's CIDR or its mapping pool, and nobody can do that unless
+		// they are told which prefix clashed.
+		if prefix == plan.Overlay {
+			s.logf("the overlay %s is not installed: this machine is already on that network. "+
+				"Nothing on this network is reachable from here until the network's CIDR is changed",
+				prefix)
+
+			continue
+		}
+
 		s.logf("route %s not installed: this machine is already on that network. "+
-			"Devices in the remote %s are unreachable from here until one side is renumbered",
-			prefix, prefix)
+			"Devices in that range are unreachable from here until the network's mapping pool is changed",
+			prefix)
 	}
 
 	// Subnet mapping before the gateway's own forwarding rules, and before the

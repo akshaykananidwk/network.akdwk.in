@@ -18,7 +18,7 @@ final class Network extends Model
     protected static array $jsonColumns = ['dns_json'];
     protected static array $sortable = ['id', 'name', 'cidr', 'status', 'created_at'];
     protected static array $fillable = [
-        'tenant_id', 'name', 'network_uid', 'description', 'cidr', 'dns_json',
+        'tenant_id', 'name', 'network_uid', 'description', 'cidr', 'mapped_pool', 'dns_json',
         'search_domain', 'mtu', 'keepalive_seconds', 'auto_assign_ip',
         'auto_approve_devices', 'private', 'acl_default_action', 'status', 'created_by',
     ];

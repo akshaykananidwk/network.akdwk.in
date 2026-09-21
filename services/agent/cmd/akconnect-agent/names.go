@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/dnsd"
@@ -78,14 +79,17 @@ func (s *session) applyNames(ctx context.Context, cfg *panel.Config) {
 	})
 	s.dnsRoutedBy = ""
 	s.dnsNote = result.Mechanism
+	s.dnsProblem = result.Problem
 
 	switch {
 	case err != nil:
 		s.dnsNote = err.Error()
+		s.dnsProblem = err.Error()
 		s.logf("names: could not route %s to the resolver: %v", zone.Suffix, err)
 	case result.Applied:
 		s.dnsRoutedBy = result.Mechanism
 		s.dnsNote = ""
+		s.dnsProblem = ""
 		s.logf("names: %d name(s) under %s resolve through %s (%s); every other name is untouched",
 			zone.Len(), zone.Suffix, s.names.Addr(), result.Mechanism)
 	default:
@@ -117,6 +121,7 @@ func (s *session) stopNames() {
 	s.dnsZone = ""
 	s.dnsRoutedBy = ""
 	s.dnsNote = ""
+	s.dnsProblem = ""
 }
 
 // buildZone compiles the panel's record list.
@@ -162,4 +167,39 @@ func zoneFingerprint(cfg *panel.Config) string {
 	}
 
 	return sb.String()
+}
+
+// problems is what this device cannot do and cannot fix by itself, for the
+// heartbeat.
+//
+// Repeated on every heartbeat rather than sent once: a problem reported at the
+// moment it happened and never again is one that disappears from the panel the
+// first time a row is updated, and these are exactly the problems somebody
+// only looks for a week later when a customer complains.
+func (s *session) problems() []panel.Problem {
+	var out []panel.Problem
+
+	if s.dnsProblem != "" {
+		out = append(out, panel.Problem{Code: "dns.not_routed", Detail: s.dnsProblem})
+	}
+
+	for _, prefix := range s.refused {
+		code := "route.clash"
+		detail := fmt.Sprintf(
+			"This machine is already on %s, so the route for it was not installed and nothing in "+
+				"that range is reachable from here. Change the network's mapping pool to a range "+
+				"this site does not use.", prefix)
+
+		if s.plan != nil && prefix == s.plan.Overlay {
+			code = "overlay.clash"
+			detail = fmt.Sprintf(
+				"This machine is already on %s, which is the network's own range, so the overlay "+
+					"route was not installed and no peer is reachable from here. Change the "+
+					"network's CIDR to a range this site does not use.", prefix)
+		}
+
+		out = append(out, panel.Problem{Code: code, Detail: detail})
+	}
+
+	return out
 }

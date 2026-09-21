@@ -9,6 +9,10 @@
 #   ./run-all.sh cone relay   run only the named scenarios
 #   ./run-all.sh --list       show the scenario names
 #
+# The "resolved" scenario needs systemd-resolved on the host, because it proves
+# the split-DNS path most of this product's Linux machines will use. Run
+# ./setup-resolved.sh once if this machine does not have it.
+#
 # Logs, binaries and agent state land in services/lab/.run, which is
 # gitignored and rebuilt each run.
 set -uo pipefail
@@ -172,12 +176,14 @@ declare -A SCENARIOS=(
     [enrol-throttle]=scenario_enrol_throttle
     [gateway]=scenario_gateway
     [gateway-clash]=scenario_gateway_clash
+    [overlay-clash]=scenario_overlay_clash
     [gateway-tamper]=scenario_gateway_tamper
     [subnet-mapping]=scenario_subnet_mapping
     [dns]=scenario_dns
+    [resolved]=scenario_resolved
     [revocation]=scenario_revocation
 )
-ORDER=(cone relay cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash gateway-tamper subnet-mapping dns revocation)
+ORDER=(cone relay cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash overlay-clash gateway-tamper subnet-mapping dns resolved revocation)
 
 if [ "${1:-}" = "--list" ]; then
     printf '%s\n' "${ORDER[@]}"

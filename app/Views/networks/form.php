@@ -71,6 +71,31 @@ $dns = $isEdit && is_array($network['dns_json'] ?? null) ? implode(', ', $networ
             <input type="text" id="search_domain" name="search_domain" maxlength="190"
                    value="<?= e(old('search_domain', (string) ($network['search_domain'] ?? ''))) ?>"
                    placeholder="office.internal">
+            <p class="field-hint">
+                Devices answer to <code>&lt;name&gt;.&lt;this domain&gt;</code>. It must end in
+                <code>.internal</code>, which is reserved for private use &mdash; so a name here can
+                never collide with a real one, and this network's agents can never be made
+                authoritative for a domain somebody else owns. Leave it blank and one is made from
+                the network's name.
+            </p>
+            <?php if (field_error('search_domain') !== ''): ?><p class="field-error"><?= e(field_error('search_domain')) ?></p><?php endif; ?>
+        </div>
+
+        <div class="field">
+            <label for="mapped_pool">Virtual prefix pool</label>
+            <input type="text" id="mapped_pool" name="mapped_pool" maxlength="20"
+                   value="<?= e(old('mapped_pool', (string) ($network['mapped_pool'] ?? ''))) ?>"
+                   placeholder="<?= e(\App\Services\SubnetMapper::DEFAULT_POOL) ?>">
+            <p class="field-hint">
+                Where the addresses come from that this network uses for advertised LANs &mdash; a
+                hotel's <code>192.168.1.0/24</code> becomes a range out of this pool. Leave it blank
+                to use <code><?= e(\App\Services\SubnetMapper::DEFAULT_POOL) ?></code>.
+                <strong>Change it if a site already uses that range internally</strong>, which many
+                offices and most ISP-managed connections do: an agent on such a machine refuses the
+                clashing route rather than taking over a network the machine is already on, and says
+                so on the device's page. Existing routes keep the prefixes they were given.
+            </p>
+            <?php if (field_error('mapped_pool') !== ''): ?><p class="field-error"><?= e(field_error('mapped_pool')) ?></p><?php endif; ?>
         </div>
 
         <fieldset class="field">

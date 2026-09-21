@@ -40,7 +40,8 @@ teardown() {
     local link
     for link in br-alpha br-beta br-natgw-a br-natgw-b \
                 veth-alpha veth-beta wan-natgw-a wan-natgw-b \
-                lan-natgw-a lan-natgw-b lan-beta veth-nvr lan-alpha veth-office; do
+                lan-natgw-a lan-natgw-b lan-beta veth-nvr lan-alpha veth-office \
+                lan-local lan-local-far lan-office lan-office-far; do
         ip link del "$link" 2>/dev/null || true
     done
 
