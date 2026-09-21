@@ -228,9 +228,23 @@ $base = url('networks/' . $network['id']);
                 the device; the gateway translates.
             </p>
 
+            <form method="post" action="<?= e(url('networks/' . $network['id'] . '/routes')) ?>" class="px-4 pb-4 form-inline">
+                <?= csrf_field() ?>
+                <label for="destination_cidr">Advertise a LAN</label>
+                <input type="text" id="destination_cidr" name="destination_cidr" placeholder="192.168.1.0/24" required>
+                <label for="via_device_id">through</label>
+                <select id="via_device_id" name="via_device_id" required>
+                    <option value="">choose a device at that site…</option>
+                    <?php foreach ($gateways as $gateway): ?>
+                        <option value="<?= e($gateway['id']) ?>"><?= e($gateway['name']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+                <button type="submit" class="btn btn-primary">Advertise</button>
+            </form>
+
             <?php if ($routes === []): ?>
                 <?= \App\Core\View::partial('partials.empty', [
-                    'icon' => '↳', 'title' => 'No routes', 'message' => 'Mark a device as a gateway to advertise its LAN.',
+                    'icon' => '↳', 'title' => 'No routes', 'message' => 'Advertise a LAN above to reach machines that cannot run the agent.',
                 ]) ?>
             <?php else: ?>
                 <div class="table-wrap">
@@ -265,11 +279,55 @@ $base = url('networks/' . $network['id']);
                                 <td>
                                     <?php if ((int) $route['approved'] !== 1): ?>
                                         <span class="chip chip-warning">awaiting approval</span>
+                                        <form method="post" action="<?= e(url('networks/' . $network['id'] . '/routes/' . $route['id'] . '/approve')) ?>" class="inline">
+                                            <?= csrf_field() ?>
+                                            <button type="submit" class="btn btn-sm btn-primary">Approve</button>
+                                        </form>
                                     <?php elseif ((int) $route['enabled'] === 1): ?>
                                         <span class="chip chip-online">active</span>
                                     <?php else: ?>
                                         <span class="chip">disabled</span>
                                     <?php endif; ?>
+                                    <form method="post" action="<?= e(url('networks/' . $network['id'] . '/routes/' . $route['id'] . '/withdraw')) ?>" class="inline">
+                                        <?= csrf_field() ?>
+                                        <button type="submit" class="btn btn-sm btn-danger">Withdraw</button>
+                                    </form>
+                                </td>
+                            </tr>
+                            <tr class="row-detail">
+                                <td colspan="5">
+                                    <p class="text-muted small mb-2">
+                                        Machines at this site. Give each one the address printed on it — the
+                                        overlay address and the name are worked out from that.
+                                    </p>
+                                    <?php foreach ($hosts[(int) $route['id']] ?? [] as $host): ?>
+                                        <?php
+                                            $mapped = \App\Services\SubnetMapper::mapAddress(
+                                                (string) $host['address'],
+                                                (string) $route['destination_cidr'],
+                                                (string) ($route['mapped_cidr'] ?: $route['destination_cidr'])
+                                            );
+                                            $site = \App\Services\DnsZone::slug((string) ($route['via_device_name'] ?? ''));
+                                        ?>
+                                        <div class="host-row">
+                                            <code><?= e($host['address']) ?></code>
+                                            <span class="text-muted">→</span>
+                                            <code><?= e($mapped === null ? '—' : explode('/', $mapped)[0]) ?></code>
+                                            <?php if ($site !== ''): ?>
+                                                <code class="chip"><?= e(\App\Services\DnsZone::slug((string) $host['label']) . '.' . $site . '.' . $zone) ?></code>
+                                            <?php endif; ?>
+                                            <form method="post" action="<?= e(url('networks/' . $network['id'] . '/hosts/' . $host['id'] . '/delete')) ?>" class="inline">
+                                                <?= csrf_field() ?>
+                                                <button type="submit" class="btn btn-sm">Remove</button>
+                                            </form>
+                                        </div>
+                                    <?php endforeach; ?>
+                                    <form method="post" action="<?= e(url('networks/' . $network['id'] . '/routes/' . $route['id'] . '/hosts')) ?>" class="form-inline">
+                                        <?= csrf_field() ?>
+                                        <input type="text" name="label" placeholder="nvr" maxlength="63" required>
+                                        <input type="text" name="address" placeholder="192.168.1.50" required>
+                                        <button type="submit" class="btn btn-sm">Name it</button>
+                                    </form>
                                 </td>
                             </tr>
                         <?php endforeach; ?>

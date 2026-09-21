@@ -155,3 +155,55 @@ function labPool(): int
 
     return 0;
 }
+
+/** Name a machine behind a gateway, the way an operator would. */
+function labHost(array $args): int
+{
+    $routeId = (int) ($args[0] ?? 0);
+    $label = (string) ($args[1] ?? '');
+    $address = (string) ($args[2] ?? '');
+
+    if ($routeId <= 0 || $label === '' || $address === '') {
+        return fail('usage: host <route-id> <label> <address>');
+    }
+
+    $route = TenantScope::acrossAllTenants(
+        'lab route lookup',
+        static fn (): ?array => \App\Models\NetworkRoute::find($routeId)
+    );
+    if ($route === null) {
+        return fail("route {$routeId} not found");
+    }
+
+    $host = TenantScope::asTenant(
+        (int) $route['tenant_id'],
+        static fn (): array => \App\Services\RouteHostService::add($routeId, [
+            'label'   => $label,
+            'address' => $address,
+        ])
+    );
+
+    printf("HOST=%d\n", (int) $host['id']);
+
+    return 0;
+}
+
+/** Print a network's DNS zone, which the panel derives. */
+function labZone(int $networkId): int
+{
+    if ($networkId <= 0) {
+        return fail('usage: zone <network-id>');
+    }
+
+    $network = TenantScope::acrossAllTenants(
+        'lab network lookup',
+        static fn (): ?array => \App\Models\Network::find($networkId)
+    );
+    if ($network === null) {
+        return fail("network {$networkId} not found");
+    }
+
+    printf("%s\n", \App\Services\DnsZone::forNetwork($network));
+
+    return 0;
+}

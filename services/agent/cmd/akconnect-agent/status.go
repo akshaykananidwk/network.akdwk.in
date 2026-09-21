@@ -100,6 +100,20 @@ func printRuntime(stateStore *state.Store) error {
 	fmt.Printf("  Coordinator: %s\n", reachable(rt.CoordinatorUp))
 	fmt.Printf("  Panel      : %s\n", reachable(rt.ControlPlaneUp))
 
+	if rt.Names != nil && rt.Names.Zone != "" {
+		fmt.Printf("\n  Names      : %d under %s, served at %s\n",
+			rt.Names.Records, rt.Names.Zone, rt.Names.Resolver)
+		if rt.Names.RoutedBy != "" {
+			fmt.Printf("               routed there by %s; every other name is untouched\n",
+				rt.Names.RoutedBy)
+		} else {
+			// Said plainly rather than left to be discovered by a name not
+			// resolving: the resolver is running, and nothing is asking it.
+			fmt.Printf("               NOT in use — %s\n", orDash(rt.Names.Note))
+			fmt.Printf("               addresses still work; this machine's own DNS is unchanged\n")
+		}
+	}
+
 	if len(rt.Mappings) > 0 {
 		// The only place a technician can look this up. The rewriting happens
 		// inside the agent, so neither `ip route` on Linux nor `Get-NetNat` on

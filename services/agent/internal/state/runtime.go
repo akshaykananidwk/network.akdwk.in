@@ -37,6 +37,30 @@ type Runtime struct {
 	// `akconnect-agent status` is the only place a technician can see which
 	// overlay address reaches which machine.
 	Mappings []RuntimeMapping `json:"mappings,omitempty"`
+
+	// Names is the zone this device answers and where it answers it, so a
+	// technician can see what to type and confirm nothing else was touched.
+	Names *RuntimeNames `json:"names,omitempty"`
+}
+
+// RuntimeNames is the state of the local resolver.
+type RuntimeNames struct {
+	// Zone is the one domain answered. Everything else is refused.
+	Zone string `json:"zone"`
+	// Resolver is the loopback address it listens on.
+	Resolver string `json:"resolver"`
+	// Records is how many names it holds.
+	Records int `json:"records"`
+	// RoutedBy names the mechanism pointing the system at it —
+	// "systemd-resolved", "NRPT" — or is empty when nothing is, in which case
+	// Note says why.
+	RoutedBy string `json:"routed_by"`
+	Note     string `json:"note,omitempty"`
+	// Refused counts queries for names outside the zone. It is here because
+	// the number a drill wants is "how many did you forward", and the answer
+	// is structurally zero: there is no forwarding code. This is the closest
+	// observable thing — every such query was answered with REFUSED.
+	Refused uint64 `json:"refused"`
 }
 
 // RuntimeMapping is one advertised LAN, in both address spaces.

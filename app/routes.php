@@ -62,6 +62,16 @@ $router->group('', ['maintenance', 'auth'], static function (Router $router): vo
     $router->post('/networks/{id:int}/acl/{ruleId:int}', 'NetworkController@updateAclRule', ['csrf', 'can:acl.manage']);
     $router->post('/networks/{id:int}/acl/{ruleId:int}/delete', 'NetworkController@deleteAclRule', ['csrf', 'can:acl.manage']);
 
+    // Advertised LANs, and the machines named inside them (§16–18). Advertising
+    // is a network change; approving one is what actually puts a customer's
+    // building in front of agents, so it sits behind the same permission that
+    // approves a device.
+    $router->post('/networks/{id:int}/routes', 'NetworkRouteController@store', ['csrf', 'can:network.update']);
+    $router->post('/networks/{id:int}/routes/{routeId:int}/approve', 'NetworkRouteController@approve', ['csrf', 'can:device.approve']);
+    $router->post('/networks/{id:int}/routes/{routeId:int}/withdraw', 'NetworkRouteController@withdraw', ['csrf', 'can:network.update']);
+    $router->post('/networks/{id:int}/routes/{routeId:int}/hosts', 'NetworkRouteController@storeHost', ['csrf', 'can:network.update']);
+    $router->post('/networks/{id:int}/hosts/{hostId:int}/delete', 'NetworkRouteController@deleteHost', ['csrf', 'can:network.update']);
+
     // ------------------------------------------------------------- devices
     $router->get('/devices', 'DeviceController@index', ['can:device.view'], 'devices');
     $router->get('/devices/{id:int}', 'DeviceController@show', ['can:device.view'], 'device.show');

@@ -30,6 +30,7 @@ teardown() {
         ip netns del "$ns" 2>/dev/null || true
     done
     ip link del "$BRIDGE" 2>/dev/null || true
+    rm -rf /etc/netns/alpha /etc/netns/beta
 
     # Host-side veths outlive the namespace they were paired into, for a moment
     # or for good if the delete raced. A leftover one makes the next "ip link
@@ -317,8 +318,17 @@ build_collision() {
     ip netns exec office ip link set veth-office up
     ip netns exec office ip route add default via 192.168.1.1
 
+    # A resolver configuration of the customer's own, so the §18 claim — that
+    # everything outside our zone goes where it went before — is something the
+    # drill can watch rather than assert. A namespace with no file of its own
+    # shares the host's, and then "the agent did not touch it" would be a
+    # statement about the wrong file.
+    mkdir -p /etc/netns/alpha
+    printf 'nameserver 192.168.10.1\noptions timeout:2 attempts:1\n' > /etc/netns/alpha/resolv.conf
+
     sysctl -qw net.ipv4.ip_forward=1
     note "both LANs are 192.168.1.0/24, and both have a machine at .50"
+    note "alpha resolves through 192.168.10.1, which stands in for its ISP"
 }
 
 case "${1:-up}" in

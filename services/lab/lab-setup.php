@@ -66,6 +66,8 @@ exit(match ($command) {
     'route'     => labRoute($args),
     'route-approve' => labRouteApprove($args[0] ?? ''),
     'pool'      => labPool(),
+    'host'      => labHost($args),
+    'zone'      => labZone((int) ($args[0] ?? 0)),
     'joincode'  => labJoinCode($args),
     'usage'     => labUsage((int) ($args[0] ?? 0)),
     'teardown'  => labTeardown((int) ($args[0] ?? 0)),

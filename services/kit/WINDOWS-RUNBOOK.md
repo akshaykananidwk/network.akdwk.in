@@ -544,6 +544,96 @@ Start it again before moving on: `Start-Service AKConnectAgent`.
 
 ---
 
+## Stage 14 — Names · 15 min
+
+**The claim being tested is narrow, and the narrow part is the point:** names
+under your network's own domain resolve through the agent, and *every other
+name this machine looks up goes exactly where it went before*. If anything in
+this stage suggests otherwise, stop and tell me.
+
+On the panel, the network's routes tab shows the domain — something like
+`acme.internal` — and, under each advertised LAN, the name each machine
+answers to. Write one down; it is `$Name` below. It will look like
+`nvr.hotel-abc.acme.internal`.
+
+### 14a — Before the agent is running
+
+```powershell
+Get-DnsClientNrptRule | Format-Table -AutoSize Namespace, NameServers, Comment
+Get-DnsClientServerAddress -AddressFamily IPv4 | Format-Table -AutoSize InterfaceAlias, ServerAddresses
+Get-Content "$env:SystemRoot\System32\drivers\etc\hosts"
+.\collect.ps1 -Stage 14a-before-names
+```
+
+**Expect:** whatever this machine already had. Keep this file — the comparison
+at 14d is against it.
+
+### 14b — With the agent running
+
+```powershell
+.\akconnect-agent.exe status
+Resolve-DnsName -Name nvr.hotel-abc.acme.internal
+ping -n 4 nvr.hotel-abc.acme.internal
+.\collect.ps1 -Stage 14b-names -Name nvr.hotel-abc.acme.internal
+```
+
+**Expect:** the name resolves to an address in the `10.x` range — the overlay
+address, not the `192.168.x` one printed on the machine itself. The ping goes
+through the tunnel.
+
+`status` will say which mechanism is carrying it:
+
+- **NRPT** — Windows' own split-DNS mechanism, and the one I expect on a normal
+  Windows 10 or 11 machine.
+- **the hosts file** — the fallback, used when NRPT is unavailable or locked
+  down by policy. Both are correct; I want to know which one you got.
+
+**The failure I am looking for:** the name resolving to `192.168.1.50`. That is
+the address on the customer's own LAN, and on your machine it is either
+nothing or *your* device at that address. Tell me immediately.
+
+### 14c — The part that matters more
+
+```powershell
+Resolve-DnsName -Name www.microsoft.com
+nslookup www.google.com
+Get-DnsClientServerAddress -AddressFamily IPv4 | Format-Table -AutoSize InterfaceAlias, ServerAddresses
+.\collect.ps1 -Stage 14c-public-dns
+```
+
+**Expect:** public names resolve exactly as they did before, and no adapter
+lists `127.0.0.x` as its DNS server. The agent's resolver lives on loopback and
+only the one domain is routed to it.
+
+**The failure I am looking for:** an adapter whose DNS server has become
+`127.0.0.54`, or `nslookup` reporting that server. That would mean the agent
+had become the resolver for your whole machine, which it must never be. It is a
+P1 and I want to know within the hour.
+
+### 14d — Stop the agent
+
+```powershell
+Stop-Service AKConnectAgent
+Start-Sleep -Seconds 5
+Resolve-DnsName -Name nvr.hotel-abc.acme.internal -ErrorAction SilentlyContinue
+Get-DnsClientNrptRule | Format-Table -AutoSize Namespace, NameServers, Comment
+Get-Content "$env:SystemRoot\System32\drivers\etc\hosts"
+.\collect.ps1 -Stage 14d-after-stop
+```
+
+**Expect:** the name no longer resolves, no NRPT rule of ours remains, and the
+hosts file is byte-for-byte what 14a captured — no `AKConnect` block, and every
+line that was there before still there.
+
+**The failure I am looking for:** a leftover NRPT rule, a leftover hosts block,
+or — worst — a hosts file that lost lines it had before. The agent writes only
+between its own markers and replaces the file atomically, but this is the check
+that proves it on your machine rather than on mine.
+
+Start it again: `Start-Service AKConnectAgent`.
+
+---
+
 ## Finish — send the results · 2 min
 
 ```powershell
@@ -577,3 +667,4 @@ to include them, and I check for that.
 | 12 | Uninstall leaves nothing behind | 5 |
 | 13 | Gateway mode: an agentless NVR reached through a site PC | 20 |
 | 13g | Two LANs both on 192.168.1.0/24, both still reachable | (in 13) |
+| 14 | Names resolve, and the machine's own DNS is untouched | 15 |

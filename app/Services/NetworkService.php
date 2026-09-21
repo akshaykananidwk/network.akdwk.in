@@ -14,6 +14,7 @@ use App\Models\IpAllocation;
 use App\Models\JoinCode;
 use App\Models\Network;
 use App\Models\NetworkRoute;
+use App\Models\RouteHost;
 
 /**
  * Network lifecycle. Everything that changes what an agent should do ends with
@@ -47,7 +48,10 @@ final class NetworkService
                 'description'          => $input['description'] ?? null,
                 'cidr'                 => $range['cidr'],
                 'dns_json'             => $input['dns'] ?? Config::get('network.default_dns', []),
-                'search_domain'        => $input['search_domain'] ?? null,
+                // Always a zone, because §18's names need one and a network
+                // created without a search domain would silently have no way
+                // to be addressed by name.
+                'search_domain'        => self::zoneFor($input),
                 'mtu'                  => (int) ($input['mtu'] ?? Config::get('network.default_mtu', 1280)),
                 'keepalive_seconds'    => (int) ($input['keepalive_seconds'] ?? Config::get('network.default_keepalive', 25)),
                 'auto_assign_ip'       => (int) (bool) ($input['auto_assign_ip'] ?? true),
@@ -86,6 +90,13 @@ final class NetworkService
             if (array_key_exists($field, $input)) {
                 $changes[$field] = $input[$field];
             }
+        }
+
+        // Validated on the way in, not only on create. A network edited to a
+        // zone outside .internal would make every one of its agents
+        // authoritative for a domain somebody else owns.
+        if (array_key_exists('search_domain', $changes)) {
+            $changes['search_domain'] = DnsZone::validate((string) $changes['search_domain']);
         }
         foreach (['auto_assign_ip', 'auto_approve_devices', 'private'] as $field) {
             if (array_key_exists($field, $input)) {
@@ -158,10 +169,33 @@ final class NetworkService
             'devices'   => Device::where(['network_id' => $networkId], 'name', 'ASC'),
             'pool'      => IpAllocation::poolStats($networkId),
             'routes'    => NetworkRoute::forNetwork($networkId, false),
+            // Keyed by route, so the view can list a route's machines under it
+            // without a query per row.
+            'hosts'     => self::hostsByRoute($networkId),
+            'zone'      => DnsZone::forNetwork($network),
+            'gateways'  => array_values(array_filter(
+                Device::where(['network_id' => $networkId], 'name', 'ASC'),
+                static fn (array $d): bool => $d['status'] === 'authorized'
+            )),
             'acl'       => AclRule::forNetwork($networkId, false),
             'join_code' => JoinCode::activeForNetwork($networkId),
             'capacity'  => IpamService::describeCapacity((string) $network['cidr']),
         ];
+    }
+
+    /**
+     * Named machines, grouped by the route they sit behind.
+     *
+     * @return array<int, list<array<string,mixed>>>
+     */
+    private static function hostsByRoute(int $networkId): array
+    {
+        $out = [];
+        foreach (RouteHost::forNetwork($networkId) as $host) {
+            $out[(int) $host['route_id']][] = $host;
+        }
+
+        return $out;
     }
 
     /**
@@ -211,5 +245,29 @@ final class NetworkService
                 $joinCode
             ),
         };
+    }
+
+    /**
+     * The DNS zone for a new network.
+     *
+     * Validated when an operator typed one, derived from the name when they
+     * did not. Always under .internal — see DnsZone for why that is not
+     * negotiable.
+     *
+     * @param array<string,mixed> $input
+     */
+    private static function zoneFor(array $input): string
+    {
+        $typed = trim((string) ($input['search_domain'] ?? ''));
+        if ($typed !== '') {
+            return DnsZone::validate($typed);
+        }
+
+        $slug = DnsZone::slug((string) ($input['name'] ?? ''));
+        if ($slug === '') {
+            $slug = 'net-' . bin2hex(random_bytes(3));
+        }
+
+        return $slug . DnsZone::SUFFIX;
     }
 }

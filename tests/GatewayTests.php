@@ -10,6 +10,7 @@ use App\Core\DB;
 use App\Middleware\TenantScope;
 use App\Models\Device;
 use App\Models\JoinCode;
+use App\Models\Network;
 use App\Models\NetworkRoute;
 use App\Models\Plan;
 use App\Models\Tenant;
@@ -17,6 +18,8 @@ use App\Models\User;
 use App\Services\AclRouteFilters;
 use App\Services\AclService;
 use App\Services\DeviceService;
+use App\Services\DnsZone;
+use App\Services\RouteHostService;
 use App\Services\NetworkService;
 use App\Services\RouteService;
 use App\Services\SubnetMapper;
@@ -50,6 +53,9 @@ final class GatewayTests
             self::identicalPrefixesStaySeparate();
             self::subnetsAreMapped();
             self::rulesAreTranslatedAndStayPrecise();
+            self::namesResolveToOverlayAddresses();
+            self::zonesOutsideInternalAreRefused();
+            self::namedHostsMustBeInsideTheirRoute();
             self::approvalGatesTheRoute();
             self::duplicateWithinOneNetworkRefused();
         } finally {
@@ -306,6 +312,106 @@ final class GatewayTests
         $hostFilters = $byDestination[$expected]['filters'] ?? [];
         TestCase::assertSame(1, count($hostFilters), 'and it did land on that machine');
         TestCase::assertSame(554, (int) $hostFilters[0]['port_from'], 'on the port it names');
+    }
+
+    /**
+     * §18: names for overlay devices and for machines behind a gateway, in
+     * a zone that is always under .internal.
+     */
+    private static function namesResolveToOverlayAddresses(): void
+    {
+        TestCase::group('Names — §18, and only for our own domain');
+
+        self::act('hotelA');
+        $network = Network::find(self::$fx['hotelA_network']);
+        $zone = DnsZone::forNetwork($network);
+
+        TestCase::assert(str_ends_with($zone, '.internal'),
+            'the zone is under .internal, which is reserved for private use', $zone);
+
+        // Name the NVR the way an operator would: by the address on its label.
+        RouteHostService::add(self::$fx['hotelA_route'], [
+            'label'   => 'nvr',
+            'address' => '192.168.1.50',
+        ]);
+
+        $records = [];
+        foreach (DnsZone::records($network) as $record) {
+            $records[$record['name']] = $record['address'];
+        }
+
+        $gateway = Device::find(self::$fx['hotelA_gw']);
+        $laptop = Device::find(self::$fx['hotelA_laptop']);
+
+        $gatewayName = DnsZone::slug((string) $gateway['name']) . '.' . $zone;
+        TestCase::assert(isset($records[$gatewayName]),
+            'the gateway device has a name', $gatewayName);
+        TestCase::assertSame((string) $gateway['virtual_ip'], $records[$gatewayName] ?? '',
+            'and it resolves to its overlay address');
+
+        $laptopName = DnsZone::slug((string) $laptop['name']) . '.' . $zone;
+        TestCase::assertSame((string) $laptop['virtual_ip'], $records[$laptopName] ?? '',
+            'so does the laptop, including on the laptop itself');
+
+        // The one that matters: the NVR resolves to its MAPPED address.
+        // Answering with 192.168.1.50 would send a technician to whatever sits
+        // at that address on their own LAN.
+        $nvrName = 'nvr.' . DnsZone::slug((string) $gateway['name']) . '.' . $zone;
+        $expected = explode('/', (string) SubnetMapper::mapAddress(
+            '192.168.1.50/32', '192.168.1.0/24', self::$fx['hotelA_mapped']
+        ))[0];
+
+        TestCase::assert(isset($records[$nvrName]), 'the NVR has a name', $nvrName);
+        TestCase::assertSame($expected, $records[$nvrName] ?? '',
+            'and it resolves to the overlay address, not to 192.168.1.50');
+        TestCase::assertNotContains('192.168.1.50', (string) json_encode(array_values($records)),
+            'no real LAN address appears in any record');
+    }
+
+    /**
+     * A zone outside .internal is refused, because a network configured with
+     * one would make every one of its agents authoritative for a domain
+     * somebody else owns.
+     */
+    private static function zonesOutsideInternalAreRefused(): void
+    {
+        TestCase::group('Names — a zone this product may not be authoritative for');
+
+        self::act('hotelA');
+
+        foreach (['google.com', 'acme.co.in', 'localhost', 'internal.evil.com'] as $bad) {
+            $refused = false;
+            try {
+                DnsZone::validate($bad);
+            } catch (Throwable $e) {
+                $refused = true;
+            }
+            TestCase::assert($refused, "\"{$bad}\" is refused as a search domain");
+        }
+
+        TestCase::assertSame('acme.internal', DnsZone::validate('ACME.Internal.'),
+            'and a usable one is accepted, folded and trimmed');
+    }
+
+    /** A name must point at a machine the gateway actually routes for. */
+    private static function namedHostsMustBeInsideTheirRoute(): void
+    {
+        TestCase::group('Names — a name outside the advertised range is refused (§18)');
+
+        self::act('hotelA');
+
+        $refused = false;
+        try {
+            RouteHostService::add(self::$fx['hotelA_route'], [
+                'label'   => 'elsewhere',
+                'address' => '10.4.4.4',
+            ]);
+        } catch (Throwable $e) {
+            $refused = true;
+        }
+
+        TestCase::assert($refused,
+            'an address outside 192.168.1.0/24 cannot be named behind that gateway');
     }
 
     /** R4 applies to subnets: nothing reaches a LAN before a person approves it. */

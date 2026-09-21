@@ -167,6 +167,28 @@ final class Device extends Model
     }
 
     /**
+     * Every authorized device in a network, including the one asking.
+     *
+     * peersFor() deliberately excludes the caller, because a device is not its
+     * own peer. A name, though, is a name: a technician typing
+     * `laptop.acme.internal` on the laptop itself should get an answer, not
+     * NXDOMAIN.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public static function activeInNetwork(int $networkId): array
+    {
+        return DB::select(
+            'SELECT id, device_uid, name, virtual_ip, is_gateway
+             FROM ' . self::tableName() . '
+             WHERE network_id = :n AND status = \'authorized\'
+               AND virtual_ip IS NOT NULL AND deleted_at IS NULL
+             ORDER BY id ASC',
+            ['n' => $networkId]
+        );
+    }
+
+    /**
      * Mark devices that stopped heartbeating as offline.
      *
      * Runs in the worker rather than on read so the dashboard never has to

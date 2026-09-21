@@ -40,6 +40,15 @@ type Config struct {
 		Servers      []string `json:"servers"`
 		SearchDomain string   `json:"search_domain"`
 		SplitOnly    bool     `json:"split_only"`
+		// Zone is the only domain this device answers for. Everything outside
+		// it is refused, never forwarded: the agent must not be capable of
+		// becoming the customer's resolver, however it is pointed at.
+		Zone string `json:"zone"`
+		// Records are the names in that zone and the addresses the overlay
+		// uses for them — a device's virtual IP, and for a machine behind a
+		// gateway its *mapped* address, because the real one would send a
+		// technician to whatever sits at it on their own LAN.
+		Records []DNSRecord `json:"records"`
 	} `json:"dns"`
 
 	Peers  []Peer  `json:"peers"`
@@ -62,6 +71,16 @@ type Config struct {
 	} `json:"policy"`
 
 	IssuedAt string `json:"issued_at"`
+}
+
+// DNSRecord is one name this device answers.
+type DNSRecord struct {
+	Name    string `json:"name"`
+	Address string `json:"address"`
+	// Kind is "device" or "lan", for the status output. A technician looking
+	// at a list of names wants to know which of them are machines with no
+	// agent on them.
+	Kind string `json:"kind"`
 }
 
 // Peer is one device this device may talk to.

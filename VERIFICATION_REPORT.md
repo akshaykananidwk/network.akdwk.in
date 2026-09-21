@@ -838,6 +838,30 @@ That was the 1.6.0 gate. 1.7.0 added eight more checks and runs 44:
   44 checks, all passed. The networking proof holds for this build.
 ```
 
+1.8.0 adds split DNS and runs 58:
+
+```
+  dns/setup           PASS  a stand-in ISP resolver is answering in the natgw namespace
+  dns/resolver        PASS  alpha serves lab-net.internal at 127.0.0.54:53 (2 names)
+  dns/device          PASS  beta.lab-net.internal resolves to 10.99.0.3
+  dns/lan-host        PASS  nvr.beta.lab-net.internal resolves to 10.128.0.50,
+                            not to 192.168.1.50
+  dns/refused         PASS  www.google.com is refused by our resolver, not looked up
+  dns/nxdomain        PASS  an unknown name in the zone is NXDOMAIN, not a lookup elsewhere
+  dns/untouched       PASS  alpha's own resolver configuration is byte-identical
+  dns/public          PASS  public lookups arrived at the ISP resolver
+  dns/not-in-path     PASS  our resolver was asked about no public name
+  dns/os-routing      PASS  the operating system resolves lab-net.internal through
+                            the hosts file (systemd-resolved is not available here)
+  dns/system          PASS  getent resolves nvr.beta.lab-net.internal to 10.128.0.50
+                            with no server named
+  dns/system-device   PASS  and beta.lab-net.internal to 10.99.0.3
+  dns/cleanup         PASS  stopping the agent removed the names; nothing was left behind
+  dns/localhost       PASS  localhost still resolves; the machine's own hosts file is intact
+
+  58 checks, all passed.
+```
+
 Two builds did **not** ship on their own gate. 1.5.0's `gw/reach` failed while
 subnet-router mode was being built. And the first 1.7.0 run failed
 `accounting/tunnel` — which turned out to be the drill's own defect, not the
@@ -1429,6 +1453,74 @@ narrower rule gets an entry of its own, which wins on longest prefix and picks
 up the wider rules again through the same test, so "allow the subnet, deny the
 till" still means what it says.
 
+#### Split DNS, and the half that cannot be proved by asking our own resolver
+
+§18. The claim has two halves and they need proving differently.
+
+That names resolve is proved by asking: `nvr.beta.<zone>` comes back as
+`10.128.0.50`, the **mapped** address, not the `192.168.1.50` printed on the
+recorder. Answering with the real one would send a technician to whatever sits
+at that address on their own LAN — which in the drill's topology is their own
+office machine, deliberately.
+
+That nothing else was touched cannot be proved that way. It is proved by
+watching the *customer's* resolver: the drill runs a stand-in for it in the
+namespace that plays the ISP, points alpha at it, and afterwards checks that
+the public lookups arrived there, that alpha's `/etc/resolv.conf` is
+byte-identical, and that our own resolver was asked about no public name at
+all.
+
+The design makes that structural rather than configured. `dnsd` is an
+authoritative server for one zone with **no code in it that speaks to another
+DNS server**. A name outside the zone is REFUSED; there is nowhere for it to be
+forwarded to. A forwarding resolver on a customer's machine is a thing that can
+be pointed at, misconfigured into the path of their browsing, or blamed when
+their bank's website is slow, and this cannot be any of those.
+
+**The mechanism that carries it is the part with a hole in it.** Writing a
+nameserver into `/etc/resolv.conf` or onto the Windows adapter would have made
+this work everywhere in an afternoon and would have made us the resolver for
+everything the machine looks up. The mechanisms that do what was actually asked
+are systemd-resolved's per-interface domain routing and Windows' NRPT — and
+neither exists on every machine.
+
+The first version shipped with only those two, and on a machine with neither —
+a Debian server, a container — the resolver ran with nothing pointing at it and
+no name resolved. The drill said so, in the table, rather than passing on the
+resolver answering correctly when asked directly. The hosts file is the
+fallback: consulted before DNS by both platforms' resolvers, affecting no other
+name, and touching no DNS configuration at all.
+
+It is also the one path the gate actually exercises, because no machine in this
+lab has systemd-resolved. **NRPT and resolvectl are written, reviewed and have
+never run.**
+
+Nine tests cover the hosts file, and every one of them is about what is still
+there afterwards:
+
+```
+  the machine's own lines survive a write
+  rewriting replaces the block rather than accumulating a second one
+  a changed address does not leave the old one behind
+  removing everything restores the file byte for byte
+  an unterminated block is recovered from, not duplicated around
+  a name with whitespace in it is refused, because it would alias a second name
+  permissions stay 0644, because a hosts file written 0600 breaks localhost
+```
+
+#### A fixture that lied, for one run
+
+`dns/cleanup` failed the first time it ran: the name still resolved after the
+agent stopped. The hosts block *had* been removed — the lookup fell through to
+DNS, and the stand-in ISP resolver in the lab answered everything, including
+`.internal`.
+
+No real resolver does that, because `.internal` is not delegated. The stand-in
+returns NXDOMAIN for it now. A lab fixture that is more permissive than reality
+produces exactly this: a failure that is the drill's, reported against the
+product, and it would have been just as easy for it to produce a pass the
+product had not earned.
+
 #### Overlapping LAN ranges
 
 Every consumer router hands out 192.168.0.0/24 or 192.168.1.0/24, so this is
@@ -1750,12 +1842,12 @@ These are real and currently shipped.
     operating system. That is an argument for why it should work, not a
     result. Stage 13g asks for the result.
 
-13. **Split DNS is not implemented.** §18 asks for
-    `nvr.hotel-abc.<network>.internal` names for overlay devices and for
-    machines behind a gateway. The schema carries `search_domain` and
-    `dns_json` and the agent config declares `dns.split_only`, but nothing
-    resolves a name: every address in this product is reached numerically
-    today. Not started, and not claimed anywhere as working.
+13. **Two of the three split-DNS mechanisms have never run.** Names work, and
+    the gate proves it end to end — but what it exercises is the hosts-file
+    fallback, because no machine in this lab has systemd-resolved. The
+    `resolvectl` path and Windows' NRPT are written, reviewed and unexercised.
+    Stage 14 of the test pack covers NRPT; the Linux half needs a machine with
+    systemd-resolved on it, which is an afternoon rather than a project.
 
 6. **`UNLOCK TABLES` commits.** The restore path issues it only when locks are
    actually held, precisely because issuing it unconditionally would commit a

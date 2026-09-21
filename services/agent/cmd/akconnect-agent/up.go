@@ -14,6 +14,7 @@ import (
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/acl"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/discovery"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/dnsd"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/keystore"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/netcfg"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
@@ -64,8 +65,21 @@ type session struct {
 	filters *acl.Table
 	// gateway is the forwarding configuration in force, kept so it can be
 	// withdrawn when the advertised prefixes change.
-	gateway   *netcfg.GatewayPlan
-	discovery *discovery.Client
+	gateway *netcfg.GatewayPlan
+	// names answers the network's zone on a loopback address, and dnsZone is
+	// what the operating system has been pointed at — kept so a zone that
+	// changes can be un-pointed before the new one is applied.
+	names   *dnsd.Server
+	dnsZone string
+	// dnsRoutedBy and dnsNote record what the operating system did with the
+	// zone, so `status` can say "names work" or "names are served but nothing
+	// is pointing at them" rather than leaving a technician to guess.
+	dnsRoutedBy string
+	dnsNote     string
+	// dnsRecords fingerprints the record set, so a device renamed in the panel
+	// reaches the hosts file rather than waiting for the zone itself to change.
+	dnsRecords string
+	discovery  *discovery.Client
 	// peerMeta maps a peer's hex public key to the names the panel gave it,
 	// which the WireGuard device itself does not carry.
 	peerMeta  map[string]peerNames
@@ -124,6 +138,8 @@ func newSession(iface string, port int, verbose bool, logf func(string, ...any))
 }
 
 func (s *session) close() {
+	s.stopNames()
+
 	if s.tun != nil {
 		if s.applied && s.plan != nil {
 			_ = netcfg.Remove(s.tun.Name(), s.plan)
@@ -144,7 +160,7 @@ func (s *session) run(ctx context.Context) error {
 		return s.explain(err)
 	}
 
-	if err := s.applyConfig(priv, cfg); err != nil {
+	if err := s.applyConfig(ctx, priv, cfg); err != nil {
 		return err
 	}
 
@@ -160,7 +176,7 @@ func (s *session) run(ctx context.Context) error {
 
 // applyConfig vets a configuration and installs it. R1 is enforced by
 // netcfg.Build before anything touches the operating system.
-func (s *session) applyConfig(priv wgPrivate, cfg *panel.Config) error {
+func (s *session) applyConfig(ctx context.Context, priv wgPrivate, cfg *panel.Config) error {
 	plan, err := netcfg.Build(cfg)
 	if err != nil {
 		// A refused configuration is not a transient error. Failing loudly and
@@ -204,6 +220,9 @@ func (s *session) applyConfig(priv wgPrivate, cfg *panel.Config) error {
 	// Subnet mapping before the gateway's own forwarding rules, and before the
 	// ACL: from here up, every address in this process is a mapped one.
 	s.tun.SetMappings(buildMappings(cfg))
+
+	// Names last of the three, because they are built from mapped addresses.
+	s.applyNames(ctx, cfg)
 
 	if err := s.applyGateway(cfg); err != nil {
 		// A gateway that cannot forward is not a gateway, and the site's

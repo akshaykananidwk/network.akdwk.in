@@ -6,6 +6,76 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.8.0] — 2026-09-21
+
+Split DNS (§18). Names instead of addresses, for our domain only.
+
+### Added
+
+**`nvr.hotel-abc.acme.internal`.** Overlay devices are named from the devices
+table; machines behind a gateway get a new table, because an NVR has no agent,
+no key and no row anywhere — it is an address inside an advertised range, and
+an operator now writes down which address is which.
+
+This matters more since subnet mapping than it would have before. The address a
+technician connects to is one the panel invented — `10.128.0.50` rather than
+the `192.168.1.50` printed on the recorder — and it is different for every
+site. A name is what makes that an implementation detail instead of a table
+somebody has to keep.
+
+**The address an operator types is the real one**, the one on the label. The
+address the name resolves to is derived from the route's mapping when the
+configuration is built, so a route withdrawn and re-advertised cannot leave a
+stale answer behind.
+
+**The zone is always under `.internal`**, which ICANN reserved for private use
+in 2024. Anything else is refused on create and on update: a network whose
+search domain could be set to `google.com` would make every one of its agents
+authoritative for a domain somebody else owns.
+
+**The agent runs an authoritative server for that one zone and never
+forwards.** A name it holds gets an A record, a name in the zone it does not
+hold gets NXDOMAIN, and anything else gets REFUSED. There is no code in it that
+speaks to another DNS server, so it cannot become a customer's resolver however
+it is pointed at. It listens on loopback, starting at `127.0.0.54` because
+`127.0.0.53` is systemd-resolved's and taking it would break the machine's own
+name resolution.
+
+**Three mechanisms point the operating system at it**, in order of preference:
+systemd-resolved's per-interface domain routing on Linux, NRPT on Windows, and
+the hosts file where neither is available. Writing a nameserver into
+`/etc/resolv.conf` or onto the adapter would have been simpler and would have
+made us the resolver for everything the machine looks up — a takeover, not a
+split.
+
+The hosts file writes only between its own markers, copies everything else
+through byte for byte, and replaces the file by atomic rename. Nine tests cover
+it, all of them about what is still there afterwards.
+
+**Route and host management in the panel.** Advertising a LAN, approving it,
+withdrawing it and naming machines inside it were service-layer only since
+1.6.0 — usable from a script and not from the panel. They have endpoints and
+forms now.
+
+### Fixed
+
+**Nothing resolved on a machine without systemd-resolved.** The first version
+of this had the resolver and the two split-DNS mechanisms, and on a Debian
+server or a container the resolver ran with nothing pointing at it, so no name
+worked. The hosts-file fallback is the fix. Caught by the drill reporting,
+honestly, that the operating system was not routing the zone anywhere.
+
+### Known limitations
+
+**NRPT has never run.** Stage 14 of the Windows test pack covers it. Until
+those results come back, Windows name resolution is an argument from the code.
+
+**systemd-resolved has never run either.** No machine in this lab has it, so
+the Linux path the gate exercises is the hosts-file fallback. The resolvectl
+path is written and unexercised.
+
+---
+
 ## [1.7.0] — 2026-09-21
 
 Subnet mapping, and a real cross-version update drill.

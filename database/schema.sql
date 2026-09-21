@@ -312,6 +312,36 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__routes` (
 
 -- ------------------------------------------------------------------- relays
 
+-- Names for machines behind a gateway (§18).
+--
+-- An NVR, a printer and a DVR are not devices: no agent, no key, no row of
+-- their own anywhere. They are addresses inside an advertised range, and this
+-- is where an operator writes down which address is which so a technician can
+-- type a name instead of a number the panel invented.
+CREATE TABLE IF NOT EXISTS `__PREFIX__route_hosts` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `tenant_id` BIGINT UNSIGNED NOT NULL,
+  `network_id` BIGINT UNSIGNED NOT NULL,
+  `route_id` BIGINT UNSIGNED NOT NULL,
+  `label` VARCHAR(63) NOT NULL,
+  -- The **real** address, the one on the label on the machine. The mapped
+  -- address is derived, because a route withdrawn and re-advertised can be
+  -- given a different prefix and a stored copy would then be wrong.
+  `address` VARCHAR(45) NOT NULL,
+  `description` VARCHAR(190) NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` DATETIME NULL DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  -- Two machines answering to one name, or one machine with two names, are
+  -- both ways for a technician to reach the wrong box.
+  UNIQUE KEY `uq_route_hosts_label` (`route_id`, `label`),
+  UNIQUE KEY `uq_route_hosts_address` (`route_id`, `address`),
+  KEY `idx_route_hosts_network` (`network_id`),
+  KEY `idx_route_hosts_tenant` (`tenant_id`),
+  CONSTRAINT `fk_route_hosts_route` FOREIGN KEY (`route_id`) REFERENCES `__PREFIX__routes` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `__PREFIX__relays` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `name` VARCHAR(120) NOT NULL,

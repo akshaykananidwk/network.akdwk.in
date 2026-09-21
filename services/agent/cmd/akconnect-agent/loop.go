@@ -132,7 +132,7 @@ func (s *session) refresh(ctx context.Context, priv wgPrivate) (int, error) {
 		return pollAfter, nil
 	}
 
-	if err := s.applyConfig(priv, cfg); err != nil {
+	if err := s.applyConfig(ctx, priv, cfg); err != nil {
 		return pollAfter, err
 	}
 
@@ -196,6 +196,19 @@ func (s *session) publishRuntime(controlPlaneUp bool) {
 		rt.Interface = s.tun.Name()
 		rt.ListenPort = s.tun.ListenPort()
 	}
+	if s.names != nil {
+		_, _, refused, _ := s.names.Stats()
+		zone := s.names.Zone()
+		rt.Names = &state.RuntimeNames{
+			Zone:     zone.Suffix,
+			Resolver: s.names.Addr().String(),
+			Records:  zone.Len(),
+			RoutedBy: s.dnsRoutedBy,
+			Note:     s.dnsNote,
+			Refused:  refused,
+		}
+	}
+
 	if s.gateway != nil {
 		for i, lan := range s.gateway.Advertised {
 			if i >= len(s.gateway.Mapped) {

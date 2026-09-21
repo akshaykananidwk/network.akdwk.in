@@ -11,6 +11,7 @@
   .\collect.ps1 -Stage 01-before-install
   .\collect.ps1 -Stage 07-connected -PeerIP 10.99.0.3
   .\collect.ps1 -Stage 13-gateway -LanIP 192.168.1.50 -MappedIP 10.128.0.50
+  .\collect.ps1 -Stage 14-names -Name nvr.hotel-abc.acme.internal
 #>
 [CmdletBinding()]
 param(
@@ -18,6 +19,7 @@ param(
     [string]$PeerIP = "",
     [string]$LanIP  = "",
     [string]$MappedIP = "",
+    [string]$Name     = "",
     [string]$Agent  = ""
 )
 
@@ -234,6 +236,42 @@ if ($LanIP) {
         Find-NetRoute -RemoteIPAddress $LanIP -ErrorAction SilentlyContinue |
             Format-Table -AutoSize InterfaceAlias, IPAddress, NextHop
     }
+}
+
+# ---- names, and what they must not have touched --------------------------------------
+#
+# The claim is narrow: names under the network's own domain resolve through the
+# agent, and every other name this machine looks up goes exactly where it went
+# before. The second half is what these checks are mostly about.
+Check "the agent's view of its zone" { & $Agent status 2>&1 }
+Check "NRPT rules — ours should name only our domain" {
+    Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
+        Format-Table -AutoSize Name, Namespace, NameServers, Comment
+}
+Check "NRPT policy as it is actually applied" {
+    Get-DnsClientNrptPolicy -ErrorAction SilentlyContinue |
+        Format-Table -AutoSize Namespace, NameServers
+}
+Check "the adapters' own DNS servers — ours must not appear here" {
+    Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Format-Table -AutoSize InterfaceAlias, ServerAddresses
+}
+Check "the hosts file, managed block and all" {
+    $hosts = Join-Path $SystemRoot "System32\drivers\etc\hosts"
+    if (Test-Path $hosts) { Get-Content $hosts } else { "no hosts file at $hosts" }
+}
+if ($Name) {
+    Check "resolving the name, the way any program would" {
+        Resolve-DnsName -Name $Name -ErrorAction SilentlyContinue |
+            Format-Table -AutoSize Name, Type, IPAddress
+    }
+    Check "and through the OS resolver rather than a named server" {
+        [System.Net.Dns]::GetHostAddresses($Name) | ForEach-Object { $_.IPAddressToString }
+    }
+}
+Check "a public name still resolves the way it always did" {
+    Resolve-DnsName -Name www.microsoft.com -ErrorAction SilentlyContinue |
+        Select-Object -First 3 | Format-Table -AutoSize Name, Type, IPAddress
 }
 
 # ---- firewall and sockets ---------------------------------------------------------

@@ -57,7 +57,7 @@ now checks for it and says where to get it.
 | **P1 Foundation** | Installer, framework, auth, multi-tenancy, CRUD, audit, **auto-update**, backups | **Complete and verified** |
 | P2 Networking | Go agent, enrolment-to-tunnel, IPAM wiring, WireGuard, split tunnel, coordinator, NAT traversal | **Working in a Linux lab**; Windows compiles but is untested, real ISPs untested |
 | P3 Relay | Relay service, fallback and silent upgrade to direct, RTT-based selection, failover, usage accounting | **Working in the lab**, selection on measured RTT, failover drilled; accounting verified against the relay's own count |
-| P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | **ACL enforced on the device, both ends, drilled. Subnet-router mode working and drilled on Linux, including against a client with its enforcement compiled out**; Windows gateway untested on hardware; DNS and site-to-site not started |
+| P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | **ACL, subnet-router mode with 1:1 subnet mapping, and split DNS all working and drilled on Linux**, including against a client with its enforcement compiled out; Windows untested on hardware; site-to-site not started |
 | P5 Commercial | Plans, limits, billing, invoices, API keys, OpenAPI, white-label | Mostly done (see below) |
 | P6 Enterprise | HA, multi-region relays, SSO/SAML, staged agent rollout | Not started |
 
@@ -191,7 +191,7 @@ traceroute does not pass through our infrastructure.
 | ACLs on routed traffic | Done, per destination LAN IP and port, enforced on the client **and** on the gateway |
 | Overlapping LAN subnets | **Solved.** Each advertised LAN gets a unique virtual prefix and the gateway rewrites between the two, so two customers on 192.168.1.0/24 — and a technician on it too — all work |
 | Subnet mapping, Windows | Platform-independent by construction (the agent rewrites, not the OS), but **never run on Windows**. Stage 13g |
-| Split DNS | **Not started** |
+| Split DNS | Done and drilled on Linux. `nvr.hotel-abc.<network>.internal` for overlay devices and for machines behind a gateway; our domain only, and the resolver never forwards. NRPT and systemd-resolved are written and **unexercised** — the gate proves the hosts-file path |
 | Site-to-site | **Not started** |
 
 ### The limitations to say out loud
@@ -201,8 +201,11 @@ mapping pool (`10.128.0.0/10`) will be handed a virtual prefix that lands on top
 of its own network. The agent refuses that route and keeps the local one; the
 fix is to change `network.mapped_pool`.
 
-Split DNS (§18) is not started. Every address in this product is reached
-numerically.
+Split DNS works, but the two mechanisms that give it without touching a
+customer's resolver configuration — systemd-resolved on Linux, NRPT on Windows
+— have never run. No machine in this lab has systemd-resolved, so what the gate
+exercises is the hosts-file fallback. Both other paths are written and
+reviewed and nothing more than that.
 
 Related and larger: a device belongs to exactly one network
 (`devices.network_id` is a single column), so one support laptop cannot be a
@@ -261,11 +264,9 @@ Listed so nobody discovers them the hard way.
    on `devices.network_id` being a single column, and on the fact that twenty
    customers all using 192.168.1.0/24 would collide in one routing table even
    if it were not.
-5. **Split DNS** (§18) — `nvr.hotel-abc.<network>.internal` for overlay devices
-   and for machines behind a gateway, for our domain only, with the customer's
-   own resolution untouched. The mechanisms that give true split DNS rather
-   than a takeover are systemd-resolved's per-interface domain routing on Linux
-   and NRPT on Windows; neither is written yet.
+5. **Exercise the two split-DNS mechanisms.** systemd-resolved and NRPT both
+   work by argument and neither has run. A machine with systemd-resolved would
+   settle the Linux half in an afternoon; the Windows half is Stage 14.
 6. **Site-to-site** — the rest of Phase 4.
 7. Then Phase 6.
 

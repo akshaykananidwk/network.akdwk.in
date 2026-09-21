@@ -330,7 +330,13 @@ final class DeviceService
             // the customer's normal name resolution is untouched (R1).
             'dns'         => [
                 'servers'       => $network['dns_json'] ?? [],
-                'search_domain' => $network['search_domain'],
+                'search_domain' => DnsZone::forNetwork($network),
+                // The zone the agent is authoritative for, and nothing else.
+                // Its resolver refuses every name outside this — it never
+                // forwards — so it cannot become the customer's resolver even
+                // if something points at it (R1 applied to names).
+                'zone'          => DnsZone::forNetwork($network),
+                'records'       => DnsZone::records($network),
                 'split_only'    => true,
             ],
             'peers'       => $peers,
