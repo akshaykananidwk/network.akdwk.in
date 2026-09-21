@@ -6,6 +6,19 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.3.2] — 2026-09-21
+
+Documentation only.
+
+Cut so that FINALISE runs 1.3.1's code. A fix to the update pipeline only takes
+effect from the *next* update — the CLI runs all eleven steps in one process,
+so the code that performs an update is the code installed before it. That is
+inherent to self-updating software and is listed under Known limitations, but
+it means 1.3.1's journal fix could not be proven by the update that delivered
+it. This release is the one that proves it.
+
+---
+
 ## [1.3.1] — 2026-09-21
 
 A rollback could restore the database, leave the new files in place, and report
