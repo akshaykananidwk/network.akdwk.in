@@ -1356,21 +1356,62 @@ No update running. Last: #1 1.6.0 → 1.6.0 (rolled_back)
 160 PHP files checksummed before and after: **byte-identical**, and the run is
 correctly recorded as `rolled_back` rather than `success`.
 
-**What this run did not prove.** APPLY wrote **zero files**, because the
+**What that run did not prove.** APPLY wrote **zero files**, because the
 installed tree was already identical to the target commit — this machine is
-where the release was built. So the eleven steps, the backup, the verification
-and the rollback bookkeeping were all exercised; the file-writing and
-file-removing paths were not, on this release.
+where the release was built. The eleven steps, the backup, the verification and
+the rollback bookkeeping were all exercised; the file-writing and file-removing
+paths were not.
 
-That is not a small caveat. The 1.3.x P1 — FINALISE pruning its own rollback
+That was not a small caveat. The 1.3.x P1 — FINALISE pruning its own rollback
 journal, leaving 1.3.0 files on a 1.2.1 schema and reporting success — lived in
-exactly the paths a zero-file apply skips. Those paths were exercised on 1.3.3
-and have not regressed in any test, but "not regressed in a test" is weaker
-than "ran".
+exactly the paths a zero-file apply skips.
 
-The drill for it is a second installation checked out at the previous release
-and updated forward, which needs a database of its own. It is not done, and it
-belongs in the next release's checks rather than in a claim about this one.
+### The cross-version drill, which is now the standard
+
+`services/lab/dogfood.sh` installs the **previous** release into a scratch app
+root with a database and a database user of its own, updates it forward through
+our own updater, and rolls it back. Nothing it does touches the deployment; the
+database, the user and the root are destroyed on the way out, including on
+failure, and the credentials it creates are scoped to that one database so a
+bad variable cannot reach the real one.
+
+1.4.0 → 1.6.0 → 1.4.0:
+
+```
+  ✓ MIGRATE        Applied 4 migration(s) in batch 1 (22ms).
+  ✓ APPLY          Applied: 60 file(s) written (20 new), 0 removed,
+                   8 protected path(s) left untouched.
+  ✓ FINALISE       Update complete. Now running 1.6.0.
+
+$ php cli/update.php --rollback=1 --yes
+  ✓ Files: 40 restored, 20 removed.
+  ✓ Migrations: 4 reversed, 0 not reversible (covered by the database restore).
+  ✓ Database restored from backup #1 (64 statements).
+
+  dogfood/files-written     PASS  APPLY wrote 60 file(s)
+  dogfood/apply-removes     PASS  APPLY removed 0 — this release deletes no files,
+                                  so that path did not run
+  dogfood/files-changed     PASS  100 manifest line(s) differ
+  dogfood/rollback          PASS  restored 40 file(s) and removed 20 the update had added
+  dogfood/rollback-removes  PASS  20 file(s) the update added were removed again
+  dogfood/byte-exact        PASS  all 315 files are byte-identical to before the update
+  dogfood/schema            PASS  the database schema is back to 8e2febe50a7d
+  dogfood/data              PASS  every table the update touched holds what it held before
+  dogfood/version-back      PASS  the installed version is 1.4.0 again
+  dogfood/recorded          PASS  the run is recorded as rolled_back, not success
+
+  14 checks, all passed.
+```
+
+One line in that table is a "did not run" rather than a pass in disguise:
+**APPLY removed nothing**, because 1.6.0's manifest deletes no files. That path
+is exercised only by a release that removes one, and the drill says so instead
+of letting a green tick imply otherwise. The rollback's removal of the twenty
+new files is a different path and is checked separately.
+
+`services/lab/release.sh` runs the four gates — PHP suite, Go suites under
+`-race`, the networking gate, the update gate — and a release ships only when
+all four are clean.
 
 ---
 

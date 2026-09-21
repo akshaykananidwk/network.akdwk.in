@@ -176,9 +176,24 @@ Two changes, and the second is the harder one:
 another. Annoying, not blocking, and every competitor has the same problem with
 duplicate private ranges.
 
-## B6 — A zero-file update does not exercise the paths that broke before
+## B6 — A zero-file update does not exercise the paths that broke before — **DONE in 1.6.1**
 
 **Found:** 21 September 2026, dogfooding 1.6.0.
+**Fixed:** 21 September 2026. `services/lab/dogfood.sh` installs the previous
+release into a scratch app root with a database and database user of its own,
+updates it forward through our own updater, and rolls it back. It fails unless
+files were genuinely written, the new ones genuinely removed again, and every
+file byte-identical afterwards. The scratch database, its user and the scratch
+root are destroyed on the way out, including on failure.
+
+First real run, 1.4.0 → 1.6.0 → 1.4.0: 60 files written (20 new), 4 migrations
+applied and 4 reversed, 40 restored and 20 removed, 315 files byte-identical,
+schema and table contents back to their fingerprints. 14 checks, all passed.
+
+`services/lab/release.sh` now runs the four gates together, and this is one of
+them.
+
+The original entry follows.
 
 The release is built on the machine it is installed on, so APPLY had no files
 to write and the file-writing and file-removing paths were skipped. Those are
