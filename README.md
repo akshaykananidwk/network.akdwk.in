@@ -133,6 +133,12 @@ left serving traffic.
 release manifest cannot override this — if it asks to delete `config.php`,
 the request is logged and ignored.
 
+The one exception is `uploads/.htaccess`, the rule that stops an uploaded
+`.php` from being executed. It is not customer content and the product owns
+it, so an update may write it — and no release may delete it. Everything else
+under `uploads/` is untouchable as before. See
+`app/Updater/PathGuard.php::SHIPPED_CONTROLS`.
+
 ### Publishing a release
 
 Put `update.json` in your repository root:
@@ -318,6 +324,35 @@ sudo ./services/lab/run-all.sh cone     # one scenario
 **No release ships without a clean table.** It needs root, because it creates
 network namespaces, and it leaves its binaries, logs and agent state in
 `services/lab/.run`, which is gitignored.
+
+### The web and Argon2 gates
+
+The networking gate says nothing about the web server the panel is deployed
+on, and the tests above run on whatever PHP is to hand. 1.9.0 passed all of
+them and then failed on a real aaPanel box, because PHP's built-in server
+reads no `.htaccess`, has no `mod_php`, passes every header straight through,
+and is built against libargon2.
+
+```bash
+./services/lab/webtarget/run.sh      # Apache + PHP-FPM + MariaDB, installed
+                                     # through the browser installer
+./services/lab/argon2target/run.sh   # a PHP whose Argon2 comes from libsodium
+```
+
+Both need Docker. The first stands the panel up exactly as a customer would —
+welcome, requirements, database, administrator, configuration, finish — then
+signs in, enrols two-factor, and renders the pages a deployment needs. The
+second compiles a PHP without libargon2 (no packaged one exists) and runs the
+real `Crypto` class against it.
+
+### One command
+
+```bash
+sudo ./services/lab/release.sh
+```
+
+Everything above, in the order that fails cheapest first, plus a cross-version
+update and rollback drilled in a scratch database. One verdict at the end.
 
 ---
 
