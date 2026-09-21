@@ -6,6 +6,70 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.4.0] — 2026-09-21
+
+Phase 4. The panel has been able to author access rules since Phase 1 and
+nothing enforced them. Now the agent does, at both ends of every conversation.
+
+### Added
+
+**`services/agent/internal/acl`** — a filter wrapping the tunnel interface. It
+sits between wireguard-go and the operating system, the one place on the
+machine where packets are both plaintext and attributable to a peer: below it
+they are ciphertext, above it we would be asking two different operating
+systems to hold rules that belong to us, with no way to know whether they did.
+Outbound and inbound are both filtered, because a rule that only stopped what
+this device sends would leave a tampered peer free to send whatever it liked.
+
+Sixteen tests, written for the cases that bypass a filter rather than the ones
+that exercise it: a TCP port rule must not permit ping; a fragment carrying no
+transport header cannot satisfy a port rule; an unrecognised protocol name
+matches nothing rather than everything; replies to an allowed port are not
+blocked; and a filtered batch compacts its survivors forward, because leaving a
+hole hands wireguard-go a stale buffer to encrypt and send.
+
+**Two drills.** A deny proven against a real listener with a real TCP connect,
+timed against the ten-second requirement and measured at four; and a device
+rewriting its own state and restarting, which does not get it past the far end.
+
+### Fixed
+
+**Access rules were compiled for one end only.** `AclService::buildPeerSet`
+evaluated rules in the forward direction, so "alpha may not reach beta on
+tcp/8080" was compiled into alpha's configuration and not into beta's. Every
+rule lived on exactly one of the two machines — which is the same as trusting
+that machine's agent, and the agent runs on hardware the customer owns. The
+file's own docblock had claimed both-endpoint enforcement since Phase 1. Both
+directions are now evaluated and their filters merged, deduplicated by rule id
+so a rule matching both passes is not counted twice.
+
+**The ACL drill passed for the wrong reason before it passed for the right
+one.** It used a one-shot listener that the baseline check consumed, so the
+deny appeared to take effect in *zero seconds* — impossible, because an agent
+only learns a rule when it next polls. The listener is persistent now, the
+scenario checks it is still alive from inside its own namespace before
+concluding anything from a refused connection, and a sub-second result is
+rejected outright as a measurement of something else.
+
+### Known limitations
+
+**The filter is stateless.** Ports match in either direction, so a rule
+allowing tcp/554 also matches a packet merely originating from port 554.
+Connection tracking would be tighter and would mean keeping per-flow state on a
+shop PC. The trade is deliberate.
+
+**IPv6 extension headers are not walked.** The overlay is IPv4; an IPv6 packet
+carrying them is treated as having no ports, so a port rule will not match it.
+Conservative, and a real limit if the overlay ever becomes dual-stack.
+
+**A recompiled agent is not tested.** The tamper drill rewrites local state,
+which is the most a customer with root can do without rebuilding the binary.
+What stops a rebuilt one is the far end enforcing the mirror of the rule — now
+that it has it — and a drill running a deliberately modified agent is not
+built.
+
+---
+
 ## [1.3.3] — 2026-09-21
 
 ### Fixed

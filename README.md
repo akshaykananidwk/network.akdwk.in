@@ -305,11 +305,12 @@ other. That is what `services/lab/run-all.sh` is for. It builds Linux network
 namespaces, brings up a real panel, coordinator and two real relays, enrols two
 agents through the real approval flow, and runs every scenario the product
 depends on — cone NAT, symmetric NAT, both mixed directions, controller down,
-relay down, relay failover, usage accounting and revocation. It prints one
-pass/fail table and exits non-zero on any failure.
+relay down, relay failover, usage accounting, ACL enforcement, local tampering
+and revocation. It prints one pass/fail table and exits non-zero on any
+failure.
 
 ```bash
-sudo ./services/lab/run-all.sh          # everything, about twenty minutes
+sudo ./services/lab/run-all.sh          # everything, about half an hour
 sudo ./services/lab/run-all.sh cone     # one scenario
 ./services/lab/run-all.sh --list        # the scenario names
 ```

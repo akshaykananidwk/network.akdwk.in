@@ -34,7 +34,7 @@ and all three remain unmet. See [What Phase 2 has not shown](#what-phase-2-has-n
 | E   | Security            | **Pass** | With the open items listed under [Known limitations](#known-limitations) |
 | F   | Scale               | **Pass, with a finding** | 1,000 devices fine; address allocation scales with *pool* size |
 | G   | Recovery            | **Pass** | Byte-exact recovery from catastrophic damage |
-| H   | The networking gate | **Pass** | Nine scenarios in one command; found three defects in the code it tests |
+| H   | The networking gate | **Pass** | Eleven scenarios in one command; found four defects in the code it tests |
 | H2  | Dogfooding          | **Pass after two fixes** | Six update runs, two rollbacks; the rollback drill found a P1, and testing its fix found the fix incomplete |
 
 Automated suites:
@@ -45,7 +45,7 @@ $ php tests/run.php --url=http://127.0.0.1:8088
   471 passed, 0 failed, 1 skipped  (471 assertions)
 
 $ cd services/<each> && go vet ./... && go test -race ./...
-  47 tests, all passing, no races
+  63 tests, all passing, no races
 ```
 
 The one skip is the two-factor challenge, which needs a super admin with 2FA
@@ -897,6 +897,82 @@ about an agent that is not. The relay's counters are the ones a customer cannot
 touch, and they still go to a log file. See
 [Known limitations](#known-limitations).
 
+### Phase 4 — the ACL, enforced on the device
+
+§36 is the use case that sells this: AK Support may reach the hotel's server,
+NVR and reception PC and nothing else. The half worth proving is the "nothing
+else", because that is the half a customer is trusting.
+
+```
+acl/baseline     PASS  alpha reaches beta:8080 with no rules in force
+acl/deny-tcp     PASS  TCP to beta:8080 stopped 4s after the rule was written,
+                       service still listening
+acl/scope        PASS  the deny named tcp/8080 and left ping alone
+tamper/blocked   PASS  the deny held after alpha rewrote its state and
+                       restarted, service still listening
+```
+
+The agent says what it did, and names the rule:
+
+```
+acl: 1 of 1 peer(s) carry port rules, enforced in both directions
+acl: dropped outbound packet — denied by rule (rule 3)
+```
+
+**Four seconds**, against the ten the requirement allows. A deny cannot land
+faster than the configuration poll that carries it, so four seconds is the poll
+doing its job; anything faster would mean the drill was measuring something
+else, which is exactly what it was doing before (see the false pass above).
+
+**A failed TCP connect, not only a failed ping.** ICMP and TCP are different
+protocols and a rule can block one without the other, so the drill does both —
+and `acl/scope` confirms the deny named tcp/8080 and did not quietly take ping
+with it. A rule that blocks more than it says is as wrong as one that blocks
+less.
+
+**The service is checked alive from inside its own namespace** before anything
+is concluded from a refused connection. A dead listener refuses connections
+just as convincingly as a filter does.
+
+#### The gap in the control plane this found
+
+`AclService::buildPeerSet` evaluated rules in the forward direction only. A
+rule "alpha may not reach beta on tcp/8080" was compiled into alpha's
+configuration and **not into beta's** — so every rule lived on exactly one of
+the two machines.
+
+That is the same as trusting that machine's agent, and the agent runs on
+hardware the customer owns. The file's own docblock had said since Phase 1 that
+"enforcement happens on both endpoints, because a filter that only exists on
+one side is a filter an attacker can choose not to run". The code did not do
+it. Both directions are now evaluated and their filters merged, deduplicated by
+rule id.
+
+#### What the tamper test does and does not show
+
+The drill has alpha rewrite its own `state.json` and restart its agent, which
+is the most a customer with root on their own machine can do without rebuilding
+the binary. The deny holds.
+
+It does **not** show that a customer who recompiles the agent is stopped —
+nothing running on their hardware could show that. What stops them is beta's
+agent enforcing the mirror of the rule, which is why the one-sided compilation
+above was worth fixing and why the drill is run after it. A stronger test would
+run a deliberately modified agent on alpha; that is not built.
+
+#### Honest limits of the filter
+
+It is **stateless**. Ports match in either direction, so a rule allowing
+tcp/554 also matches a packet merely *originating* from port 554. Connection
+tracking would be tighter and would mean keeping per-flow state on a shop PC.
+The trade is deliberate and is written in the code rather than left to be
+discovered.
+
+IPv6 extension headers are not walked. The overlay is IPv4, so an IPv6 packet
+carrying them is treated as having no ports, and a port rule will not match it
+— the conservative direction, and a real limit if the overlay ever becomes
+dual-stack.
+
 ### A commercial problem the gate surfaced by accident
 
 The ninth scenario failed to enrol a device, and the reason was not the
@@ -964,7 +1040,7 @@ they now are, in every service.
 
 All three have regression tests that fail against the unfixed code.
 
-It also caught three faults in itself, which are recorded here because a drill
+It also caught five faults in itself, which are recorded here because a drill
 that is wrong is worse than no drill:
 
 | Fault | Effect |
@@ -972,6 +1048,21 @@ that is wrong is worse than no drill:
 | `ip netns exec` forks, so killing the recorded pid left the agent running | Every scenario leaked two agents; a later scenario failed for reasons that had nothing to do with it |
 | `ping` prints `loss,` with a comma, and the parser matched `loss` | Every failover measurement read `?%` — the drill could not measure the thing it existed to measure |
 | The control plane bound to the bridge address, which each scenario deletes | Nothing ran at all until the sockets moved to the wildcard address |
+| The ACL drill used a one-shot listener, and the baseline check consumed it | **A false pass.** The deny appeared to take effect in *zero seconds* — impossible, because an agent only learns a rule when it next polls. The connection was refused because nothing was listening |
+| A host-side veth outlived its namespace, so the rebuild failed with "File exists" — and nothing checked the topology builder's exit code | **A false failure.** That side never got its default route, and the scenario reported the panel unreachable. The lab was broken and the product was blamed |
+
+The last two are a matched pair, and worth keeping in mind together: one
+reported success that had not happened, the other reported a failure that was
+not the product's. A drill is only evidence if it can be wrong in neither
+direction, and the topology builder's exit code is now checked because an
+unchecked one turned a lab fault into a product bug report.
+
+The false pass is the one to keep in mind. It did not look like a bug; it looked
+like the feature working extremely well. The tell was the number: a deny cannot
+land faster than the poll that delivers it, so "0s" was the drill reporting a
+result it had not measured. The scenario now checks the listener is still alive
+from inside its own namespace before concluding anything from a refused
+connection, and refuses a sub-second result outright.
 
 ---
 

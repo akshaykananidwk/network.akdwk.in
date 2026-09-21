@@ -57,7 +57,10 @@ fixture() {
 
     lab::stop_servers
     lab::down_agents
-    "$LAB_DIR/topology.sh" "${topology[@]}" >/dev/null
+    # Checked, because a topology that half-built is indistinguishable from a
+    # product that cannot connect — and the scenario will blame the product.
+    "$LAB_DIR/topology.sh" "${topology[@]}" >/dev/null \
+        || die "could not build the ${topology[*]} topology"
     rm -rf "$RUN/state"
 
     # Enrolment is throttled per address, and the drill enrols two devices per

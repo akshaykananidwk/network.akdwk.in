@@ -29,6 +29,19 @@ teardown() {
         ip netns del "$ns" 2>/dev/null || true
     done
     ip link del "$BRIDGE" 2>/dev/null || true
+
+    # Host-side veths outlive the namespace they were paired into, for a moment
+    # or for good if the delete raced. A leftover one makes the next "ip link
+    # add" fail with "File exists", that side of the topology never gets its
+    # default route, and the scenario then reports the product unreachable when
+    # it is the lab that is broken.
+    local link
+    for link in br-alpha br-beta br-natgw-a br-natgw-b \
+                veth-alpha veth-beta wan-natgw-a wan-natgw-b \
+                lan-natgw-a lan-natgw-b; do
+        ip link del "$link" 2>/dev/null || true
+    done
+
     note "lab torn down"
 }
 

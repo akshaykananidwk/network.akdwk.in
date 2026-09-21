@@ -57,7 +57,7 @@ now checks for it and says where to get it.
 | **P1 Foundation** | Installer, framework, auth, multi-tenancy, CRUD, audit, **auto-update**, backups | **Complete and verified** |
 | P2 Networking | Go agent, enrolment-to-tunnel, IPAM wiring, WireGuard, split tunnel, coordinator, NAT traversal | **Working in a Linux lab**; Windows compiles but is untested, real ISPs untested |
 | P3 Relay | Relay service, fallback and silent upgrade to direct, RTT-based selection, failover, usage accounting | **Working in the lab**, selection on measured RTT, failover drilled; accounting verified against the relay's own count |
-| P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | Control plane done, **agent side is the next piece of work** |
+| P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | **ACL enforced on the device, both ends, drilled**; routes, DNS, subnet router and site-to-site not started |
 | P5 Commercial | Plans, limits, billing, invoices, API keys, OpenAPI, white-label | Mostly done (see below) |
 | P6 Enterprise | HA, multi-region relays, SSO/SAML, staged agent rollout | Not started |
 
@@ -214,22 +214,20 @@ Listed so nobody discovers them the hard way.
 
 ## Next
 
-1. **Agent ACL enforcement (§7.5)** — compile the filters the panel already
-   emits and apply them at both ends. The first use case is §36: AK Support
-   reaches the hotel's server, NVR and reception PC and nothing else. A deny
-   has to block a ping *and* a TCP connect, a rule change has to reach agents
-   within ten seconds, and a device must not be able to bypass it by editing
-   its own local config.
-2. **Windows, on real hardware.** The pack is built and committed; nothing has
-   run on Windows, and nearly every customer device is Windows.
-3. **Two sites on real ISPs, one on 4G.** Everything in §D is one machine's
-   network namespaces. It is real networking and it is not two ISPs.
-4. **Relay-reported billing.** Accounting is checked against the relay's own
-   count in the lab, but the figure the panel meters still comes from the
-   agents. A customer can influence the number they are billed on. See
-   [Known limitations](VERIFICATION_REPORT.md#known-limitations).
-5. Then the rest of Phase 4, and Phase 6.
+1. **Windows, on real hardware.** The pack is built and committed; nothing has
+   run on Windows, and nearly every customer device is Windows. This is the
+   item that decides whether the product can be sold at all.
+2. **Two sites on real ISPs, one on 4G.** Everything in §D and §H is one
+   machine's network namespaces. It is real networking and it is not two ISPs.
+3. **Enrolment throttling.** 60 requests an hour per IP will cut off a
+   forty-machine rollout from one office partway through. BACKLOG.md B3 has the
+   shape of the fix: strict on failed enrolments, generous on successful ones.
+4. **Relay-reported billing.** The figure the panel meters agrees with the
+   relay's own count to 20 bytes on 1.7 MB, so the arithmetic is right — but it
+   still comes from the agents, and a modified agent can under-report.
+5. **The rest of Phase 4** — routes, DNS, subnet router, site-to-site.
+6. Then Phase 6.
 
-The order is deliberate: item 1 is the first thing a customer asks for that the
-product cannot yet do, and item 2 is the one that decides whether it can be
-sold at all.
+The order is deliberate: item 1 decides whether any of the rest matters
+commercially, and item 3 is the one that will embarrass us in front of a
+customer first.

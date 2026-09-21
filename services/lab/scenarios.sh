@@ -314,7 +314,11 @@ scenario_acl() {
 
     # A real listener, so a refused connection means the filter refused it
     # rather than that nothing was listening.
-    lab::serve_tcp beta 8080
+    if ! lab::serve_tcp beta 8080; then
+        record "acl/baseline" FAIL "the test listener never came up"
+        lab::stop_servers
+        return
+    fi
 
     if ! lab::tcp_connect alpha "$BETA_IP" 8080; then
         record "acl/baseline" FAIL "could not reach the service before any rule was written"
@@ -336,10 +340,24 @@ scenario_acl() {
         elapsed=$(( $(date +%s) - started ))
     done
 
+    # Before concluding anything from a failed connection, check the service
+    # is still there. A dead listener refuses connections just as convincingly
+    # as a filter does, and telling the two apart is the whole point.
+    if ! lab::serving beta 8080; then
+        record "acl/deny-tcp" FAIL "the listener died, so a refused connection proves nothing"
+        lab::stop_servers
+        return
+    fi
+
     if lab::tcp_connect alpha "$BETA_IP" 8080; then
         record "acl/deny-tcp" FAIL "still connecting to beta:8080 ${elapsed}s after the deny"
+    elif [ "$elapsed" -lt 1 ]; then
+        # The agent only learns about a rule when it next polls, so a deny
+        # cannot take effect instantly. Zero seconds means something else
+        # refused the connection.
+        record "acl/deny-tcp" FAIL "connection refused before the agent could have learned the rule"
     elif [ "$elapsed" -le 10 ]; then
-        record "acl/deny-tcp" PASS "TCP to beta:8080 stopped ${elapsed}s after the rule was written"
+        record "acl/deny-tcp" PASS "TCP to beta:8080 stopped ${elapsed}s after the rule was written, service still listening"
     else
         record "acl/deny-tcp" FAIL "TCP stopped, but after ${elapsed}s (limit is 10s)"
     fi
@@ -366,7 +384,11 @@ scenario_acl_tamper() {
         return
     fi
 
-    lab::serve_tcp beta 8080
+    if ! lab::serve_tcp beta 8080; then
+        record "tamper/setup" FAIL "the test listener never came up"
+        lab::stop_servers
+        return
+    fi
 
     php "$LAB_DIR/lab-setup.php" acl "$NETWORK" deny "$UID_ALPHA" "$UID_BETA" tcp 8080 >/dev/null \
         || { record "tamper/setup" FAIL "could not author the rule"; lab::stop_servers; return; }
@@ -390,10 +412,12 @@ scenario_acl_tamper() {
     lab::up beta
     sleep 15
 
-    if lab::tcp_connect alpha "$BETA_IP" 8080; then
+    if ! lab::serving beta 8080; then
+        record "tamper/blocked" FAIL "the listener died, so a refused connection proves nothing"
+    elif lab::tcp_connect alpha "$BETA_IP" 8080; then
         record "tamper/blocked" FAIL "a device reached a denied port after editing its own state"
     else
-        record "tamper/blocked" PASS "the deny held after alpha rewrote its state and restarted"
+        record "tamper/blocked" PASS "the deny held after alpha rewrote its state and restarted, service still listening"
     fi
 
     lab::stop_servers

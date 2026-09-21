@@ -295,19 +295,39 @@ lab::tcp_connect() {
 # serve_tcp starts a listener a connect attempt can actually reach.
 #
 # Without one, a refused connection proves nothing: it would be refused whether
-# the ACL blocked it or not, and the drill would pass against a filter that
-# does nothing at all.
+# the ACL blocked it or not. That is not hypothetical — an earlier version of
+# this used a one-shot listener, the baseline check consumed it, and the drill
+# then reported the deny taking effect in *zero seconds*, which is impossible
+# because the agent only learns about a rule when it next polls. It passed for
+# the wrong reason. "-k" keeps the socket open across connections so the
+# service is still there when the drill asks again.
 lab::serve_tcp() {
     local ns=$1 port=$2
-    # OpenBSD netcat: "nc -l <port>", and it serves one connection then exits,
-    # so the loop is what makes it a service rather than a single answer.
-    setsid ip netns exec "$ns" bash -c "
-        while true; do
-            printf 'ok' | timeout 20 nc -l $port >/dev/null 2>&1
-            sleep 0.1
-        done" >/dev/null 2>&1 &
+    setsid ip netns exec "$ns" nc -k -l "$port" >/dev/null 2>&1 &
     SERVER_PIDS+=("$!")
-    sleep 1
+
+    # Confirm it is actually listening before anything is concluded from a
+    # connection to it.
+    local waited=0
+    while [ "$waited" -lt 10 ]; do
+        if lab::tcp_connect "$ns" 127.0.0.1 "$port" 2; then
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    return 1
+}
+
+# serving reports whether the listener is still up, from inside its own
+# namespace, where no overlay filter can be in the way.
+#
+# This is what separates "the ACL blocked it" from "the service died". A drill
+# that cannot tell those apart is not testing the ACL.
+lab::serving() {
+    local ns=$1 port=$2
+    lab::tcp_connect "$ns" 127.0.0.1 "$port" 2
 }
 
 lab::stop_servers() {
