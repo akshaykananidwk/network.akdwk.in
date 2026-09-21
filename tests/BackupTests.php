@@ -8,6 +8,7 @@ use App\Core\DB;
 use App\Models\AppBackup;
 use App\Updater\BackupManager;
 use App\Updater\DatabaseDumper;
+use App\Updater\RollbackJournal;
 use App\Updater\SqlDumpWriter;
 
 /**
@@ -48,6 +49,7 @@ final class BackupTests
             self::dumpRestoresCleanly($dump);
             self::restoreReleasesTableLocks();
             self::truncatedArtefactsAreRefused($dump);
+            self::pruningSparesTheCurrentJournal();
         } finally {
             DB::write()->exec('DROP TABLE IF EXISTS `' . self::$probe . '`');
             foreach (glob(sys_get_temp_dir() . '/backup-probe-*') ?: [] as $leftover) {
@@ -323,5 +325,61 @@ final class BackupTests
         $end = strpos($sql, "\n-- ", $start);
 
         return $end === false ? substr($sql, $start) : substr($sql, $start, $end - $start);
+    }
+
+    /**
+     * Retention must never eat the journal of the update that is finalising.
+     *
+     * The journals are named by update id and pruned in id order, but ids are
+     * not monotonic across a database restore: restoring rewinds app_updates,
+     * so the next update gets a low id while journals with high ids are still
+     * on disk. Ordering alone then makes the newest journal look like the
+     * oldest, and FINALISE deletes the undo list for the version it has just
+     * put live.
+     *
+     * This happened. The rollback afterwards restored the database, could not
+     * restore the files, and reported success — leaving new code against an
+     * old schema, which is worse than either version on its own.
+     */
+    private static function pruningSparesTheCurrentJournal(): void
+    {
+        TestCase::group('Backup — retention never prunes the current journal');
+
+        $dir = sys_get_temp_dir() . '/journal-prune-' . bin2hex(random_bytes(4));
+        mkdir($dir, 0700, true);
+
+        try {
+            // Journals left by earlier updates, with ids far above the one now
+            // running. This is exactly the shape a restored database leaves.
+            foreach ([10, 11, 13, 15, 16] as $old) {
+                file_put_contents($dir . '/journal-' . $old . '.jsonl', "{}\n");
+            }
+            // And the update finalising right now, whose id restarted at 1.
+            file_put_contents($dir . '/journal-1.jsonl', "{}\n");
+
+            RollbackJournal::pruneDirectory($dir, 3, 1);
+
+            TestCase::assert(
+                is_file($dir . '/journal-1.jsonl'),
+                'the finalising update keeps its own journal'
+            );
+
+            $remaining = count(glob($dir . '/journal-*.jsonl') ?: []);
+            TestCase::assertSame(4, $remaining, 'retention of 3, plus the protected one', (string) $remaining);
+
+            // Without the protection, the current journal is the first to go —
+            // which is the defect this guards.
+            file_put_contents($dir . '/journal-2.jsonl', "{}\n");
+            RollbackJournal::pruneDirectory($dir, 3);
+            TestCase::assert(
+                !is_file($dir . '/journal-2.jsonl'),
+                'unprotected, a low-id journal is still pruned first'
+            );
+        } finally {
+            foreach (glob($dir . '/journal-*') ?: [] as $leftover) {
+                is_dir($leftover) ? @rmdir($leftover) : @unlink($leftover);
+            }
+            @rmdir($dir);
+        }
     }
 }

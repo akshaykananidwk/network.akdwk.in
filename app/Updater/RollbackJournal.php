@@ -204,15 +204,35 @@ final class RollbackJournal
      * A journal outlives the update that wrote it: without it, "roll back to
      * this point" in History has no per-file undo list and restores nothing.
      * It is still disk, so it is pruned on the same retention count as the
-     * backups it pairs with.
+     * backups it pairs with. $protectUpdateId names one journal that must
+     * survive whatever the ordering says — see below.
      *
      * @return array{removed:int,freed_bytes:int}
      */
-    public static function pruneDirectory(string $directory, int $keep): array
+    public static function pruneDirectory(string $directory, int $keep, int $protectUpdateId = 0): array
     {
         $keep = max(1, $keep);
 
         $journals = glob($directory . '/journal-*.jsonl') ?: [];
+
+        // Never prune the update that is asking. Retention is ordered by
+        // update id, and ids are not monotonic across a database restore: a
+        // restore rewinds app_updates, so the next update gets a low id while
+        // journals with high ids are still on disk. Ordering alone then makes
+        // the newest journal look like the oldest, and FINALISE deletes the
+        // undo list for the update it has just finished — leaving a rollback
+        // that can restore the database and not the files.
+        //
+        // That is not hypothetical. It happened on a deployment rebuilt from a
+        // backup, and the rollback afterwards reported success while leaving
+        // new files in place against an old schema.
+        if ($protectUpdateId > 0) {
+            $journals = array_values(array_filter(
+                $journals,
+                static fn (string $path): bool => self::updateIdOf($path) !== $protectUpdateId
+            ));
+        }
+
         if (count($journals) <= $keep) {
             return ['removed' => 0, 'freed_bytes' => 0];
         }

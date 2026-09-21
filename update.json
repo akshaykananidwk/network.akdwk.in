@@ -1,13 +1,11 @@
 {
-  "version": "1.3.0",
-  "released_at": "2026-09-21T13:00:00Z",
+  "version": "1.3.1",
+  "released_at": "2026-09-21T14:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Relay selection on latency the devices actually measured, failover when a relay dies, and the whole networking proof as one command that gates releases.",
-  "migrations": [
-    "2026_09_21_120000_add_device_region.php"
-  ],
+  "notes": "A rollback could restore the database and not the files, and report success. The journal that records what an update overwrote was being pruned by the update that wrote it.",
+  "migrations": [],
   "protected": [
     ".env",
     "config/config.php",

@@ -121,6 +121,33 @@ final class RollbackManager
      * @param list<string> $steps
      * @param list<string> $failures
      */
+    /**
+     * Did this update get as far as writing files?
+     *
+     * APPLY is the first step that touches the installation. Anything at or
+     * after it has a journal that matters; anything before it does not.
+     *
+     * @param array<string,mixed> $update
+     */
+    private static function reachedApply(array $update): bool
+    {
+        $order = [
+            'PRECHECK', 'MAINTENANCE', 'BACKUP_FILES', 'BACKUP_DB', 'DOWNLOAD',
+            'STAGE', 'MIGRATE', 'APPLY', 'POST', 'HEALTH', 'FINALISE',
+        ];
+
+        $reached = array_search((string) ($update['step'] ?? ''), $order, true);
+        $apply = array_search('APPLY', $order, true);
+
+        if ($reached === false) {
+            // An unrecognised step is not evidence that nothing was written.
+            // A completed update is the clearest case of having written files.
+            return in_array((string) ($update['status'] ?? ''), ['success', 'completed'], true);
+        }
+
+        return $reached >= $apply;
+    }
+
     private function restoreFiles(array $update, UpdateLog $log, array &$steps, array &$failures): void
     {
         try {
@@ -128,6 +155,21 @@ final class RollbackManager
             $journalPath = $journalRelative !== '' ? $this->appRoot . '/' . ltrim($journalRelative, '/') : '';
 
             if ($journalPath === '' || !is_file($journalPath)) {
+                // No journal is only benign when the update never wrote a file.
+                // If it reached APPLY, the journal is the *only* record of what
+                // was overwritten, and continuing would restore the database
+                // under the new files and call it a success — which is a worse
+                // state than either version on its own, and worse than stopping.
+                if (self::reachedApply($update)) {
+                    $failures[] = 'Files: the rollback journal is missing, so the files this update '
+                        . 'replaced cannot be restored. The database has NOT been rolled back either, '
+                        . 'because doing so would leave new code against an old schema. Restore from '
+                        . 'the file backup listed in History, then roll back the database separately.';
+                    $log->error(end($failures));
+
+                    throw new UpdateException(end($failures), 'ROLLBACK');
+                }
+
                 $steps[] = 'Files: nothing to undo (the update had not reached APPLY).';
                 $log->info(end($steps));
 

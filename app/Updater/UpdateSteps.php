@@ -631,7 +631,13 @@ final class UpdateSteps
             $log->info(sprintf('Pruned %d old backup(s), freeing %s.', $pruned['removed'], UpdateEnv::humanBytes($pruned['freed_bytes'])));
         }
 
-        $prunedJournals = RollbackJournal::pruneDirectory($this->appRoot . '/storage/updates', $retention);
+        // This update's own journal is protected: it is the undo list for the
+        // version that has just gone live, and it is the one a rollback needs.
+        $prunedJournals = RollbackJournal::pruneDirectory(
+            $this->appRoot . '/storage/updates',
+            $retention,
+            $updateId
+        );
         if ($prunedJournals['removed'] > 0) {
             $log->info(sprintf(
                 'Pruned %d old rollback journal(s), freeing %s.',

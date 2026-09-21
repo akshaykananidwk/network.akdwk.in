@@ -35,6 +35,7 @@ and all three remain unmet. See [What Phase 2 has not shown](#what-phase-2-has-n
 | F   | Scale               | **Pass, with a finding** | 1,000 devices fine; address allocation scales with *pool* size |
 | G   | Recovery            | **Pass** | Byte-exact recovery from catastrophic damage |
 | H   | The networking gate | **Pass** | Nine scenarios in one command; found three defects in the code it tests |
+| H2  | Dogfooding 1.3.0    | **Pass after a fix** | Update clean in 11 steps; the rollback drill found a P1 — see below |
 
 Automated suites:
 
@@ -634,6 +635,82 @@ Backup verification now reports facts that can be false:
 rather than the unfalsifiable "sha256 matches" it reported before 1.0.7.
 
 ---
+
+## H2 — Dogfooding 1.3.0, and the defect it found
+
+Every release goes out through our own updater. 1.3.0 did, from a deployment
+at 1.2.1, against the real GitHub branch:
+
+```
+  ✓ PRECHECK       Pre-flight passed. 27.4 GB free, PHP 8.4.19, MariaDB 10.11.14.
+  ✓ MAINTENANCE    Maintenance mode on.
+  ✓ BACKUP_FILES   Backup #1 written (6 MB).
+  ✓ BACKUP_DB      Backup verified — both artefacts were read back, not just checksummed.
+  ✓ DOWNLOAD       Archive downloaded: 6.2 MB.
+  ✓ STAGE          Staged and verified: 314 files, 188 PHP files parse cleanly.
+  ✓ MIGRATE        Applied 1 migration(s) in batch 2 (6ms).
+  ✓ APPLY          Applied: 39 file(s) written (14 new), 0 removed, 8 protected left untouched.
+  ✓ POST           Post-update complete: 1 script(s) ran, caches cleared.
+  ✓ HEALTH         Health check passed (10 checks).
+  ✓ FINALISE       Update complete. Now running 1.3.0.
+```
+
+Eleven steps clean, the new files present, the migration applied, the panel
+serving and `config/config.php` still denied. Then the rollback drill:
+
+```
+  ✓ Files: nothing to undo (the update had not reached APPLY).
+  ✓ Migrations: 1 reversed, 0 not reversible.
+  ✓ Database restored from backup #1 (65 statements).
+  ✓ Rollback complete. The previous version is live again.
+```
+
+**Every line of that is a tick and the result was wrong.** The update had
+plainly reached APPLY — it had written 39 files a minute earlier. The
+deployment was left with 1.3.0 application files running against a restored
+1.2.1 schema, and told the operator it had recovered.
+
+### Why
+
+FINALISE had pruned the journal of the update that had just written it.
+
+Journals are named by update id and retained in id order. Ids are not monotonic
+across a database restore: restoring rewinds `app_updates`, so the next update
+gets a low id while journals with high ids are still on disk. On a deployment
+rebuilt from backup, the new update was id 1 and the stale journals were 10 to
+16 — so ordering alone made the newest journal look like the oldest, and
+FINALISE deleted it. One line in the log said so and nothing treated it as
+serious:
+
+```
+  Pruned 1 old rollback journal(s), freeing 205 KB.
+```
+
+The rollback then found no journal and took the only other explanation
+available: the update must not have reached APPLY.
+
+### Fixed in 1.3.1, both halves
+
+FINALISE now names its own update as protected, whatever the ordering says. And
+a rollback that finds no journal for an update that *did* reach APPLY now stops
+before touching the database, rather than restoring it under the new files and
+reporting success — it says what state the installation is in and names the
+file backup to restore from. Refusing is the correct answer there: the mixed
+state it would otherwise produce is worse than either version on its own.
+
+There is a test for the pruning, and it fails against the unfixed code.
+
+### What this says about the verification
+
+This is the **third** mechanism for surviving a bad update found broken by
+using it. The first two were in 1.0.x — a database backup that could not be
+restored, and a file rollback that restored nothing. All three reported
+success. None was visible by reading the code.
+
+It is also the first one found on a code path I had already exercised nine
+times. What made it appear was a *restored database* — a condition the report
+has described under [Known limitations](#known-limitations) since 1.0.x
+without anyone, including me, noticing it invalidated retention ordering.
 
 ## H — The gate, and what it found
 

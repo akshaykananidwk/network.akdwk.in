@@ -6,6 +6,40 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.3.1] — 2026-09-21
+
+A rollback could restore the database, leave the new files in place, and report
+success. Found by dogfooding 1.3.0.
+
+### Fixed
+
+**FINALISE pruned the rollback journal of the update that had just written
+it.** Journals are named by update id and retained in id order. Ids are not
+monotonic across a database restore — restoring rewinds `app_updates`, so the
+next update gets a low id while journals with high ids are still on disk.
+Ordering alone then makes the newest journal look like the oldest, and the
+update deletes its own undo list on the way out.
+
+The rollback afterwards restored the database, found no journal, said "nothing
+to undo (the update had not reached APPLY)" and reported success. The result
+was 1.3.0 application files running against a 1.2.1 schema — a state worse than
+either version on its own, reached by the one command an operator runs when
+something has already gone wrong.
+
+FINALISE now names its own update as protected, whatever the ordering says.
+
+**A rollback with no journal now fails loudly instead of shrugging.** A missing
+journal is only benign when the update never reached APPLY. Past that point the
+journal is the *only* record of what was overwritten, so continuing would
+restore the database under the new files and call it done. It now stops before
+touching the database, says exactly what state the installation is in, and
+names the file backup to restore from.
+
+This is the third mechanism for surviving a bad update found broken by using
+it rather than reading it. The first two were in 1.0.x.
+
+---
+
 ## [1.3.0] — 2026-09-21
 
 Relay selection now uses latency the devices actually measured, a relay that
