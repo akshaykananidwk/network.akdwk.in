@@ -66,11 +66,34 @@ func (s *session) startDiscovery(ctx context.Context, cfg *panel.Config, priv wg
 		return
 	}
 
+	client.SetRelays(relayFleet(cfg, s.logf))
+
 	s.discovery = client
 
 	go client.Run(ctx)
 
 	s.logf("discovery: announcing to the coordinator at %s", addr)
+}
+
+// relayFleet turns the panel's relay list into addresses the agent can probe.
+//
+// A relay whose host will not resolve is dropped with a line in the log rather
+// than kept as a nil address: a fleet entry that can never be measured would
+// otherwise sit there looking like a relay that is simply slow.
+func relayFleet(cfg *panel.Config, logf func(string, ...any)) []discovery.RelayTarget {
+	out := make([]discovery.RelayTarget, 0, len(cfg.Relays))
+
+	for _, relay := range cfg.Relays {
+		addr, err := resolveCoordinator(relay.Host, relay.Port)
+		if err != nil {
+			logf("discovery: ignoring relay %s: %v", relay.Name, err)
+			continue
+		}
+
+		out = append(out, discovery.RelayTarget{Name: relay.Name, Addr: addr})
+	}
+
+	return out
 }
 
 // overlayPrefix is the tunnel's own network, used to refuse any endpoint

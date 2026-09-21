@@ -6,6 +6,163 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.3.0] — 2026-09-21
+
+Relay selection now uses latency the devices actually measured, a relay that
+dies is replaced rather than waited for, and the billed figure is checked
+against what the relay says it carried. The whole networking proof is one
+command, and it is now the release gate.
+
+### Added — relay selection and failover
+
+**Relay selection by measured round trip.** Agents probe every relay in the
+fleet on the same socket WireGuard uses — so the measurement includes the NAT
+the real traffic will cross — and report what they found to the coordinator,
+sealed. The coordinator picks the relay with the lowest round trip *for the
+pair*, which is the worse of the two ends' numbers: a relay 5 ms from one
+device and 300 ms from the other is a 300 ms relay for the conversation
+between them.
+
+The device is the only thing that can measure this. A coordinator in Mumbai
+cannot tell how far a shop in Ahmedabad is from a relay in Chennai, and a
+device behind CGNAT does not have an address worth guessing from.
+
+**A region column on devices**, to sit alongside the one relays already
+carried. It is a hint and nothing more: it settles ties between relays that are
+genuinely close and loses to any real difference in measured latency. Empty is
+the normal value and selection works perfectly well without it — there is a
+test that asserts exactly that.
+
+**Relay failover.** An agent re-presents its ticket every five seconds and every
+bind is acknowledged, so an unanswered rebind is the signal that a relay has
+gone. Three consecutive misses and the agent asks the coordinator for a
+different relay, naming the one that failed. Two devices naming the same relay
+take it out of rotation for everyone, for two minutes; one device's report does
+not, because a single device that cannot reach a relay is usually telling you
+about its own network, and acting on it would be a denial of service anyone
+could trigger.
+
+**A relay probe endpoint** on the relay's control port. Unauthenticated,
+because an agent that has not been offered a relay yet has no ticket for it and
+still needs to know how far away it is. The reply is exactly the same size as
+the probe, so bouncing traffic off it gains an attacker nothing over sending
+that traffic directly.
+
+**`relay` in the agent's status.** Which relay a device is on, not merely that
+it is on one — an operator diagnosing a slow site needs the name.
+
+**Two new drills in `run-all.sh`.** `relay-failover` kills whichever of two
+relays the pair actually chose, mid-traffic, and requires the traffic to appear
+on the other one. `accounting` pushes a known number of packets through a
+relayed tunnel and compares the panel's billed figure against the relay's own
+count of what it forwarded — two counters built from different things, one of
+which a customer cannot influence.
+
+### Fixed — hardening
+
+**An agent could not fail over from a relay that was never working.** Failover
+keyed on the peer's path already being `relay`, which only becomes true once a
+bind has been acknowledged. A relay that had already died when the coordinator
+offered it was therefore never rebound, never accumulated a missed count, and
+never triggered a request for a different one — the pair sat in `connecting`
+indefinitely. One dead relay stranded *every new pair it was handed to*, which
+is a worse failure than the one failover was built for. Found by the lab gate,
+on the scenario after the one that killed a relay.
+
+**Latency-based selection did not apply to a device's first relay.** An agent
+probed the fleet at startup but reported the result on the twenty-second
+keepalive, while the deadline that sends a stalled peer to a relay is five
+seconds. Every first assignment was therefore made with no measurements and
+fell back to whichever relay was first in the fleet — the feature worked from
+the *second* assignment onwards, which is not what it claims to do.
+Measurements now go out as soon as the first probe round answers, rate-limited
+so a flapping relay cannot become a stream of reports.
+
+**Relay selection mutated shared state to filter a candidate.** `pickRelay`
+temporarily removed the failed relay from `s.opts.Relays` and put it back. The
+coordinator handles every packet in its own goroutine, so two concurrent relay
+requests would have corrupted each other's view of the fleet. The relay to
+avoid is a parameter now. Found by running the Go tests under `-race`, which
+they now are.
+
+**The lab served the panel without a router, and six public-surface tests
+failed against it.** `tests/dev-server.php` already applies the `.htaccess`
+deny list in a form PHP's built-in server obeys; the harness was not using it,
+so `config/config.php`, `app/Core/DB.php` and `database/schema.sql` were all
+served in the clear on the lab panel. The failures were real and the fix was a
+file that already existed. With the router in place: 468 assertions, 0 failed.
+
+**Agents were left running after every lab scenario.** `ip netns exec` forks
+rather than execs, so the pid the harness recorded was a wrapper; killing it
+reparented the agent to init. Every scenario left two more agents polling the
+panel against a topology that no longer existed, and eventually one of them
+made a later scenario fail for reasons that had nothing to do with it. Agents
+now run in their own process group, and any stray from an earlier run is
+identified by the binary it is executing — read from `/proc`, never by
+pattern-matching command lines, which has killed the harness itself before.
+
+**The packet-loss measurement never produced a number.** Every failover figure
+read `?%`. `ping` prints "0% packet loss," with a comma, and the field-splitting
+parser matched on `loss` — which never appears, only `loss,` does. A drill that
+cannot measure the thing it exists to measure passes for the wrong reason.
+
+
+
+### Added — the drill harness
+
+**`services/lab/run-all.sh`** — builds the namespaces, brings up a real panel,
+coordinator and relay, and runs every networking scenario the product depends
+on: cone NAT, symmetric NAT, both mixed directions, controller down, relay
+down and revocation. It prints one pass/fail table and exits non-zero on any
+failure. This is now the dogfood gate — a build that cannot get a clean table
+here does not ship.
+
+Each scenario starts from a fresh topology, fresh agent state and a fresh
+tenant, because reusing a tunnel between scenarios lets one scenario's success
+hide the next one's failure. Enrolment goes through the real
+enrol → approve → claim path rather than writing rows directly, so R4 is
+exercised rather than assumed.
+
+**`services/lab/topology.sh mixed A B`** — one side behind a cone NAT, the
+other behind a symmetric one. The common real case: a shop on fibre talking to
+a laptop on 4G.
+
+**Regression tests for every defect found by running Phase 3.** Each was
+checked by reverting the fix locally and confirming the test fails without it —
+a test that has never failed proves nothing:
+
+| Defect | Test |
+| --- | --- |
+| Relay replied to the bind address, not the data address | `TestForwardsToTheDataAddressNotTheBindAddress` |
+| A re-bind clobbered the address learned from data | `TestRebindDoesNotClobberTheLearnedAddress` |
+| Coordinator only sent peers on hello, so candidates went stale | `TestPingIsAnsweredWithTheCurrentPeerList`, `TestPeersAreToldWhenADeviceMoves` |
+| Repunch timers ran independently when punching needs simultaneity | `TestPunchesAgainForARelayedPeer` |
+| Agent sent `rx_bytes`/`tx_bytes`; the panel reads `rx_delta`/`tx_delta` | `TestHeartbeatUsesTheFieldNamesThePanelReads` |
+
+### Fixed — the drill harness
+
+**`akconnect-relay` documented a `--panel` flag it does not have.** The relay
+does not talk to the panel at all: it authorises sessions from the ticket the
+coordinator signed, and its usage counters are logged rather than reported.
+The usage text now says so. What that means for billing is recorded in
+VERIFICATION_REPORT.md rather than left implied.
+
+### Known limitations
+
+**The billed figure is agent-reported.** The panel meters `rx_delta` +
+`tx_delta` from each end's heartbeat, and the `accounting` drill now checks
+that against the relay's own count of what it forwarded — so the arithmetic is
+right. A customer running a modified agent can still under-report. The relay's
+counters are the ones nobody outside our infrastructure can touch, and they
+still go to a log file and nowhere else.
+
+**Relay failover takes about fifteen seconds.** Three unanswered rebinds at
+five-second intervals, which is a floor: nothing tells an agent a relay has
+died except the absence of a reply. The measured cost before this work was 37%
+loss over a 40-second window.
+
+---
+
 ## [1.2.1] — 2026-09-21
 
 ### Fixed

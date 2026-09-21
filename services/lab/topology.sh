@@ -10,6 +10,7 @@
 #   ./topology.sh up      build the lab
 #   ./topology.sh down    tear it down
 #   ./topology.sh nat     rebuild with both hosts behind separate NATs
+#   ./topology.sh mixed A B   one side cone, the other symmetric
 #
 # Namespaces:
 #   alpha  10.0.0.2/24  ─┐
@@ -186,10 +187,34 @@ build_symmetric() {
     note "a tunnel here proves the relay works"
 }
 
+# One host behind a cone NAT, the other behind a symmetric one.
+#
+# This is the common real case, not a corner: a shop on a decent fibre line
+# talking to a laptop on 4G. It is also the case where the answer is not
+# obvious — punching can succeed if the symmetric side is the one that starts,
+# because its fresh mapping is created towards an address the cone side is
+# already reachable on. The drill records which path actually resulted rather
+# than asserting one, because either is a correct outcome.
+build_mixed() {
+    local alphaMode=${1:-cone} betaMode=${2:-symmetric}
+    teardown
+
+    ip link add "$BRIDGE" type bridge
+    ip address add "$HOST_IP/24" dev "$BRIDGE"
+    ip link set "$BRIDGE" up
+
+    build_nat_side alpha natgw-a 10 192.168.10 "$alphaMode"
+    build_nat_side beta  natgw-b 11 192.168.20 "$betaMode"
+
+    sysctl -qw net.ipv4.ip_forward=1
+    note "alpha is behind a $alphaMode NAT, beta behind a $betaMode NAT"
+}
+
 case "${1:-up}" in
     up)        build_flat ;;
     nat)       build_nat ;;
     symmetric) build_symmetric ;;
+    mixed)     build_mixed "${2:-cone}" "${3:-symmetric}" ;;
     down)      teardown ;;
-    *)         die "unknown command: $1 (use up, nat, symmetric or down)" ;;
+    *)         die "unknown command: $1 (use up, nat, symmetric, mixed or down)" ;;
 esac

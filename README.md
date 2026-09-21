@@ -291,6 +291,33 @@ Database tests run inside a transaction that is always rolled back, so they
 are safe against a live installation. HTTP tests create fixtures and delete
 them in a `finally` block.
 
+The Go services have their own tests, and they are run with the race detector
+because the coordinator handles every packet in its own goroutine:
+
+```bash
+cd services/coordinator && go test -race ./...
+```
+
+### The networking gate
+
+The tests above say nothing about whether two machines can actually reach each
+other. That is what `services/lab/run-all.sh` is for. It builds Linux network
+namespaces, brings up a real panel, coordinator and two real relays, enrols two
+agents through the real approval flow, and runs every scenario the product
+depends on — cone NAT, symmetric NAT, both mixed directions, controller down,
+relay down, relay failover, usage accounting and revocation. It prints one
+pass/fail table and exits non-zero on any failure.
+
+```bash
+sudo ./services/lab/run-all.sh          # everything, about twenty minutes
+sudo ./services/lab/run-all.sh cone     # one scenario
+./services/lab/run-all.sh --list        # the scenario names
+```
+
+**No release ships without a clean table.** It needs root, because it creates
+network namespaces, and it leaves its binaries, logs and agent state in
+`services/lab/.run`, which is gitignored.
+
 ---
 
 ## Troubleshooting

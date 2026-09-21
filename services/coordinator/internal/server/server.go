@@ -43,6 +43,7 @@ type Server struct {
 	publicKey [32]byte
 	conn      *net.UDPConn
 	reg       *registry.Registry
+	health    *relayHealth
 
 	mu      sync.Mutex
 	pending map[string]panelapi.EndpointReport
@@ -69,12 +70,33 @@ func New(opts Options) (*Server, error) {
 		opts:      opts,
 		publicKey: pub,
 		reg:       registry.New(opts.PresenceTTL),
+		health:    newRelayHealth(),
 		pending:   make(map[string]panelapi.EndpointReport),
 	}, nil
 }
 
 // PublicKey is what agents seal to.
 func (s *Server) PublicKey() [32]byte { return s.publicKey }
+
+// ListenAddr is the address actually bound, which matters when the caller
+// asked for port 0 — as a test does, so two runs never collide.
+func (s *Server) ListenAddr() netip.AddrPort {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.conn == nil {
+		return netip.AddrPort{}
+	}
+
+	local := s.conn.LocalAddr().(*net.UDPAddr)
+
+	addr, ok := netip.AddrFromSlice(local.IP)
+	if !ok {
+		return netip.AddrPort{}
+	}
+
+	return netip.AddrPortFrom(addr.Unmap(), uint16(local.Port))
+}
 
 // PublicKeyBase64 renders it for the panel configuration.
 func (s *Server) PublicKeyBase64() string {
@@ -92,7 +114,9 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("binding %s: %w", s.opts.Listen, err)
 	}
+	s.mu.Lock()
 	s.conn = conn
+	s.mu.Unlock()
 
 	s.opts.Logf("coordinator listening on %s", conn.LocalAddr())
 	s.opts.Logf("public key: %s", s.PublicKeyBase64())

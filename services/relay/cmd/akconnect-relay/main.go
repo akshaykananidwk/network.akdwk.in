@@ -9,7 +9,12 @@
 //
 // Usage:
 //
-//	akconnect-relay serve --control :9000 --panel https://net.example.com --name mumbai-1
+//	akconnect-relay serve --control :9000 --name mumbai-1
+//
+// The relay does not talk to the panel. It authorises sessions from the
+// ticket the coordinator signed, and its usage counters are logged rather
+// than reported — see VERIFICATION_REPORT.md for what that means for
+// billing.
 //
 // Environment:
 //

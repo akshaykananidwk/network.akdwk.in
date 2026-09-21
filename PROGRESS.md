@@ -56,12 +56,15 @@ now checks for it and says where to get it.
 |---|---|---|
 | **P1 Foundation** | Installer, framework, auth, multi-tenancy, CRUD, audit, **auto-update**, backups | **Complete and verified** |
 | P2 Networking | Go agent, enrolment-to-tunnel, IPAM wiring, WireGuard, split tunnel, coordinator, NAT traversal | **Working in a Linux lab**; Windows compiles but is untested, real ISPs untested |
-| P3 Relay | Relay service, fallback and silent upgrade to direct, usage accounting | **Working in the lab**; relay selection not yet latency-based |
-| P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | Control plane done, agent side not started |
+| P3 Relay | Relay service, fallback and silent upgrade to direct, RTT-based selection, failover, usage accounting | **Working in the lab**, selection on measured RTT, failover drilled; accounting verified against the relay's own count |
+| P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | Control plane done, **agent side is the next piece of work** |
 | P5 Commercial | Plans, limits, billing, invoices, API keys, OpenAPI, white-label | Mostly done (see below) |
 | P6 Enterprise | HA, multi-region relays, SSO/SAML, staged agent rollout | Not started |
 
-**425 assertions pass** (`php tests/run.php`).
+**468 assertions pass** (`php tests/run.php --url=…`), and
+**`services/lab/run-all.sh` is the networking gate** — it builds the
+namespaces, runs every scenario, prints one table and exits non-zero on any
+failure. No release ships without a clean table.
 
 ---
 
@@ -119,7 +122,7 @@ be indefensible.
 
 ---
 
-## Phase 2 — not started, and it is the important one
+## Phase 2 — built and drilled
 
 `services/coordinator/`, `services/relay/` and `services/agent/` are empty.
 **No packets move between devices today.** The panel manages networks and
@@ -211,14 +214,22 @@ Listed so nobody discovers them the hard way.
 
 ## Next
 
-1. **Agent skeleton** — enrol, poll, bring up a TUN interface, and ping a peer
-   over a manually configured endpoint. Proves the config contract end to end.
-2. **Coordinator** — reflexive discovery and endpoint exchange, so two agents
-   behind NAT find each other.
-3. **Hole punching** — simultaneous open with backoff, LAN shortcut, UPnP.
-4. **Relay** — fallback, then silent upgrade to direct, with usage accounting.
-5. **Agent ACL enforcement** — compile the filters the panel already emits.
-6. Only then Phase 4 and the rest of Phase 5.
+1. **Agent ACL enforcement (§7.5)** — compile the filters the panel already
+   emits and apply them at both ends. The first use case is §36: AK Support
+   reaches the hotel's server, NVR and reception PC and nothing else. A deny
+   has to block a ping *and* a TCP connect, a rule change has to reach agents
+   within ten seconds, and a device must not be able to bypass it by editing
+   its own local config.
+2. **Windows, on real hardware.** The pack is built and committed; nothing has
+   run on Windows, and nearly every customer device is Windows.
+3. **Two sites on real ISPs, one on 4G.** Everything in §D is one machine's
+   network namespaces. It is real networking and it is not two ISPs.
+4. **Relay-reported billing.** Accounting is checked against the relay's own
+   count in the lab, but the figure the panel meters still comes from the
+   agents. A customer can influence the number they are billed on. See
+   [Known limitations](VERIFICATION_REPORT.md#known-limitations).
+5. Then the rest of Phase 4, and Phase 6.
 
-The order matters: each step is testable on its own, and step 1 is what turns
-this from a dashboard into a product.
+The order is deliberate: item 1 is the first thing a customer asks for that the
+product cannot yet do, and item 2 is the one that decides whether it can be
+sold at all.

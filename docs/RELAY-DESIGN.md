@@ -106,23 +106,120 @@ signal for adding relays.
 
 ---
 
+## Selection: measured, not assumed
+
+The coordinator cannot tell how far a device is from a relay. It knows the
+address a NAT presented to it, which behind CGNAT belongs to the carrier and
+not to the customer, and it knows whatever region label somebody typed into the
+panel. Neither is a latency.
+
+The device can measure it, so the device does:
+
+1. The panel hands every agent the relay fleet in its configuration — that
+   already happened; nothing new was needed on the control plane.
+2. The agent probes each relay on **the same UDP socket WireGuard uses**. This
+   is the same reason discovery shares that socket: a measurement taken from a
+   second socket would cross a different NAT mapping and describe a path the
+   real traffic will never take.
+3. The probe is a nonce; the reply is the same nonce. A nonce rather than a
+   bare packet because otherwise a late reply to a probe abandoned ten seconds
+   ago is timed as if it were fresh, and the agent records a latency it never
+   observed.
+4. The agent reports the table to the coordinator, sealed. Unsealed, anyone
+   could report on a device's behalf and steer that tenant onto a relay of
+   their choosing.
+5. The coordinator picks for **the pair**: the score of a relay is the worse of
+   the two ends' round trips. A relay 5 ms from one device and 300 ms from the
+   other is a 300 ms relay for the conversation between them, and choosing it
+   because the asking end liked it optimises for the wrong device.
+
+Region survives as a tiebreak worth five milliseconds. That is deliberately
+small: it settles a choice between relays that are genuinely close and loses to
+any real measured difference. It is also routinely empty, so selection has to
+work without it — there is a test named exactly that.
+
+### The reflection question
+
+The probe endpoint is unauthenticated, because an agent that has not been
+offered a relay has no ticket for it and still needs to know how far away it
+is. Anything unauthenticated on a public port is a potential DDoS tool, so the
+reply is **exactly the same size as the probe**. An attacker who spoofs a
+victim's source address gets one packet sent to the victim for one packet sent
+to us, which is no better than sending it to the victim directly. Amplification
+is the property that makes reflectors worth using; without it this is not worth
+an attacker's time.
+
+## Failover
+
+A relay dying is not a hypothetical — it is a box in a datacentre. The problem
+is that a dead relay is silent, and silence is indistinguishable from an idle
+link.
+
+The signal is already there: the agent re-presents its ticket to keep the NAT
+mapping alive, and **the relay acknowledges every bind**. So the rebind is a
+heartbeat, and an unanswered one is evidence.
+
+- Rebinds go out every **5 seconds**, on their own ticker rather than riding
+  the 20-second coordinator keepalive. This buys detection speed, and only
+  that: a relay killed and restarted cost 37% of a 40-second window at 20
+  seconds and 36.5% at 5 seconds, which is the same number. Whatever dominates
+  that recovery, it is not how often the agent rebinds — most likely the
+  WireGuard handshake backoff already in progress by then. The shorter interval
+  earns its place by making *failover* possible in fifteen seconds rather than
+  a minute, not by making a restart cheaper.
+- **Three** consecutive unanswered rebinds mean the relay is gone. Three rather
+  than one, so a single dropped packet on a lossy link does not move a working
+  session.
+- The agent then asks the coordinator for another relay **naming the one that
+  failed**. Without the name the failover asks the same question and gets the
+  same answer.
+- **Two different devices** naming the same relay take it out of rotation for
+  everyone, for two minutes. One device does not: a single device that cannot
+  reach a relay is usually describing its own network, and acting on one report
+  would be a denial of service anyone could trigger by lying.
+
+## Usage, and what the number is worth
+
+The relay counts what it forwards. The panel meters what the agents say they
+sent and received. These are built from different things, and the drill in
+`services/lab/run-all.sh` pushes a known load through a relayed tunnel and
+requires them to agree within a stated tolerance.
+
+They agree because both count ingress and egress at every hop, which is the
+convention — a relayed byte is counted where it arrives and again where it
+leaves. That has to be stated rather than discovered, because it is the
+difference between an invoice and an argument.
+
+What the drill does **not** fix: the figure the panel bills on still comes from
+the agents. A customer running a modified agent can under-report. The relay's
+own counters are the ones nobody outside our infrastructure can touch, and they
+currently go to a log file. Making the relay report them is the outstanding
+piece of this, and it is recorded as a known limitation rather than quietly
+left.
+
 ## What must be built
 
-1. **`services/relay`** — a Go UDP forwarder: ticket validation, pair table,
-   forwarding, per-pair byte counters, idle expiry.
-2. **Coordinator: relay allocation** — region selection, ticket issuing.
+1. ~~**`services/relay`**~~ — done: ticket validation, pair table, forwarding,
+   per-pair byte counters, idle expiry, and an unauthenticated probe endpoint
+   for latency measurement.
+2. ~~**Coordinator: relay allocation**~~ — done, and on measured RTT rather
+   than region. See *Selection: measured, not assumed* above.
 3. **Panel** — the `relays` table already exists and is already served to
    agents in their configuration; it needs an admin UI, health, and region
    metadata.
 4. **Agent** — a punch deadline, relay fallback, background re-punch, and
    reporting `path: relay` in the runtime status (the field already exists and
    is documented as carrying `relay`).
-5. **Usage** — per-tenant relayed byte counters and a plan limit.
+5. **Usage** — per-tenant counters exist and are checked against the relay's
+   own count in the lab. Still outstanding: having the *relay* report them, so
+   the billed figure is not one the customer can influence, and a plan limit
+   that acts on it.
 
 ## Sequencing
 
 Windows first: an agent that does not run on Windows has no users to relay for.
-Then this, before any further control-plane work.
+That is still true and still outstanding — the relay work below was done in
+parallel because the Windows pack is waiting on hardware, not on code.
 
 ## What would change this plan
 

@@ -142,10 +142,21 @@ func (t *Ticket) Pair() [32]byte { return PairID(t.Self, t.Peer) }
 // RelayRequest asks the coordinator for a relay to reach one peer.
 type RelayRequest struct {
 	Peer [32]byte
+	// Avoid names a relay the agent was already given and could not use.
+	//
+	// Without it a failover asks the same question and gets the same answer:
+	// the agent has no way to say "not that one" and the coordinator has no
+	// way to know the offer it made did not work. Empty on a first request.
+	Avoid string
 }
 
 // Encode renders a RelayRequest.
-func (r *RelayRequest) Encode() []byte { return append([]byte{}, r.Peer[:]...) }
+//
+// The Avoid field is appended rather than fixed in place, so a coordinator
+// built before it existed reads the peer key and stops, exactly as it did.
+func (r *RelayRequest) Encode() ([]byte, error) {
+	return AppendString(append([]byte{}, r.Peer[:]...), r.Avoid)
+}
 
 // DecodeRelayRequest parses one.
 func DecodeRelayRequest(b []byte) (*RelayRequest, error) {
@@ -156,6 +167,12 @@ func DecodeRelayRequest(b []byte) (*RelayRequest, error) {
 	var out RelayRequest
 	copy(out.Peer[:], b[:32])
 
+	// Absent on requests from an older agent, which is not an error: it simply
+	// has no relay it wants avoided.
+	if avoid, _, err := ReadString(b[32:]); err == nil {
+		out.Avoid = avoid
+	}
+
 	return &out, nil
 }
 
@@ -164,6 +181,11 @@ type RelayOffer struct {
 	Peer     [32]byte
 	Endpoint string
 	Ticket   []byte
+	// Name is the relay's name in the fleet. The agent needs it to say which
+	// relay failed when it asks for another one — an address is not enough,
+	// because the coordinator knows relays by name and a NAT can make the
+	// address the agent sees differ from the one configured.
+	Name string
 }
 
 // Encode renders a RelayOffer.
@@ -175,7 +197,11 @@ func (r *RelayOffer) Encode() ([]byte, error) {
 		return nil, err
 	}
 
-	return AppendString(b, base64.StdEncoding.EncodeToString(r.Ticket))
+	if b, err = AppendString(b, base64.StdEncoding.EncodeToString(r.Ticket)); err != nil {
+		return nil, err
+	}
+
+	return AppendString(b, r.Name)
 }
 
 // DecodeRelayOffer parses one.
@@ -193,13 +219,19 @@ func DecodeRelayOffer(b []byte) (*RelayOffer, error) {
 		return nil, err
 	}
 
-	encoded, _, err := ReadString(b)
+	encoded, rest, err := ReadString(b)
 	if err != nil {
 		return nil, err
 	}
 
 	if out.Ticket, err = base64.StdEncoding.DecodeString(encoded); err != nil {
 		return nil, ErrMalformed
+	}
+
+	// Absent from an offer made by an older coordinator, which costs the agent
+	// only the ability to name this relay when asking for a different one.
+	if name, _, err := ReadString(rest); err == nil {
+		out.Name = name
 	}
 
 	return &out, nil

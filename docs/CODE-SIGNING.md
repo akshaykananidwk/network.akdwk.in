@@ -9,40 +9,68 @@ quotes before buying.
 
 ---
 
-## The short version
+## The short version — corrected 21 September 2026
 
-**Buy Azure Trusted Signing if you qualify. Otherwise buy an EV certificate.**
+**Buy an EV certificate. Azure's service is not open to an Indian entity.**
 
-Do not buy an OV certificate for a network agent. It gets you a signature, but
-SmartScreen still warns until the binary earns reputation, and reputation is
-earned per-signature — so every release restarts the clock until the *publisher
-identity* itself is established. For a security product being installed by a
-shop owner, "Windows protected your PC" on day one is not acceptable.
+My earlier advice to prefer Azure Trusted Signing was wrong for this business,
+and the error was mine: I reasoned from the pricing and the eligibility rule I
+remembered, and did not check which countries it serves. It does not serve
+India. Corrected below, with the source.
+
+Do not buy an OV certificate for a network agent either. It gets you a
+signature, but SmartScreen still warns until the binary earns reputation, and
+reputation is earned per-signature — so every release restarts the clock until
+the *publisher identity* itself is established. For a security product being
+installed by a shop owner, "Windows protected your PC" on day one is not
+acceptable.
+
+## Why Azure is out
+
+Microsoft renamed the service: **Trusted Signing is now "Artifact Signing"**
+(`learn.microsoft.com/azure/artifact-signing/`). Its current quickstart, last
+updated 18 September 2026, states the geography rule in a prerequisites note:
+
+> "Public Trust certificates are available to organizations in the United
+> States, Canada, the European Union, the United Kingdom, Australia, New
+> Zealand, Japan, South Korea, Singapore, Switzerland, Norway, and Israel.
+> Individual developers must be located in the United States or Canada. These
+> geographic restrictions do not apply to Private Trust certificates."
+
+**India is not on that list.** Public Trust is the only kind that Windows and
+SmartScreen trust on a customer's machine; Private Trust certificates are for
+signing inside an organisation that has deployed your own root, which is not
+how software is sold. So the service cannot sign AK Connect for customers,
+whatever the entity's age.
+
+On the age question, which is now moot but worth recording: **the current
+documentation states no three-year rule.** What it says about organisation
+vetting is:
+
+> "For a quicker onboarding process, ensure that public records for the legal
+> business entity that you're validated are up to date."
+
+and that supporting documents "must be issued within the previous 12 months".
+So the relevant dates would have been the *currency* of records, not the
+founding date — the January 2024 GST registration and December 2023 Udyam
+would both have been fine as current registrations, and the April 2018
+operating history would not have been the deciding factor either way.
+
+Confirm the country list at purchase time: it is a note on a page Microsoft
+edits, and it has changed before.
 
 ---
 
 ## The three options
 
-### 1. Azure Trusted Signing — best fit if eligible
+### 1. Azure Artifact Signing (formerly Trusted Signing) — **not available in India**
 
-Microsoft's own signing service. You do not hold a certificate at all; you
-call an API and Microsoft signs with a short-lived certificate chained to
-their roots.
+Microsoft's own signing service, and on paper the best option: about
+**$9.99/month**, no USB token, works in any CI. It is ruled out here purely by
+geography — see above. Worth re-checking if the country list grows, or if AK
+Computer ever has an entity in a listed country.
 
-| | |
-|---|---|
-| Cost | Around **$9.99/month** (Basic) — roughly ₹850/month |
-| Identity check | Microsoft verifies the organisation directly |
-| Eligibility | The legal entity must have existed **3+ years** |
-| SmartScreen | Treated as EV-equivalent for reputation |
-| Hardware | **None.** No USB token, no HSM to lose |
-| CI | Works in GitHub Actions and any pipeline, no hardware attached |
-
-**The eligibility rule is the catch.** If AK Computer is a proprietorship
-registered less than three years ago, you are ineligible today. Check the
-incorporation date — if you are close to three years, this changes the answer.
-
-### 2. EV certificate — the fallback that always works
+### 2. EV certificate — what to buy
 
 | | |
 |---|---|
@@ -189,11 +217,16 @@ verifiable only on Windows, while the agent also runs on Linux.
 
 ## What I would do
 
-1. Check AK Computer's registration date today. Three or more years → Azure
-   Trusted Signing, ₹850/month, done.
-2. Otherwise start the EV application now, budget ₹35,000/year plus a cloud
-   HSM, and expect three weeks.
-3. Apply for a D-U-N-S number either way — free, and it removes the phone
-   verification stall.
+1. **Start the EV application now.** Azure is not an option for an Indian
+   entity, so there is nothing to wait for. Budget ₹35,000/year plus
+   ₹8,000–15,000 for a cloud HSM if you want signing to work in CI rather than
+   on one machine with a token plugged into it.
+2. **Apply for a D-U-N-S number today** — free, takes 2–4 weeks, and it is the
+   single thing that most reliably prevents the independent-phone-verification
+   stall that turns a one-week issuance into three.
+3. Use the **April 2018** operating history where a CA asks for business
+   longevity, and the **January 2024 GST** and **December 2023 Udyam**
+   registrations as the current registration documents — CAs want documents
+   issued recently, and those are the current ones.
 4. Meanwhile, keep shipping unsigned to yourself and your test machines only.
    Nothing goes to a paying customer unsigned.

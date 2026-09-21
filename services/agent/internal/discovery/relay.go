@@ -28,10 +28,20 @@ var repunchSchedule = []time.Duration{
 }
 
 // requestRelay asks the coordinator for a relay to one peer.
-func (c *Client) requestRelay(peer [32]byte) {
-	request := &disco.RelayRequest{Peer: peer}
+//
+// avoid names a relay this agent was given and could not use; empty on a
+// first request. Naming it is the whole of failover from the agent's side: the
+// coordinator cannot see that a relay stopped forwarding, and only the agents
+// on it can.
+func (c *Client) requestRelay(peer [32]byte, avoid string) {
+	request := &disco.RelayRequest{Peer: peer, Avoid: avoid}
 
-	pkt, err := c.seal(disco.TypeRelayRequest, c.opts.CoordKey, request.Encode())
+	encoded, err := request.Encode()
+	if err != nil {
+		return
+	}
+
+	pkt, err := c.seal(disco.TypeRelayRequest, c.opts.CoordKey, encoded)
 	if err != nil {
 		return
 	}
@@ -67,6 +77,11 @@ func (c *Client) handleRelayOffer(header disco.Header, sealed []byte) {
 	c.mu.Lock()
 	c.relayControl[offer.Peer] = control
 	c.relayTicket[offer.Peer] = offer.Ticket
+	c.relayName[offer.Peer] = offer.Name
+	// A fresh offer starts the liveness count over. Without this a peer moved
+	// to a new relay would inherit the dead one's missed acknowledgements and
+	// be failed over again immediately.
+	c.relayMissed[offer.Peer] = 0
 	c.mu.Unlock()
 
 	c.sendRelayBind(offer.Peer, control, offer.Ticket)
@@ -110,6 +125,13 @@ func (c *Client) handleRelayBindAck(from netip.AddrPort, body []byte) {
 	if !found {
 		return
 	}
+
+	// The relay answered, so it is alive. This is the only thing that clears
+	// the miss counter, which is what makes the counter mean "consecutive
+	// unanswered rebinds" rather than "rebinds since the last reset".
+	c.mu.Lock()
+	c.relayMissed[peer] = 0
+	c.mu.Unlock()
 
 	endpoint := netip.AddrPortFrom(from.Addr(), port)
 	c.adoptRelay(peer, endpoint)
@@ -196,8 +218,22 @@ func (c *Client) repunch() {
 	}
 }
 
-// rebindRelays re-presents tickets, which keeps the relay's NAT mapping for
-// this agent alive and refreshes its idea of where we are.
+// relayRebindInterval is how often a relayed peer's ticket is re-presented.
+//
+// It does two jobs: it keeps the NAT mapping between this agent and the relay
+// alive, and — because every bind is acknowledged — it is the heartbeat that
+// tells the agent the relay is still there.
+const relayRebindInterval = 5 * time.Second
+
+// relayMissesBeforeFailover is how many unanswered rebinds mean the relay is
+// gone.
+//
+// Three, so a single dropped packet on a lossy link does not move a working
+// session, and so the decision takes about fifteen seconds rather than the
+// twenty-plus it took when rebinds rode on the coordinator keepalive.
+const relayMissesBeforeFailover = 3
+
+// rebindRelays re-presents tickets and notices when a relay stops answering.
 func (c *Client) rebindRelays() {
 	c.mu.Lock()
 
@@ -205,20 +241,73 @@ func (c *Client) rebindRelays() {
 		peer    [32]byte
 		control netip.AddrPort
 		ticket  []byte
+		name    string
+		dead    bool
 	}
 
 	var bindings []binding
 	for peer, control := range c.relayControl {
-		if c.paths[peer] != pathRelay {
+		// Any peer with a relay assigned, not only one whose relay has already
+		// worked.
+		//
+		// Keying this on paths[peer] == pathRelay was a real defect: the path
+		// only becomes "relay" when a bind is acknowledged, so a relay that was
+		// already dead when the coordinator offered it was never rebound,
+		// never counted as missing, and never failed over. The pair sat in
+		// "connecting" indefinitely. One dead relay stranded every new pair it
+		// was handed to, which is worse than the case this was written for.
+		if c.paths[peer] == pathDirect {
 			continue
 		}
-		bindings = append(bindings, binding{peer: peer, control: control, ticket: c.relayTicket[peer]})
+		// A zero address means a relay was asked for and none has been offered
+		// yet. That is the coordinator's silence, not a relay's, and there is
+		// nothing to bind to.
+		if !control.IsValid() {
+			continue
+		}
+
+		// Count this rebind as missed up front. handleRelayBindAck clears it
+		// when the relay answers, so the counter only grows while nothing
+		// comes back.
+		c.relayMissed[peer]++
+		dead := c.relayMissed[peer] > relayMissesBeforeFailover
+
+		bindings = append(bindings, binding{
+			peer:    peer,
+			control: control,
+			ticket:  c.relayTicket[peer],
+			name:    c.relayName[peer],
+			dead:    dead,
+		})
+
+		if dead {
+			// Reset so the next relay gets a full count of its own rather than
+			// inheriting this one's, and so a coordinator that is also down
+			// does not produce a request every five seconds.
+			c.relayMissed[peer] = 0
+		}
 	}
 	c.mu.Unlock()
 
 	for _, b := range bindings {
+		if b.dead {
+			c.opts.Logf("discovery: relay %s stopped answering for %x…; asking for another",
+				orUnnamed(b.name), b.peer[:6])
+			c.requestRelay(b.peer, b.name)
+
+			continue
+		}
+
 		c.sendRelayBind(b.peer, b.control, b.ticket)
 	}
+}
+
+func orUnnamed(name string) string {
+	if name == "" {
+		return "(unnamed)"
+	}
+
+	return name
 }
 
 func min(a, b int) int {
@@ -227,4 +316,21 @@ func min(a, b int) int {
 	}
 
 	return b
+}
+
+// RelayName is the fleet name of the relay a peer is currently reached
+// through, or empty when the path is direct.
+//
+// Surfaced because "this device is relayed" is not actionable on its own: an
+// operator looking at a slow site needs to know which relay it is on before
+// they can do anything about it.
+func (c *Client) RelayName(peer [32]byte) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.paths[peer] != pathRelay {
+		return ""
+	}
+
+	return c.relayName[peer]
 }

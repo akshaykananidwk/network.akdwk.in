@@ -85,3 +85,22 @@ An entry belongs here only if it is **measured**, **not a correctness bug**, and
 **not blocking**. Anything that fails, corrupts, or misreports gets fixed when
 it is found — that is what the eight defects in `VERIFICATION_REPORT.md` were,
 and none of them was ever a candidate for this list.
+
+## B3 — Enrolment throttling blocks a bulk rollout
+
+**Found:** 21 September 2026, by the lab gate running out of enrolments.
+
+Enrolment and claim share a limit of 60 requests per hour per IP address
+(`security.enroll_rate_per_hour`). A customer installing the agent on forty
+machines in one office comes from one public address: forty enrolments plus
+their claim polls is well past sixty, and the installer sees "Too many
+requests" partway through the afternoon.
+
+**Do not just raise the number.** The thing worth limiting tightly is a
+*failed* enrolment — that is the join-code brute-force vector. A successful
+enrolment, and a claim poll from a device the panel has already issued a uid
+to, are not. Counting the two separately is the fix: strict on failures,
+generous on successes.
+
+**Cost of leaving it:** the first multi-seat installation fails partway, in
+front of the customer, with a message that sounds like our fault because it is.

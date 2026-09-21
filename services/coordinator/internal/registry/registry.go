@@ -29,9 +29,16 @@ type Entry struct {
 	LastSeen  time.Time
 	NetworkID int
 	TenantID  int
-	// Region is where the panel says this device is, used to pick a relay
-	// near it rather than near us.
+	// Region is where the panel says this device is. A hint only: it narrows
+	// nothing on its own and is routinely empty.
 	Region string
+	// RelayRTT is what this device measured, by relay name. This is the real
+	// input to relay selection — the device is the only thing that knows how
+	// far it is from anything, and behind CGNAT its address tells us nothing.
+	RelayRTT map[string]uint16
+	// RTTReportedAt is when that measurement arrived, so a stale one can be
+	// recognised as stale rather than trusted forever.
+	RTTReportedAt time.Time
 }
 
 // Online reports whether the entry is fresh enough to introduce to others.
@@ -58,6 +65,14 @@ func (r *Registry) Upsert(e *Entry) *Entry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// A re-announcement must not throw away what the device measured. The
+	// hello carries presence, not latency, and re-gathering the fleet on every
+	// keepalive would cost a device on 4G real money.
+	if previous, ok := r.byKey[e.PublicKey]; ok && e.RelayRTT == nil {
+		e.RelayRTT = previous.RelayRTT
+		e.RTTReportedAt = previous.RTTReportedAt
+	}
+
 	e.LastSeen = time.Now()
 	r.byKey[e.PublicKey] = e
 
@@ -80,6 +95,26 @@ func (r *Registry) Touch(key [32]byte, reflexive netip.AddrPort) bool {
 
 	entry.LastSeen = time.Now()
 	entry.Reflexive = reflexive
+
+	return true
+}
+
+// SetRelayRTT records a device's view of the relay fleet.
+//
+// Kept separate from Upsert because a hello replaces an entry wholesale, and
+// measurements that survive a re-announcement are more useful than ones that
+// have to be gathered again every twenty seconds.
+func (r *Registry) SetRelayRTT(key [32]byte, samples map[string]uint16) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.byKey[key]
+	if !ok {
+		return false
+	}
+
+	entry.RelayRTT = samples
+	entry.RTTReportedAt = time.Now()
 
 	return true
 }

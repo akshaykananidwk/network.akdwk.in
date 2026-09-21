@@ -262,6 +262,7 @@ func (s *session) peerStatus() []state.RuntimePeer {
 				if path := s.discovery.Path(meta.publicKey); path != "connecting" {
 					entry.Path = path
 				}
+				entry.Relay = s.discovery.RelayName(meta.publicKey)
 			}
 		}
 

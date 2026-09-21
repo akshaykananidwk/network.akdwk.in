@@ -72,7 +72,9 @@ func (r *Relay) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("binding %s: %w", r.opts.Control, err)
 	}
+	r.mu.Lock()
 	r.control = conn
+	r.mu.Unlock()
 
 	r.opts.Logf("relay control on %s", conn.LocalAddr())
 
@@ -101,7 +103,58 @@ func (r *Relay) Run(ctx context.Context) error {
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])
 
-		r.handleBind(pkt, netip.AddrPortFrom(from.Addr().Unmap(), from.Port()))
+		r.handleControl(pkt, netip.AddrPortFrom(from.Addr().Unmap(), from.Port()))
+	}
+}
+
+// handleControl dispatches one control packet.
+//
+// Only two things arrive here: a bind, which is authorised by its ticket, and
+// a probe, which is not authorised at all and so must be harmless.
+func (r *Relay) handleControl(pkt []byte, from netip.AddrPort) {
+	header, _, err := disco.ParseHeader(pkt)
+	if err != nil {
+		return
+	}
+
+	switch header.Type {
+	case disco.TypeRelayBind:
+		r.handleBind(pkt, from)
+	case disco.TypeRelayProbe:
+		r.handleProbe(pkt, from)
+	}
+}
+
+// handleProbe answers a latency measurement.
+//
+// Unauthenticated, because an agent that has not yet been offered this relay
+// has no ticket for it and still needs to know how far away it is. That makes
+// this the one thing on the relay anybody can make it do, so it is built to be
+// worthless to an attacker: the reply is the same size as the request, so
+// bouncing traffic off it gains nothing over sending that traffic directly,
+// and it carries only the nonce it was given, so it cannot be used to probe
+// for state.
+func (r *Relay) handleProbe(pkt []byte, from netip.AddrPort) {
+	_, rest, err := disco.ParseHeader(pkt)
+	if err != nil {
+		return
+	}
+
+	nonce, err := disco.DecodeProbeNonce(rest)
+	if err != nil {
+		return
+	}
+
+	reply := make([]byte, disco.HeaderLen+disco.ProbeNonceLen)
+	disco.WriteHeader(reply, disco.TypeRelayProbeAck, [32]byte{})
+	copy(reply[disco.HeaderLen:], nonce[:])
+
+	r.mu.Lock()
+	conn := r.control
+	r.mu.Unlock()
+
+	if conn != nil {
+		_, _ = conn.WriteToUDPAddrPort(reply, from)
 	}
 }
 
@@ -239,6 +292,26 @@ func (r *Relay) reportUsage() {
 	if len(usage) > 0 {
 		r.opts.OnUsage(usage)
 	}
+}
+
+// ControlAddr is the address the relay is actually listening on.
+//
+// Useful when the caller asked for port 0 — which a test does, so two runs
+// never collide on a fixed port.
+func (r *Relay) ControlAddr() netip.AddrPort {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.control == nil {
+		return netip.AddrPort{}
+	}
+
+	addr, ok := netip.AddrFromSlice(r.control.LocalAddr().(*net.UDPAddr).IP)
+	if !ok {
+		return netip.AddrPort{}
+	}
+
+	return netip.AddrPortFrom(addr.Unmap(), uint16(r.control.LocalAddr().(*net.UDPAddr).Port))
 }
 
 // Sessions is the number of pairs currently relayed.

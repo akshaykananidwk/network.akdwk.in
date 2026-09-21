@@ -335,7 +335,9 @@ final class DeviceService
                     'tcp_port'   => (int) $r['tcp_port'],
                     'public_key' => $r['public_key'],
                 ],
-                Relay::availableFor('')
+                // Region orders the list; it never filters it. A device with
+                // none — the normal case — still measures the whole fleet.
+                Relay::availableFor((string) ($device['region'] ?? ''))
             ),
             'coordinator' => [
                 'host' => Config::get('coordinator.public_host', Config::get('coordinator.host')),

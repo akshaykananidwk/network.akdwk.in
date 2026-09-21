@@ -1,7 +1,10 @@
 package server
 
 import (
+	"fmt"
 	"net/netip"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/coordinator/internal/registry"
@@ -44,7 +47,16 @@ func (s *Server) handleRelayRequest(header disco.Header, sealed []byte, from net
 		return
 	}
 
-	relay := s.pickRelay(self)
+	// The agent names the relay it could not use. Two devices agreeing takes
+	// that relay out of rotation for everyone, which is what turns one pair's
+	// failure into a fleet-wide failover.
+	if request.Avoid != "" && s.health.complain(request.Avoid, header.Sender) {
+		s.opts.Logf("relay %s taken out of rotation: enough devices report it unusable", request.Avoid)
+	}
+
+	peer, _ := s.reg.Get(request.Peer)
+
+	relay := s.pickRelayAvoiding(self, peer, request.Avoid)
 	if relay == nil {
 		s.opts.Logf("no relay available for %s", self.DeviceUID)
 
@@ -63,6 +75,7 @@ func (s *Server) handleRelayRequest(header disco.Header, sealed []byte, from net
 		Peer:     request.Peer,
 		Endpoint: relay.Endpoint,
 		Ticket:   ticket.Encode(),
+		Name:     relay.Name,
 	}
 
 	encoded, err := offer.Encode()
@@ -77,8 +90,7 @@ func (s *Server) handleRelayRequest(header disco.Header, sealed []byte, from net
 
 	s.send(pkt, from)
 
-	s.opts.Logf("offered %s the relay %s for peer %x…",
-		self.DeviceUID, relay.Name, request.Peer[:6])
+	s.opts.Logf("offered %s the relay %s for peer %x…", self.DeviceUID, relay.Name, request.Peer[:6])
 
 	// The other end is offered the same relay, unprompted. Both ends must
 	// bind for anything to flow, and waiting for the peer to independently
@@ -105,6 +117,7 @@ func (s *Server) offerToPeer(peerKey, selfKey [32]byte, relay *RelayTarget) {
 		Peer:     selfKey,
 		Endpoint: relay.Endpoint,
 		Ticket:   ticket.Encode(),
+		Name:     relay.Name,
 	}
 
 	encoded, err := offer.Encode()
@@ -128,23 +141,204 @@ type RelayTarget struct {
 	Secret   []byte
 }
 
-// pickRelay chooses which relay to use.
+// pickRelay chooses which relay a pair should use.
 //
-// Region first: a shop in Ahmedabad relaying through Frankfurt would work and
-// would be unusable. Within a region the choice is round-robin, because the
-// coordinator cannot measure latency from where the agents are — the agents
-// can, and reporting that back is the refinement this leaves room for.
-func (s *Server) pickRelay(entry *registry.Entry) *RelayTarget {
+// Both ends must land on the same relay, so this is one decision made for two
+// devices, not two decisions that happen to agree. The measure is the worse of
+// the two round trips: a relay 5 ms from one end and 300 ms from the other is
+// a 300 ms relay for this conversation, and picking it because one end likes
+// it would be optimising for the wrong device.
+//
+// The numbers come from the agents, because they are the only things that can
+// measure them. A coordinator in Mumbai cannot tell how far a shop in
+// Ahmedabad is from a relay in Chennai, and a device behind CGNAT does not
+// even have an address we could guess from.
+//
+// Region is a tiebreak and nothing more. It is routinely empty, and selection
+// has to work perfectly well when it is — an operator who has not labelled
+// anything should still get the nearest relay.
+// pickRelayAvoiding is pickRelay with one relay excluded, which is what a
+// failover needs: the relay the agent just failed on must not be the answer to
+// "give me another one", even while it is still in rotation for everyone else.
+func (s *Server) pickRelayAvoiding(self, peer *registry.Entry, avoid string) *RelayTarget {
+	if relay := s.pickRelay(self, peer, avoid); relay != nil {
+		return relay
+	}
+
+	// Nothing else in the fleet. Offering the failed relay again is the only
+	// thing left, and a relay that has since come back beats refusing to
+	// answer at all.
+	return s.pickRelay(self, peer, "")
+}
+
+// avoid names a relay to exclude from this decision — the one an agent just
+// failed on. It is a parameter rather than a filtered copy of the fleet
+// because every packet is handled in its own goroutine, so a selection that
+// edited s.opts.Relays even briefly would be two concurrent requests
+// corrupting each other's view of the fleet.
+func (s *Server) pickRelay(self, peer *registry.Entry, avoid string) *RelayTarget {
 	if len(s.opts.Relays) == 0 {
 		return nil
 	}
 
+	var best *RelayTarget
+	var bestScore int
+
 	for _, relay := range s.opts.Relays {
-		if relay.Region != "" && relay.Region == entry.Region {
+		if relay.Name == avoid || s.relayIsDown(relay.Name) {
+			continue
+		}
+
+		score, known := pairScore(relay.Name, self, peer)
+		if !known {
+			continue
+		}
+		if regionMatches(relay, self, peer) {
+			// Worth a little, not worth overriding a measurement: a relay in
+			// the right region that is demonstrably further away is still
+			// further away.
+			score -= regionBonusMs
+		}
+
+		if best == nil || score < bestScore {
+			best, bestScore = relay, score
+		}
+	}
+
+	if best != nil {
+		return best
+	}
+
+	// Nobody has reported a usable measurement for any relay — a brand new
+	// device, or one whose probes are being dropped. Any relay that is not
+	// known to be down beats no connectivity at all.
+	for _, relay := range s.opts.Relays {
+		if relay.Name != avoid && !s.relayIsDown(relay.Name) {
 			return relay
 		}
 	}
 
-	// No regional match: any relay beats no connectivity.
-	return s.opts.Relays[0]
+	return nil
+}
+
+// regionBonusMs is how much a region match is worth, in milliseconds of
+// measured latency. Small on purpose: it settles ties between relays that are
+// genuinely close, and loses to any real difference.
+const regionBonusMs = 5
+
+// pairScore is the worse of the two ends' round trips to one relay.
+//
+// An end that has reported the relay as unreachable rules it out for the pair:
+// a relay only one side can reach cannot carry a conversation between them.
+// An end that has not reported at all is not an objection — a device that has
+// only just started has measured nothing yet, and refusing to relay it until
+// it does would mean refusing to connect it.
+func pairScore(name string, self, peer *registry.Entry) (int, bool) {
+	worst := 0
+	any := false
+
+	for _, entry := range []*registry.Entry{self, peer} {
+		if entry == nil || entry.RelayRTT == nil {
+			continue
+		}
+
+		rtt, ok := entry.RelayRTT[name]
+		if !ok {
+			continue
+		}
+		if rtt == disco.RTTUnreachable {
+			return 0, false
+		}
+
+		any = true
+		if int(rtt) > worst {
+			worst = int(rtt)
+		}
+	}
+
+	return worst, any
+}
+
+// regionMatches reports whether a relay is labelled with either end's region.
+func regionMatches(relay *RelayTarget, self, peer *registry.Entry) bool {
+	if relay.Region == "" {
+		return false
+	}
+
+	for _, entry := range []*registry.Entry{self, peer} {
+		if entry != nil && entry.Region != "" && entry.Region == relay.Region {
+			return true
+		}
+	}
+
+	return false
+}
+
+// handleRelayRTT records what a device measured against the relay fleet.
+//
+// Sealed, so the numbers can only come from the device whose key is on the
+// packet. That matters: relay choice is made from these, and an attacker who
+// could report on someone else's behalf could steer a tenant's traffic onto a
+// relay of their choosing.
+func (s *Server) handleRelayRTT(header disco.Header, sealed []byte) {
+	body, err := disco.Open(sealed, &header.Sender, &s.opts.PrivateKey)
+	if err != nil {
+		return
+	}
+
+	report, err := disco.DecodeRelayRTT(body)
+	if err != nil {
+		return
+	}
+
+	// Only relays this coordinator actually knows about. A device is free to
+	// report whatever it likes; believing a name that is not in the fleet
+	// would let it invent relays.
+	known := make(map[string]bool, len(s.opts.Relays))
+	for _, relay := range s.opts.Relays {
+		known[relay.Name] = true
+	}
+
+	samples := make(map[string]uint16, len(report.Samples))
+	for _, sample := range report.Samples {
+		if known[sample.Name] {
+			samples[sample.Name] = sample.RTT
+		}
+	}
+
+	if len(samples) == 0 {
+		return
+	}
+
+	if !s.reg.SetRelayRTT(header.Sender, samples) {
+		// Never said hello. Measurements from a device we know nothing about
+		// are not something to hold on to.
+		return
+	}
+
+	// Logged because relay choice is otherwise invisible: an operator asking
+	// why a site was put on a particular relay has nothing else to read.
+	if entry, ok := s.reg.Get(header.Sender); ok {
+		s.opts.Logf("relay latency from %s: %s", entry.DeviceUID, formatSamples(samples))
+	}
+}
+
+// formatSamples renders a measurement table for the log, nearest first.
+func formatSamples(samples map[string]uint16) string {
+	names := make([]string, 0, len(samples))
+	for name := range samples {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return samples[names[i]] < samples[names[j]] })
+
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		if samples[name] == disco.RTTUnreachable {
+			parts = append(parts, name+"=unreachable")
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%dms", name, samples[name]))
+	}
+
+	return strings.Join(parts, " ")
 }

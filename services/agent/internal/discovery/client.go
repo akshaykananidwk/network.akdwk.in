@@ -81,6 +81,25 @@ type Client struct {
 	relayTicket  map[[32]byte][]byte
 	repunchCount map[[32]byte]int
 	nextRepunch  map[[32]byte]time.Time
+	// relayName is the fleet name of the relay each peer is on, and
+	// relayMissed counts consecutive rebinds that went unanswered. Together
+	// they are how the agent notices a relay has stopped working: nothing else
+	// on this side can see it, because a dead relay simply goes quiet.
+	relayName   map[[32]byte]string
+	relayMissed map[[32]byte]int
+	// relays is the fleet this device measures against, and relayRTT is what
+	// it measured. Reported to the coordinator, which is the only place that
+	// can compare one device's view against its peer's.
+	relays   []RelayTarget
+	relayRTT map[string]uint16
+	// probesInFlight matches a reply to the probe that asked for it, so a late
+	// answer to an abandoned probe is not timed as if it were fresh.
+	probesInFlight map[[disco.ProbeNonceLen]byte]pendingProbe
+	// lastProbe paces the fleet measurement, lastReport paces sending it, and
+	// rttDirty says whether anything has changed since the last one.
+	lastProbe  time.Time
+	lastReport time.Time
+	rttDirty   bool
 }
 
 // path is how a peer is currently reached.
@@ -139,15 +158,19 @@ func New(opts Options) (*Client, error) {
 	}
 
 	return &Client{
-		opts:         opts,
-		candidates:   make(map[[32]byte][]netip.AddrPort),
-		established:  make(map[[32]byte]netip.AddrPort),
-		paths:        make(map[[32]byte]path),
-		firstSeen:    make(map[[32]byte]time.Time),
-		relayControl: make(map[[32]byte]netip.AddrPort),
-		relayTicket:  make(map[[32]byte][]byte),
-		repunchCount: make(map[[32]byte]int),
-		nextRepunch:  make(map[[32]byte]time.Time),
+		opts:           opts,
+		candidates:     make(map[[32]byte][]netip.AddrPort),
+		established:    make(map[[32]byte]netip.AddrPort),
+		paths:          make(map[[32]byte]path),
+		firstSeen:      make(map[[32]byte]time.Time),
+		relayControl:   make(map[[32]byte]netip.AddrPort),
+		relayTicket:    make(map[[32]byte][]byte),
+		relayName:      make(map[[32]byte]string),
+		relayMissed:    make(map[[32]byte]int),
+		relayRTT:       make(map[string]uint16),
+		probesInFlight: make(map[[disco.ProbeNonceLen]byte]pendingProbe),
+		repunchCount:   make(map[[32]byte]int),
+		nextRepunch:    make(map[[32]byte]time.Time),
 	}, nil
 }
 
@@ -162,9 +185,21 @@ func (c *Client) Run(ctx context.Context) {
 	const keepalive = 20 * time.Second
 
 	c.announce(c.needsHello(keepalive))
+	// Measure the fleet immediately. A device that has to wait two minutes
+	// before it knows which relay is nearest will have already been put on one
+	// by then, and moving an established session costs a reconnection.
+	c.maybeProbeRelays()
 
 	keepaliveTick := time.NewTicker(keepalive)
 	defer keepaliveTick.Stop()
+
+	// Relay binds are re-presented much faster than the coordinator keepalive.
+	// They are one small packet per relayed peer, and they are the only thing
+	// that tells this agent its relay is still alive — at the keepalive's
+	// twenty seconds, a relay that died cost a measured 37% of a 40-second
+	// window before traffic came back.
+	relayTick := time.NewTicker(relayRebindInterval)
+	defer relayTick.Stop()
 
 	// Faster than the keepalive, because the punch deadline is measured in
 	// seconds: a pair that cannot punch should be on a relay quickly, not at
@@ -178,10 +213,15 @@ func (c *Client) Run(ctx context.Context) {
 			return
 		case <-keepaliveTick.C:
 			c.announce(c.needsHello(keepalive))
+			c.reportRelayRTT()
+		case <-relayTick.C:
 			c.rebindRelays()
 		case <-workTick.C:
 			c.escalateStalledPeers()
 			c.repunch()
+			c.expireProbes()
+			c.maybeProbeRelays()
+			c.maybeReportRelayRTT()
 		}
 	}
 }
@@ -215,7 +255,7 @@ func (c *Client) escalateStalledPeers() {
 	for _, peer := range stalled {
 		c.opts.Logf("discovery: no direct path to %s… after %s; asking for a relay",
 			base64Key(peer)[:12], punchDeadline)
-		c.requestRelay(peer)
+		c.requestRelay(peer, "")
 	}
 }
 

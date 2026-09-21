@@ -42,3 +42,6 @@ Thumbs.db
 # The Windows test pack IS committed: a tester needs one URL to download, and
 # a release asset I cannot create from here is no use to them.
 !/services/kit/akconnect-windows-test-pack.zip
+
+# Lab harness scratch: binaries, logs and agent state, rebuilt each run.
+/services/lab/.run/

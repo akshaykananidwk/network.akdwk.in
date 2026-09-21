@@ -30,18 +30,29 @@ and all three remain unmet. See [What Phase 2 has not shown](#what-phase-2-has-n
 | A   | Installer           | **Pass** | Clean install on an empty database; re-installation refused |
 | B   | Auto-update         | **Pass** | 9 runs against live GitHub, 6 rolled back; 8 defects found and fixed |
 | C   | Multi-tenancy (R3)  | **Pass** | Fails closed; holds at 1,000 devices |
-| D   | Networking (R1, R4, R5) | **Partial** | Real tunnels direct and relayed, including where punching cannot work — but only in a Linux lab; Windows and real ISPs untested |
+| D   | Networking (R1, R4, R5) | **Partial** | Real tunnels direct and relayed, relay selection on measured latency, failover drilled with a relay killed mid-traffic — but only in a Linux lab; Windows and real ISPs untested |
 | E   | Security            | **Pass** | With the open items listed under [Known limitations](#known-limitations) |
 | F   | Scale               | **Pass, with a finding** | 1,000 devices fine; address allocation scales with *pool* size |
 | G   | Recovery            | **Pass** | Byte-exact recovery from catastrophic damage |
+| H   | The networking gate | **Pass** | Nine scenarios in one command; found three defects in the code it tests |
 
-Automated suite: **469 assertions, 469 passed, 0 failed**, repeatable across
-eight consecutive runs.
+Automated suites:
 
 ```
-$ php tests/run.php
-  469 passed, 0 failed, 0 skipped  (469 assertions)
+$ php -S 127.0.0.1:8088 -t . tests/dev-server.php &
+$ php tests/run.php --url=http://127.0.0.1:8088
+  468 passed, 0 failed, 1 skipped  (468 assertions)
+
+$ cd services/<each> && go vet ./... && go test -race ./...
+  47 tests, all passing, no races
 ```
+
+The one skip is the two-factor challenge, which needs a super admin with 2FA
+enabled; this installation has none.
+
+The Go tests run under `-race` because the coordinator handles every packet in
+its own goroutine. That is not decoration — it found a data race in this
+release's own relay-selection code, described below.
 
 ---
 
@@ -624,6 +635,233 @@ rather than the unfalsifiable "sha256 matches" it reported before 1.0.7.
 
 ---
 
+## H — The gate, and what it found
+
+### The drills, as one command
+
+Everything in §D above was run by hand the first time. It is now
+`services/lab/run-all.sh`, which builds the namespaces, brings up a real panel,
+coordinator and two real relays, and runs every scenario in one go. It prints
+one table and exits non-zero on any failure, which is what makes it a release
+gate rather than a report.
+
+```
+$ ./services/lab/run-all.sh
+
+  Scenario results
+  CHECK                   RESULT  DETAIL
+  ----------------------  ------  ------------------------------------
+  cone/tunnel             PASS    alpha pinged 10.99.0.3 across two separate NATs
+  cone/direct             PASS    path is direct, not relayed
+  cone/R1                 PASS    default route stays on veth-alpha; 1.1.1.1 does not enter the tunnel
+  relay/tunnel            PASS    alpha pinged 10.99.0.3 with hole punching impossible
+  relay/path              PASS    path is relay
+  relay/R1                PASS    default route stays on veth-alpha; 1.1.1.1 does not enter the tunnel
+  cone-sym/tunnel         PASS    connected via direct
+  cone-sym/R1             PASS    default route stays on veth-alpha; 1.1.1.1 does not enter the tunnel
+  sym-cone/tunnel         PASS    connected via direct
+  sym-cone/R1             PASS    default route stays on veth-alpha; 1.1.1.1 does not enter the tunnel
+  ctrl-down/traffic       PASS    coordinator killed mid-ping; 0% loss (handshake 5s → 25s)
+  relay-down/recovery     PASS    traffic resumed after the relay was killed mid-stream (37% loss over 40s)
+  failover/recovery       PASS    moved from lab-a to lab-b and traffic resumed (49% loss over 40s)
+  accounting/load         PASS    pushed 400 packets of 1000B each, all received
+  accounting/agree        PASS    panel billed 1717684 bytes, relay carried 1717704 — within 0% (tolerance 10%)
+  revoke/cutoff           PASS    traffic stopped 4s after revocation
+
+  16 checks, all passed. The networking proof holds for this build.
+
+$ echo $?
+0
+```
+
+Several results in that table are worth reading twice.
+
+**The controller-down figure is 0% loss, and the handshake simply got older.**
+Not "the ping kept working" — the WireGuard session was never renegotiated at
+all. The drill records the handshake age either side of the kill, and it goes
+from 5s to 25s across a twenty-second window: exactly twenty seconds of ageing
+and no new handshake. That is R6 demonstrated rather than asserted, and the
+handshake age is what makes it a demonstration rather than an assertion.
+
+**The mixed-NAT cases are not deterministic.** `cone-sym` came up *direct* on
+one run and *relayed* on the next, from identical topology. Whether punching
+beats the five-second escalation deadline is a race, and it is a race that
+decides whether a customer costs us relay bandwidth or nothing. The drill
+records which path resulted rather than asserting one, because both are
+correct outcomes — but relay capacity has to be sized for the pessimistic case,
+not the one that happened to show up in a demo.
+
+**Relay recovery is slow, and the numbers say so.**
+
+| Event | Loss over a 40-second window | Outage |
+|---|---|---|
+| Relay killed and restarted, 20-second rebind | 37% | ~15s |
+| Relay killed and restarted, 5-second rebind | 36.5% | ~15s |
+| Relay killed for good, traffic moves to another | 49% | ~20s |
+
+The first two rows are the same number. Shortening the rebind interval from
+twenty seconds to five did **not** make a relay restart cheaper, which means
+something else dominates that recovery — most likely the WireGuard handshake
+backoff already in progress by the time the relay returns. The shorter interval
+earns its place by making failover possible in about fifteen seconds instead of
+a minute, not by making a restart faster, and saying otherwise would be
+claiming an improvement that was not measured.
+
+Twenty seconds of silence when a relay dies is tolerable for a shop's CCTV and
+is not good. The detection is the floor: nothing tells an agent a relay has
+died except the absence of a reply. Watching the data path rather than the
+rebind acknowledgement, or having the coordinator health-check its own fleet
+and push new offers, would both beat it. Neither is built.
+
+### Relay selection, and what the numbers are worth
+
+Relay choice used to be region-then-first-in-the-list. It is now the lowest
+round trip the two agents actually measured, scored for the pair rather than
+for whichever end asked: the worse of the two ends' numbers decides, because a
+relay 5 ms from one device and 300 ms from the other is a 300 ms relay for the
+conversation between them.
+
+Eleven unit tests cover the decision, including the two the requirement names
+explicitly — selection with no region set anywhere, and a region label losing
+to a measurement that contradicts it. Four of them fail against the old
+round-robin code:
+
+```
+$ go test ./internal/server/ -run 'Picks|Selection|Refuses.*Reach|Failover'
+--- FAIL: TestPicksTheRelayWithTheLowestMeasuredRTT
+--- FAIL: TestPicksForTheWorseEndNotTheAsker
+--- FAIL: TestSelectionWorksWithNoRegionsSetAnywhere
+--- FAIL: TestRefusesARelayOneEndCannotReach
+```
+
+**One thing the lab cannot show.** Both lab relays sit on the same host, a
+fraction of a millisecond from both agents. The drill proves the measurement is
+taken, reported, stored and used; it cannot prove the choice is *better*,
+because there is no worse relay to reject. That needs two relays at a real
+distance from each other, and it is not done.
+
+Writing this section surfaced a second problem, which is now fixed. An agent
+probed the fleet at startup but reported the result on the twenty-second
+keepalive, while the deadline that sends a stalled peer to a relay is five
+seconds. Every *first* relay assignment was therefore made with no
+measurements at all and fell back to whichever relay was first in the fleet —
+so latency-based selection applied from the second assignment onwards, which
+is not what it claims to do. Measurements are now sent as soon as the first
+probe round answers, rate-limited so a flapping relay cannot turn into a
+stream of reports, and there are tests for both halves of that.
+
+### Billing: the number checked against something that did not produce it
+
+The panel's relayed-byte figure is what becomes an invoice, so the drill pushes
+a known load through a relayed tunnel and compares that figure against the
+relay's own count of what it forwarded. The two are built from different
+things: the panel's from `rx_delta` + `tx_delta` in each agent's heartbeat, the
+relay's from bytes it actually moved between two sockets.
+
+```
+accounting/load    PASS  pushed 400 packets of 1000B each, all received
+accounting/agree   PASS  panel billed 1717684 bytes, relay carried 1717704
+                         — within 0% (tolerance 10%)
+```
+
+**Twenty bytes apart on 1.7 MB**, or 0.001%. The stated tolerance is 10%
+because the drill does not control everything crossing the relay — WireGuard
+handshakes and keepalives go through it too, and the two counters are sampled
+seconds apart — but the measured agreement is three orders of magnitude inside
+it. The arithmetic is right.
+
+**The convention, which has to be stated rather than discovered.** Both
+counters count ingress *and* egress at each hop: a byte relayed from A to B is
+counted when it arrives at the relay and again when it leaves. 400 packets of
+1000 bytes, echoed, is 800 KB of payload in each direction, and the figure is
+roughly twice that. This is defensible — it is what the relay's bandwidth bill
+looks like — but it is the difference between an invoice and an argument, and
+it belongs in the terms rather than in a customer's inference.
+
+**What this does not show.** The figure is still agent-reported. The drill
+proves the sum is correct when the agents are honest; it cannot prove anything
+about an agent that is not. The relay's counters are the ones a customer cannot
+touch, and they still go to a log file. See
+[Known limitations](#known-limitations).
+
+### A commercial problem the gate surfaced by accident
+
+The ninth scenario failed to enrol a device, and the reason was not the
+network:
+
+```
+error: enrolling: panel returned 429 (rate_limited):
+       Too many requests. Please wait and try again.
+```
+
+Enrolment and claim share a throttle of **60 requests per hour per IP
+address** (`security.enroll_rate_per_hour`). The drill enrols two devices per
+scenario from two addresses, and nine scenarios in, it runs out.
+
+That is correct behaviour for a public endpoint with no credential — it is what
+stops someone grinding through join codes. But it is worth looking at against
+a real rollout. A customer installing the agent on **forty machines in one
+office in one afternoon** comes from one public address. Each machine sends one
+enrolment and then polls `claim` until an administrator approves it. Forty
+machines is comfortably past sixty requests, and the failure arrives as
+"Too many requests" on a laptop belonging to whoever is doing the installing.
+
+**This is unfixed and it will bite the first multi-seat customer.** The limit
+should not simply be raised: the brute-force vector is *failed* enrolments, and
+those deserve a tight limit. Successful enrolments and claims by a device that
+has already been accepted do not. Counting the two separately — strict on
+failures, generous on successes — is the standard shape and is not built.
+
+Recorded in BACKLOG.md. The drill clears the throttle between scenarios so it
+measures the network rather than this, which is the right thing for a drill and
+would be the wrong thing to do in production.
+
+#### What the gate caught
+
+Three defects in the code it was written to test, which is the only reason to
+believe it is worth running.
+
+**The agent panicked on its first relay offer.** `assignment to entry in nil
+map` — two maps added for relay failover were declared and never initialised.
+The build was clean, `go vet` was clean and the unit tests were green, because
+nothing constructed a client and handed it an offer. It would have crashed
+every device behind a symmetric NAT, which is most of the customers the relay
+exists for.
+
+**An agent could not fail over from a relay that never worked.** Failover keyed
+on the peer's path already being `relay`, which only becomes true once a bind
+is acknowledged. A relay that was already dead when the coordinator offered it
+was never rebound, never counted as missing and never replaced: the pair sat in
+`connecting` indefinitely.
+
+This one is worth dwelling on, because it is worse than the failure failover
+was written for. Failover protects a pair whose relay dies under them. This
+defect meant that once a relay was down, *every new pair the coordinator handed
+it to* was stranded — and the coordinator goes on handing it out until two
+separate devices have complained, which they cannot do if they are stuck. It
+surfaced only because the failover scenario leaves a relay dead and the
+accounting scenario ran next against the same fleet. No unit test I would have
+thought to write covers "the thing was broken before you first touched it".
+
+**Relay selection mutated shared state.** `pickRelay` briefly removed a relay
+from `s.opts.Relays` to exclude it, then put it back. Every packet is handled
+in its own goroutine, so two concurrent requests would have corrupted each
+other's view of the fleet. Found by running the Go tests under `-race`, which
+they now are, in every service.
+
+All three have regression tests that fail against the unfixed code.
+
+It also caught three faults in itself, which are recorded here because a drill
+that is wrong is worse than no drill:
+
+| Fault | Effect |
+|---|---|
+| `ip netns exec` forks, so killing the recorded pid left the agent running | Every scenario leaked two agents; a later scenario failed for reasons that had nothing to do with it |
+| `ping` prints `loss,` with a comma, and the parser matched `loss` | Every failover measurement read `?%` — the drill could not measure the thing it existed to measure |
+| The control plane bound to the bridge address, which each scenario deletes | Nothing ran at all until the sockets moved to the wildcard address |
+
+---
+
 ## What this verification found
 
 The single most important result is not in the table above. It is that **three
@@ -736,7 +974,27 @@ These are real and currently shipped.
    are re-written afterwards, and the run log on disk is authoritative, but
    the row is not a complete account of a rolled-back run.
 
-5. **PHP cannot hold a socket open.** There are no WebSockets; live progress
+5. **The billed figure is agent-reported.** The panel meters relayed bytes
+   from `rx_delta` + `tx_delta` in each end's heartbeat. The drill in
+   `run-all.sh` checks that figure against the relay's own count of what it
+   forwarded and they agree, which shows the *arithmetic* is right — but a
+   customer running a modified agent can still under-report and be billed
+   less. The relay's counters are the ones nobody outside our infrastructure
+   can touch, and they currently go to a log file and nowhere else. Making the
+   relay report them is the fix, and it is not done.
+
+   Both counters use the same convention: a relayed byte is counted where it
+   arrives and again where it leaves, so the figure is ingress plus egress at
+   each hop. That has to be stated on an invoice rather than discovered by a
+   customer.
+
+6. **Relay failover costs about fifteen seconds.** Three unanswered rebinds at
+   five-second intervals is the detection time, and it is a floor: nothing
+   tells an agent a relay has died except the absence of a reply. Measured
+   loss when a relay was killed mid-stream, before this work, was 37% of a
+   40-second window.
+
+7. **PHP cannot hold a socket open.** There are no WebSockets; live progress
    uses Server-Sent Events. This was a deliberate choice, stated when it was
    made, not a limitation discovered late.
 

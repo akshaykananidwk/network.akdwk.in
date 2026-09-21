@@ -39,7 +39,11 @@ type RuntimePeer struct {
 	Endpoint  string `json:"endpoint"`
 	// Path is "direct" once a handshake has completed, "relay" when the
 	// endpoint is a relay, and "connecting" before either.
-	Path             string `json:"path"`
+	Path string `json:"path"`
+	// Relay is the fleet name of the relay carrying this peer, empty when
+	// the path is direct. An operator diagnosing a slow site needs to know
+	// which relay it is on, not only that it is on one.
+	Relay            string `json:"relay,omitempty"`
 	LastHandshakeAgo string `json:"last_handshake_ago"`
 	RXBytes          int64  `json:"rx_bytes"`
 	TXBytes          int64  `json:"tx_bytes"`

@@ -31,6 +31,8 @@ func (s *Server) handle(ctx context.Context, pkt []byte, from netip.AddrPort) {
 		s.handleHello(ctx, header, rest, from)
 	case disco.TypePing:
 		s.handlePing(header, rest, from)
+	case disco.TypeRelayRTT:
+		s.handleRelayRTT(header, rest)
 	case disco.TypeRelayRequest:
 		s.handleRelayRequest(header, rest, from)
 	default:
