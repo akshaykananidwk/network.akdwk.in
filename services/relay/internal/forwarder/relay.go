@@ -17,6 +17,15 @@ type Options struct {
 	Control string
 	// ListenIP is the address data sockets bind to. Empty means all.
 	ListenIP string
+	// DataPortFrom and DataPortTo bound the ports data sockets are given.
+	//
+	// Zero means "whatever the kernel hands out", which is the ephemeral range
+	// — 32768 to 60999 on a normal Linux box. That is fine in a lab and a poor
+	// instruction for a public server: "open UDP 32768-60999" is most of the
+	// unprivileged port space, and nobody should be asked to do it. Pinning a
+	// range makes the firewall rule a range an operator can actually justify.
+	DataPortFrom int
+	DataPortTo   int
 	// Secret is shared with the coordinator and verifies every ticket.
 	Secret []byte
 	// IdleTimeout closes a session that has carried nothing for this long.
@@ -189,7 +198,11 @@ func (r *Relay) handleBind(pkt []byte, from netip.AddrPort) {
 
 	session := r.sessionFor(ticket)
 
-	sd, err := session.bind(ticket.Self, from, r.opts.ListenIP, r.opts.Logf)
+	sd, err := session.bind(ticket.Self, from, dataPorts{
+		ip:   r.opts.ListenIP,
+		from: r.opts.DataPortFrom,
+		to:   r.opts.DataPortTo,
+	}, r.opts.Logf)
 	if err != nil {
 		r.opts.Logf("bind failed for %s: %v", from, err)
 

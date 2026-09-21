@@ -10,6 +10,7 @@ package forwarder
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"net/netip"
 	"sync"
@@ -94,7 +95,7 @@ func (s *Session) Close() {
 // Re-binding an existing side updates its address rather than allocating
 // again, so an agent whose NAT mapping moved keeps the same relay port and the
 // WireGuard session it has already established.
-func (s *Session) bind(self [32]byte, from netip.AddrPort, listen string, logf func(string, ...any)) (*side, error) {
+func (s *Session) bind(self [32]byte, from netip.AddrPort, ports dataPorts, logf func(string, ...any)) (*side, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -122,9 +123,9 @@ func (s *Session) bind(self [32]byte, from netip.AddrPort, listen string, logf f
 		return nil, fmt.Errorf("pair already has two ends")
 	}
 
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(listen)})
+	conn, err := ports.listen()
 	if err != nil {
-		return nil, fmt.Errorf("allocating a port: %w", err)
+		return nil, err
 	}
 
 	local := conn.LocalAddr().(*net.UDPAddr)
@@ -213,3 +214,47 @@ func (s *Session) pump(sd *side, logf func(string, ...any)) {
 
 // PairKeyOf is a small helper so callers do not import disco for one function.
 func PairKeyOf(a, b [32]byte) [32]byte { return disco.PairID(a, b) }
+
+// dataPorts is where a session's own socket may bind.
+type dataPorts struct {
+	ip       string
+	from, to int
+}
+
+// listen opens a data socket inside the configured range.
+//
+// With no range it asks the kernel, which is what this always did. With one it
+// walks the range from a random start rather than from the bottom: starting at
+// the bottom every time would make the first few ports carry every session on
+// a busy relay, and a restart would reuse exactly the ports whose old
+// conversations are still being retried.
+func (p dataPorts) listen() (*net.UDPConn, error) {
+	ip := net.ParseIP(p.ip)
+
+	if p.from <= 0 || p.to < p.from {
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip})
+		if err != nil {
+			return nil, fmt.Errorf("allocating a port: %w", err)
+		}
+
+		return conn, nil
+	}
+
+	width := p.to - p.from + 1
+	start := rand.IntN(width)
+
+	for i := 0; i < width; i++ {
+		port := p.from + (start+i)%width
+
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip, Port: port})
+		if err == nil {
+			return conn, nil
+		}
+	}
+
+	// Every port taken means the relay is at capacity, which is a different
+	// problem from a bind failing, and an operator needs to be told which.
+	return nil, fmt.Errorf(
+		"no free port in the configured data range %d-%d; this relay is carrying as many "+
+			"sessions as it has ports", p.from, p.to)
+}

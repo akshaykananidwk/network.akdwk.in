@@ -1,12 +1,13 @@
 {
-  "version": "1.8.0",
-  "released_at": "2026-09-21T22:00:00Z",
+  "version": "1.9.0",
+  "released_at": "2026-09-22T06:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Split DNS: machines answer to names like nvr.hotel-abc.acme.internal instead of addresses the panel invented. Our domain only — the agent's resolver refuses every other name and never forwards, so it cannot become a customer's resolver. Also adds panel endpoints for advertising routes and naming the machines inside them.",
+  "notes": "The release the pilot runs on: a Windows installer a customer can use without a command line, a deployment checklist for the panel and the edge servers, and clash detection that reports to the panel instead of a log file nobody reads. Windows DNS is NRPT only — no hosts-file fallback, because antivirus flags that.",
   "migrations": [
-    "2026_09_21_160000_add_route_hosts.php"
+    "2026_09_21_180000_add_device_problems.php",
+    "2026_09_21_190000_add_network_mapped_pool.php"
   ],
   "protected": [
     ".env",

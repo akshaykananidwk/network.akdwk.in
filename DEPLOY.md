@@ -1,332 +1,485 @@
-# Deployment
+# Deploying AK Connect for real
 
-Three things to get right: point the web server at the repository root with
-everything except the public entry points denied, give PHP the extensions it
-needs, and set up the cron line. Everything else the installer handles.
+Two machines, in this order:
+
+1. **The panel**, on the aaPanel VPS, at `network.akdwk.in`, installed through
+   `/install` exactly as a customer would.
+2. **The coordinator and one relay**, on a public India VPS.
+
+Then the field kit is pointed at both, and the shop / hotel / 4G test runs
+against this rather than against the lab.
+
+Work through it in order and do not skip a check. Where a step says **Expect**,
+that is what I saw when I ran the same command; if yours differs, stop and send
+me the difference rather than carrying on.
+
+**What I could and could not verify.** Everything that runs on a Linux machine
+without your credentials — the installer, its requirement checks, the services,
+the systemd units, the port arithmetic, the sizing numbers — I ran here and the
+output below is real. Everything that needs *your* VPS, *your* DNS and *your*
+aaPanel — TLS, the vhost, the firewall, the public addresses — I could not, and
+those steps say so.
 
 ---
 
-## Apache
+## What to buy
 
-`mod_rewrite` must be enabled **and** `.htaccess` must be honoured. The
-shipped `.htaccess` does the rest.
+### The panel
 
-```apache
-<VirtualHost *:443>
-    ServerName net.example.com
-    DocumentRoot /var/www/net.example.com
+The aaPanel VPS you already have. What it needs:
 
-    SSLEngine on
-    SSLCertificateFile    /etc/letsencrypt/live/net.example.com/fullchain.pem
-    SSLCertificateKeyFile /etc/letsencrypt/live/net.example.com/privkey.pem
+| | |
+|---|---|
+| PHP | 8.1 or newer, with `pdo_mysql`, `mbstring`, `openssl`, `curl`, `zip`, `sodium` |
+| Database | MariaDB 10.4+ or MySQL 5.7+ |
+| Disk | 2 GB free, plus room for backups — each one is around 45 MB |
+| Memory | 1 GB is enough; the panel is PHP request-response and holds nothing between requests |
 
-    <Directory /var/www/net.example.com>
-        # Without this the shipped .htaccess is ignored and the application
-        # directories become readable over the web.
-        AllowOverride All
-        Require all granted
-        Options -Indexes -MultiViews
-    </Directory>
+### The coordinator and relay VPS
 
-    # Long-running steps: a database dump or a large file copy.
-    <IfModule mod_fcgid.c>
-        FcgidIOTimeout 900
-    </IfModule>
+Small. Both services are Go binaries that forward UDP and hold almost nothing.
 
-    ErrorLog  ${APACHE_LOG_DIR}/net.example.com-error.log
-    CustomLog ${APACHE_LOG_DIR}/net.example.com-access.log combined
-</VirtualHost>
+| | Measured |
+|---|---|
+| Coordinator binary | 9.1 MB |
+| Relay binary | 4.0 MB |
+| Relay at rest | 5.2 MB resident |
+| Relay per session | **2 KB in the process**, plus the kernel's own socket buffers, which are the larger half |
 
-<VirtualHost *:80>
-    ServerName net.example.com
-    Redirect permanent / https://net.example.com/
-</VirtualHost>
-```
+A session is two UDP sockets and two goroutines. The process cost is small
+enough to ignore; what actually sizes the machine is the kernel's socket
+buffers and the bandwidth.
+
+**Buy: 1 vCPU, 1 GB RAM, 25 GB disk, and the largest bandwidth allowance you
+can get cheaply.** Bandwidth is the thing that will run out, not CPU or memory.
+Every relayed byte is counted twice — once in, once out — so a customer pulling
+a 2 Mbit camera stream for eight hours costs about 14 GB of the allowance.
+
+Put it in **Mumbai or Bangalore**. The relay is a fallback path, and its whole
+value is latency; a relay in Singapore makes a Gujarat-to-Gujarat call go to
+Singapore and back.
+
+### Ports to open on the VPS firewall
+
+Exactly these, and nothing else:
+
+| Port | Protocol | What it is |
+|---|---|---|
+| 8443 | **UDP** | The coordinator. Agents seal their announcements to it |
+| 9000 | **UDP** | The relay's control port, where agents ask for a session |
+| 51900–52400 | **UDP** | The relay's data sockets |
+| 22 | TCP | ssh, if it is not open already |
+
+**No TCP is needed for either service.** If your provider's firewall defaults
+to allowing outbound and blocking inbound, those four lines are the whole
+configuration.
+
+The data range is pinned deliberately. Left alone, the relay takes whatever
+port the kernel hands out, which on Linux means 32768–60999 — most of the
+unprivileged port space, and not something anybody should be asked to open.
+`--data-ports 51900-52400` is in the systemd unit and gives room for 250
+concurrent sessions.
+
+---
+
+## Stage 1 — The panel · 30 min
+
+### 1a — DNS and the vhost
+
+In aaPanel, add a site for `network.akdwk.in` and point the domain's A record
+at the VPS. Then, in **Website → SSL**, issue a Let's Encrypt certificate and
+turn **Force HTTPS** on.
+
+**Expect:** `https://network.akdwk.in/` loads something — aaPanel's default
+page is fine at this point.
+
+**Do not continue until HTTPS works.** The agent refuses to send a device token
+over plain HTTP, and the coordinator refuses a panel URL that is not https, so
+everything after this will fail in ways that look like different problems.
+
+*I could not verify this step. It is your DNS, your certificate and your
+aaPanel.*
+
+### 1b — Put the code there
 
 ```bash
-a2enmod rewrite ssl headers
-systemctl reload apache2
+cd /www/wwwroot/network.akdwk.in
+git clone https://github.com/akshaykananidwk/network.akdwk.in.git .
+chown -R www:www .
+chmod -R 755 .
+chmod -R 775 storage uploads config
 ```
 
-Confirm rewriting actually works before going further — the installer's
-requirements step probes it with a real request, which is the check that
-matters.
+In aaPanel, set the site's **document root** to `/www/wwwroot/network.akdwk.in/public`.
 
----
+**This matters more than it looks.** Everything outside `public/` — the
+configuration, the database credentials, the private keys — must not be
+reachable over the web. If the document root is the repository root, they are.
 
-## nginx
+**Check it, from your own machine:**
 
-nginx does not read `.htaccess` **at all**, so the denials have to be in the
-server block. Getting this wrong exposes `config/config.php`.
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' https://network.akdwk.in/config/config.php
+curl -sS -o /dev/null -w '%{http_code}\n' https://network.akdwk.in/.env
+```
+
+**Expect:** `404` for both. A `200` means the document root is wrong; fix it
+before going further.
+
+### 1c — URL rewriting
+
+aaPanel's nginx needs one rule. In **Website → Config**, inside the `server`
+block:
 
 ```nginx
-server {
-    listen 443 ssl http2;
-    server_name net.example.com;
-    root /var/www/net.example.com;
-    index index.php;
-
-    ssl_certificate     /etc/letsencrypt/live/net.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/net.example.com/privkey.pem;
-
-    client_max_body_size 20m;
-
-    # Everything that is not a real file goes to the front controller.
-    location / {
-        try_files $uri $uri/ /index.php?$query_string;
-    }
-
-    # The installer's mod_rewrite probe.
-    location = /__rewrite_probe {
-        try_files /install/probe.php =404;
-        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME $document_root/install/probe.php;
-    }
-
-    # Application directories — nginx has no .htaccess to fall back on.
-    location ~ ^/(app|config|database|storage|cli|services|tests)/ {
-        deny all;
-        return 403;
-    }
-
-    # Dotfiles, the manifest, the version marker, SQL and logs.
-    location ~ /\.(?!well-known) { deny all; }
-    location ~ \.(sql|log)$       { deny all; }
-    location = /update.json       { deny all; }
-    location = /VERSION           { deny all; }
-
-    location ~ \.php$ {
-        include fastcgi_params;
-        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-
-        # A backup or a file copy can outlast the default 60s.
-        fastcgi_read_timeout 900;
-    }
-
-    location ~* \.(css|js|svg|png|jpg|woff2?)$ {
-        expires 30d;
-        add_header Cache-Control "public, immutable";
-    }
-
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-}
-
-server {
-    listen 80;
-    server_name net.example.com;
-    return 301 https://$host$request_uri;
+location / {
+    try_files $uri $uri/ /index.php?$query_string;
 }
 ```
 
-Verify the denials actually bite:
+Reload nginx.
+
+### 1d — The database
+
+In aaPanel, **Database → Add**: name `akconnect`, user `akconnect`, and let it
+generate the password. Write the password down.
+
+### 1e — Install
+
+Open `https://network.akdwk.in/install` in a browser and work through the
+wizard. It asks for the database details from 1d, an administrator email and
+password, and the coordinator's address — leave the coordinator fields alone
+for now; Stage 3 fills them in.
+
+The command-line equivalent, which is what I ran here:
 
 ```bash
-curl -o /dev/null -w '%{http_code}\n' https://net.example.com/config/config.php   # 403
-curl -o /dev/null -w '%{http_code}\n' https://net.example.com/app/Core/DB.php     # 403
-curl -o /dev/null -w '%{http_code}\n' https://net.example.com/health.php          # 200
+php cli/install.php --print-template > answers.json
+# edit answers.json
+php cli/install.php --answers=answers.json
 ```
 
----
+**Expect** — this is the real output, from a real run:
 
-## aaPanel
+```
+Checking requirements…
+  ✗ URL rewriting: probe request failed (need working)
+    Enable mod_rewrite and set "AllowOverride All" for this directory, or add the equivalent rule to your nginx config.
+  ! URL rewriting could not be verified from the command line. Confirm it once the site is reachable.
+  ✓ Requirements satisfied
+Connecting to the database…
+  ✓ Connected to 10.11.14-MariaDB-0ubuntu0.24.04.1.
+Importing the schema…
+  ✓ 27 tables created.
+Creating the administrator…
+  ✓ admin@akdwk.in
+  ✓ GitHub updates configured for akshaykananidwk/network.akdwk.in
+Writing the configuration…
+  ✓ config/config.php, .env, install/install.lock
 
-1. **Website → Add site**, domain `net.example.com`, PHP 8.2, no database
-   (the installer creates one, or create it yourself).
-2. **Database → Add database**; note the name, user and password.
-3. Upload the repository to the site root (or `git clone` into it).
-4. **Website → Settings → Site directory**: leave *Running directory* at `/`.
-   The front controller is at the root.
-5. **Website → Settings → PHP version → Install extensions**: confirm
-   `pdo_mysql openssl curl zip mbstring fileinfo`, and add `sodium` and
-   `opcache`. `fileinfo` and `sodium` are often off by default.
-6. **Website → Settings → Configuration**, raise the limits the updater needs:
-
-   ```ini
-   max_execution_time = 300
-   memory_limit = 256M
-   upload_max_filesize = 20M
-   post_max_size = 20M
-   ```
-
-7. Fix ownership so PHP can write:
-
-   ```bash
-   chown -R www:www /www/wwwroot/net.example.com
-   chmod -R 775 /www/wwwroot/net.example.com/storage \
-                /www/wwwroot/net.example.com/uploads \
-                /www/wwwroot/net.example.com/config
-   ```
-
-8. **Website → SSL → Let's Encrypt**, then turn on *Force HTTPS*.
-9. Open `https://net.example.com/install`.
-10. **Cron → Add task**, type *Shell Script*, every 5 minutes:
-
-    ```bash
-    /www/server/php/82/bin/php /www/wwwroot/net.example.com/cli/worker.php
-    ```
-
-11. Delete the installer: `rm -rf /www/wwwroot/net.example.com/install`.
-
-> aaPanel's nginx template does not read `.htaccess`. If the site runs nginx
-> rather than Apache, paste the `location` blocks from the nginx section into
-> **Website → Settings → Configuration** or the install is exposed.
-
----
-
-## PHP configuration
-
-```ini
-; Long enough for a database dump or a large file copy. The updater works in
-; resumable steps, so a lower value is survivable — it just causes retries.
-max_execution_time = 300
-memory_limit = 256M
-
-; Uploads: agent binaries and restored backups.
-upload_max_filesize = 20M
-post_max_size = 20M
-
-; Never in production.
-display_errors = Off
-log_errors = On
-
-; Recommended. The updater calls opcache_reset() after applying files; without
-; it, old bytecode keeps serving and the update appears not to have happened.
-opcache.enable = 1
-opcache.validate_timestamps = 1
-opcache.revalidate_freq = 2
+Installation complete.
 ```
 
----
+**The rewriting line is expected from the command line** and not from the
+browser: the installer probes its own URL, and there is no web server answering
+when it runs as a CLI script. Through `/install` in a browser it should be a
+tick. If it is a cross *there*, 1c did not take.
 
-## Permissions
+**27 tables** is the number for this release. Fewer means the schema import
+stopped partway.
+
+### 1f — The worker
 
 ```bash
-# Owned by the web server user, readable by nobody else.
-chown -R www-data:www-data /var/www/net.example.com
-find /var/www/net.example.com -type d -exec chmod 755 {} \;
-find /var/www/net.example.com -type f -exec chmod 644 {} \;
-
-# Writable at runtime.
-chmod -R 775 storage uploads config
-
-# Credentials.
-chmod 640 config/config.php config/.env
+crontab -e
 ```
 
-After installing, `config/` no longer needs to be writable. Tightening it to
-`755` is a reasonable hardening step — but the updater needs it writable again
-only if you ever regenerate the config, which it does not do.
+Add the line the installer printed — it has the right PHP binary and the right
+paths already:
 
----
-
-## Scheduler
-
-```cron
-*/5 * * * * /usr/bin/php /var/www/net.example.com/cli/worker.php >> /var/www/net.example.com/storage/logs/cron.log 2>&1
+```
+*/5 * * * * /usr/bin/php8.1 /www/wwwroot/network.akdwk.in/cli/worker.php >> /www/wwwroot/network.akdwk.in/storage/logs/cron.log 2>&1
 ```
 
-One line covers update checks, the offline-device sweep, scheduled backups,
-retention pruning, queued jobs and alerts. Each task decides for itself
-whether it is due, so there is nothing else to schedule.
-
-Confirm it works:
+Then remove the installer:
 
 ```bash
-sudo -u www-data php /var/www/net.example.com/cli/worker.php --verbose
+rm -rf /www/wwwroot/network.akdwk.in/install
 ```
 
----
-
-## The Go services (Phase 2)
-
-Not built yet — see [PROGRESS.md](PROGRESS.md). When they land, they deploy
-separately from the panel; the panel does not need them to run.
-
-The intended shape:
-
-```yaml
-# services/docker-compose.yml
-services:
-  coordinator:
-    build: ./coordinator
-    restart: unless-stopped
-    ports:
-      - "8443:8443/udp"     # STUN-like probe and rendezvous
-      - "8443:8443/tcp"     # control channel
-    environment:
-      PANEL_URL:      https://net.example.com
-      PANEL_SECRET:   ${COORDINATOR_SHARED_SECRET}   # config coordinator.shared_secret
-      REDIS_URL:      redis://redis:6379
-    depends_on: [redis]
-
-  relay:
-    build: ./relay
-    restart: unless-stopped
-    ports:
-      - "51820:51820/udp"   # WireGuard
-      - "443:443/tcp"       # fallback where UDP is blocked
-    environment:
-      RELAY_NAME:   in-bom-1
-      RELAY_REGION: in
-      PANEL_URL:    https://net.example.com
-      PANEL_SECRET: ${COORDINATOR_SHARED_SECRET}
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes: [redis-data:/data]
-
-volumes:
-  redis-data:
-```
-
-A relay prints its public key on first start; register it under
-**Relays → Register a relay**. Relays never see plaintext, so they can sit on
-cheap hosts in whatever regions you need.
-
-Firewall: UDP 51820 and TCP 443 to each relay, UDP and TCP 8443 to the
-coordinator. Agents need outbound UDP; the TCP fallback exists for networks
-that block it.
-
----
-
-## Scaling out
-
-The web tier is stateless — sessions are in MySQL — so it scales by adding
-nodes behind a load balancer.
-
-* Set `app.trusted_proxies` to the balancer's addresses, or `Request::ip()`
-  will see the balancer for every client and the rate limiter will treat the
-  whole internet as one caller.
-* Share `storage/backups` (NFS or S3-compatible), or take backups on one
-  designated node only.
-* Turn on Redis (`redis.enabled`) so rate limiting and caching are shared.
-* Point `db.read_host` at a replica; the data layer already splits
-  `DB::read()` from `DB::write()`.
-* Run the cron worker on **one** node. It takes a lock, so a second copy is
-  harmless, but there is no reason to pay for it.
-
----
-
-## Upgrading an existing install
-
-Use the panel: **System → Updates → Update now**, or `php cli/update.php
---apply`. A backup is taken and verified first, and a failure rolls back
-automatically.
-
-To upgrade by hand — restoring from a backup, or recovering a failed
-rollback:
+**Check:**
 
 ```bash
-cd /var/www/net.example.com
-php cli/backup.php                      # take one first
-tar -xzf storage/backups/<timestamp>/files.tar.gz
-php cli/migrate.php
-rm -f storage/maintenance.flag
+curl -sS -o /dev/null -w '%{http_code}\n' https://network.akdwk.in/install/
 ```
 
-`config/config.php`, `config/.env` and `uploads/` are never touched by an
-update and do not need restoring.
+**Expect:** `404`.
+
+### 1g — Sign in
+
+Open `https://network.akdwk.in/login` and sign in with the administrator
+account. Turn on two-factor authentication now, while you are thinking about
+it: **Profile → Two-factor**.
+
+---
+
+## Stage 2 — The coordinator and relay · 20 min
+
+On the India VPS, as root.
+
+### 2a — Build or fetch the binaries
+
+On a machine with Go 1.24:
+
+```bash
+cd services/coordinator && GOOS=linux GOARCH=amd64 go build -trimpath \
+    -ldflags "-s -w -X main.version=$(cat ../../VERSION)" -o akconnect-coordinator ./cmd/akconnect-coordinator
+cd ../relay && GOOS=linux GOARCH=amd64 go build -trimpath \
+    -ldflags "-s -w -X main.version=$(cat ../../VERSION)" -o akconnect-relay ./cmd/akconnect-relay
+```
+
+Copy both to the VPS.
+
+### 2b — Put them in place
+
+```bash
+install -m 755 akconnect-coordinator /usr/local/bin/
+install -m 755 akconnect-relay       /usr/local/bin/
+akconnect-coordinator --version
+akconnect-relay --version
+```
+
+**Expect:** the version you built, on both.
+
+### 2c — Install the services
+
+From a copy of this repository's `deploy/` directory on the VPS:
+
+```bash
+./install-edge.sh \
+    --panel https://network.akdwk.in \
+    --relay-name mumbai-1 \
+    --public-host <the VPS's public hostname or IP> \
+    --region in
+```
+
+**Expect:**
+
+```
+── checking what is here
+  both binaries are in /usr/local/bin
+
+── creating the service account
+  created the akconnect system user
+
+── generating keys and secrets
+  generated a coordinator keypair and two shared secrets
+
+── installing the services
+  akconnect-relay is running
+  akconnect-coordinator is running
+
+── what to do next
+  …
+```
+
+It ends by printing the coordinator's **public key** and the **shared secret**
+the panel needs. Keep that output.
+
+It is safe to run twice. It will not regenerate the keys — regenerating the
+coordinator's key would orphan every agent that already has its public half —
+so to start over you delete `/etc/akconnect/coordinator.env` by hand first.
+
+**What I verified here**, on a Linux box without systemd as pid 1, which is as
+far as this can be taken without your VPS:
+
+- the script runs to the point where it calls `systemctl`, and stops there with
+  a clear error rather than half-configuring anything;
+- it creates the `akconnect` system user with no shell and no home;
+- it generates the keypair and both secrets, and derives the relay's secret
+  variable name correctly (`mumbai-1` → `AKCONNECT_RELAY_SECRET_MUMBAI_1`);
+- the files land with the right ownership and mode:
+
+```
+/etc/akconnect                              750 root:akconnect
+/etc/akconnect/coordinator.env              640 root:akconnect
+/etc/akconnect/relay.env                    640 root:akconnect
+/etc/akconnect/coordinator.secret.for-panel 640 root:akconnect
+/etc/akconnect/coordinator.pub              644 root:root
+```
+
+- both units pass `systemd-analyze verify` with no warnings;
+- **both services start from those exact files**, which is the thing most
+  likely to be quietly wrong:
+
+```
+[mumbai-1] relay control on 0.0.0.0:9000
+
+coordinator listening on 0.0.0.0:8443
+public key: BIKso32CKSI+h6OABJ4zyKiCFbRvwWdQVS9IyVdElTE=
+```
+
+- and the public key the coordinator prints is byte-for-byte the one in
+  `coordinator.pub`, so the value you paste into the panel is the value the
+  coordinator is actually running with.
+
+*What I could not do is run it under systemd on your VPS, or open your
+firewall.*
+
+### 2d — Open the firewall
+
+Whatever your provider gives you — a web console, `ufw`, `firewalld`. With
+`ufw`:
+
+```bash
+ufw allow 8443/udp comment 'AKConnect coordinator'
+ufw allow 9000/udp comment 'AKConnect relay control'
+ufw allow 51900:52400/udp comment 'AKConnect relay data'
+ufw status numbered
+```
+
+**Expect:** the three rules, all UDP. **If your provider also has a firewall in
+their control panel, the same three go there** — that one is in front of the
+machine and `ufw` cannot see it. This catches people out.
+
+*I could not verify this. It is your provider's firewall.*
+
+### 2e — Check it is listening
+
+```bash
+systemctl status akconnect-coordinator akconnect-relay --no-pager
+ss -lunp | grep -E '8443|9000'
+journalctl -u akconnect-coordinator -n 20 --no-pager
+```
+
+**Expect:** both `active (running)`, both ports bound, and the coordinator's log
+ending with a line naming the relay it knows about.
+
+---
+
+## Stage 3 — Introducing them · 10 min
+
+### 3a — Tell the panel about the coordinator
+
+**Settings → Coordinator**, using the values `install-edge.sh` printed:
+
+| Field | Value |
+|---|---|
+| Host | the VPS's public hostname |
+| Port | 8443 |
+| Public key | from `/etc/akconnect/coordinator.pub` |
+| Shared secret | from `/etc/akconnect/coordinator.secret.for-panel` |
+
+### 3b — Register the relay
+
+**Settings → Relays → Add**:
+
+| Field | Value |
+|---|---|
+| Name | `mumbai-1` |
+| Region | `in` |
+| Host | the VPS's public hostname |
+| Port | 9000 |
+
+### 3c — Check they are talking
+
+On the VPS:
+
+```bash
+journalctl -u akconnect-coordinator -f
+```
+
+**Expect:** within a minute, lines showing the coordinator reaching the panel
+successfully. A `401` or `403` means the shared secret in 3a does not match
+`/etc/akconnect/coordinator.env`.
+
+In the panel, **Settings → Relays** should show `mumbai-1` as healthy.
+
+**The failure I expect you to hit here** is the firewall — either `ufw` or your
+provider's. If the relay shows as unhealthy, check 2d before anything else.
+
+---
+
+## Stage 4 — Point the field kit at it · 5 min
+
+The Windows pack and the Linux install command both have the panel's address
+built in from the panel itself, so there is nothing to edit by hand: the join
+code you copy out of the panel carries it.
+
+Create the network and the first join code:
+
+1. **Networks → New.** Name it, take the default range unless a site you are
+   testing already uses it, and leave the search domain and the virtual prefix
+   pool blank.
+2. **Join code → Issue.** Copy it.
+
+Then rebuild the Windows pack so its runbook and binaries match what is
+deployed:
+
+```bash
+./services/kit/build-windows-pack.sh "$(cat VERSION)"
+```
+
+**Expect:** a pack around 14 MB, containing `akconnect-setup.exe`.
+
+---
+
+## Stage 5 — The field test
+
+This runs against the deployment above, not the lab. Three places, in order of
+how much they will teach you:
+
+1. **The shop.** Ordinary broadband, one Windows PC. Run Stage 15 of the
+   Windows runbook — the installer — and nothing else. If a shopkeeper cannot
+   be walked through it on the telephone, nothing else matters.
+2. **The hotel.** One PC as a gateway for the camera network, and an NVR that
+   has never had software installed on it. Stage 13.
+3. **Jio 4G.** A laptop tethered to a phone, reaching the hotel. This is the
+   one that will use the relay, and it is the only way to find out what
+   fraction of real Indian connections cannot punch.
+
+Run `collect.ps1` at each stage and send me the zip.
+
+---
+
+## When something is wrong
+
+| What you see | Where to look |
+|---|---|
+| The panel loads but `/install` still works | `rm -rf install` was not run — 1f |
+| `config/config.php` returns 200 | The document root is the repository root, not `public/` — 1b |
+| Devices enrol but never connect | The relay is unreachable. 2d, then `journalctl -u akconnect-relay` |
+| The relay shows unhealthy in the panel | Firewall, almost always — and often the provider's rather than `ufw` |
+| The coordinator logs 401 from the panel | The shared secret in 3a does not match `/etc/akconnect/coordinator.env` |
+| An agent says a route was not installed | The site already uses that range. Change the network's virtual prefix pool — it is on the network's edit page, and the device's page names the clash |
+| Names do not resolve on Windows | NRPT was refused, and the device's page will say so. The agent will not edit the hosts file on Windows; that is deliberate |
+
+Logs:
+
+```bash
+# panel
+tail -f /www/wwwroot/network.akdwk.in/storage/logs/*.log
+
+# edge
+journalctl -u akconnect-coordinator -f
+journalctl -u akconnect-relay -f
+```
+
+---
+
+## What this deployment does not have yet
+
+Said here rather than discovered later:
+
+- **One relay is one point of failure.** Relay failover is built and drilled,
+  and it needs a second relay to fail over *to*. A second VPS in a different
+  city is the first thing to add once the pilot works.
+- **No monitoring.** Nothing will tell you the relay has died except a customer.
+  The panel's relay health page is the only signal and nobody is watching it at
+  3am.
+- **No backups off the VPS.** The panel backs itself up before every update,
+  onto the same disk. `backup.offsite_driver` exists and only `none` is
+  implemented.
+- **Nothing is signed.** The Windows installer will show "Publisher: Unknown"
+  and SmartScreen will warn. That is a cost-of-sale problem, not a technical
+  one, and Stage 15a is where you find out how much it costs.

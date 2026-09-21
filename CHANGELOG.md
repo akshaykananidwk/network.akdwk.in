@@ -6,6 +6,99 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.0] — 2026-09-21
+
+The release the pilot runs on. An installer a customer can use, a deployment
+checklist, and two things that would have caused support calls.
+
+### Added
+
+**`akconnect-setup.exe`** — one file, one join code, no command line (§33). It
+self-elevates, writes the agent and `wintun.dll` into Program Files, enrols,
+registers the service, opens the firewall port and starts. Built for the
+`windowsgui` subsystem so double-clicking it opens no console window;
+everything a customer sees is a dialog.
+
+`-uninstall` takes back the service, the firewall rule, the NRPT rules, the
+Wintun adapter and both folders — including the one holding the device's
+private key, because leaving a credential on a machine somebody has just
+removed our software from is not a thing to do. Stage 15 of the test pack
+checks each of those separately.
+
+**`DEPLOY.md`** — the panel on aaPanel, the coordinator and a relay on a public
+VPS, in the same copy-paste style as the Windows runbook, with the expected
+output at each step taken from real runs rather than written from memory. It
+says plainly which steps I could verify without the VPS and which I could not.
+
+**`deploy/`** — systemd units for both services, hardened (`ProtectSystem=strict`,
+no capabilities, a syscall filter) and verified with `systemd-analyze`, plus
+`install-edge.sh`, which creates the service account, generates the keypair and
+secrets with the right file modes, and prints the two values the panel needs.
+
+**`--data-ports` on the relay.** Its data sockets used to take whatever port
+the kernel handed out, which on Linux means 32768–60999 — and "open most of the
+unprivileged port space" is not an instruction to give anybody. Pinned to
+51900–52400 in the unit file, which gives room for 250 concurrent sessions and
+a firewall rule somebody can justify.
+
+**Sizing numbers that were measured.** A relay costs 2 KB of process memory per
+session and 5.2 MB at rest; a session is two UDP sockets, and the kernel's
+buffers are the larger half. There is a test that fails if a change makes a
+session four times more expensive, because `DEPLOY.md` tells somebody what size
+server to buy on the strength of that number.
+
+### Changed
+
+**Windows DNS is NRPT only.** There is no hosts-file fallback there and there
+will not be one: Defender reports writes to that file as
+`SettingsModifier:Win32/HostsFileHijack`, and every antivirus our customers run
+does the same. A fallback that worked perfectly would still put an alert on a
+customer's screen on install day, and one support call per install costs more
+than the feature is worth. Where NRPT refuses, names do not resolve, the agent
+says so, and the panel shows it. Linux keeps the fallback, where nothing
+objects.
+
+**The mapping pool is per network**, and validated: private space only, between
+a /8 and a /24, and never overlapping the network's own range. Plenty of
+offices and most ISP-managed connections in this market use 10.x internally,
+and a customer who collides with the default needs a way out that does not move
+every other customer with them.
+
+### Fixed
+
+**The overlay CIDR was exempt from clash detection.** It was treated as "not
+negotiable: without it the device is not on the network" — true, and the wrong
+conclusion. A customer whose office already runs 10.50.0.0/16 would have had
+that range taken over in order to join an overlay, cutting the machine off from
+its own file server. Not joining is what a person would choose every time, so
+the agent now refuses, names the clash and reports it.
+
+**Problems reach somebody who can fix them.** A refused route and a refused DNS
+policy were both a line in a log file on the customer's machine, which is the
+same as not being reported. Devices now carry a problems list, shown on the
+device's page, repeated on every heartbeat so it clears itself when the cause
+is fixed, and sanitised on arrival because it comes from hardware the customer
+owns.
+
+### Verified
+
+**The systemd-resolved path now runs.** It was written and unexercised for a
+release. The gate gained a scenario that steps outside the network namespaces —
+resolved cannot see an interface inside one — drives the real code against a
+throwaway link and reads systemd-resolved's own output back: `Current Scopes:
+DNS`, `DNS Domain: ~lab-resolved.internal`, and `resolvectl query` returning our
+answer. It fails rather than skips where systemd-resolved is absent;
+`services/lab/setup-resolved.sh` installs and starts it, container included.
+
+### Known limitations
+
+**NRPT has still never run.** Stage 14 covers it and needs your hardware.
+
+**Nothing is signed.** The installer will show "Publisher: Unknown" and
+SmartScreen will warn. Stage 15a is where you find out what that costs.
+
+---
+
 ## [1.8.0] — 2026-09-21
 
 Split DNS (§18). Names instead of addresses, for our domain only.

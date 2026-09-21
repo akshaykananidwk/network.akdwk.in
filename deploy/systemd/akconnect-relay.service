@@ -1,0 +1,53 @@
+[Unit]
+Description=AKConnect relay (fallback data path)
+Documentation=https://github.com/akshaykananidwk/network.akdwk.in/blob/main/DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=akconnect
+Group=akconnect
+
+EnvironmentFile=/etc/akconnect/relay.env
+# --data-ports is pinned so the firewall rule is a range somebody can justify.
+# Without it the kernel hands out ephemeral ports and the rule would have to be
+# 32768-60999, which is most of the unprivileged port space.
+ExecStart=/usr/local/bin/akconnect-relay serve \
+    --control :9000 \
+    --name ${AKCONNECT_RELAY_NAME} \
+    --coordinator ${AKCONNECT_COORDINATOR_ADDR} \
+    --data-ports 51900-52400
+
+Restart=always
+RestartSec=3
+
+# A relay forwards UDP between two strangers and holds no customer data. It
+# should be able to do nothing else at all.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# One socket per session end, and a busy relay holds a lot of them.
+LimitNOFILE=65535
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=akconnect-relay
+
+[Install]
+WantedBy=multi-user.target

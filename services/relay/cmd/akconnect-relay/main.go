@@ -28,6 +28,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -71,6 +73,7 @@ func usage() {
     --control ADDR   UDP address for bind requests (default :9000)
     --listen IP      address for data sockets (default: all)
     --idle DURATION  close a session idle this long (default 5m)
+    --data-ports A-B  UDP range for data sockets, e.g. 51900-52400
     --name NAME      this relay's name, for logs and reporting
 
 Environment:
@@ -87,7 +90,14 @@ func runServe(args []string) error {
 	listenIP := fs.String("listen", "", "address for data sockets")
 	idle := fs.Duration("idle", 5*time.Minute, "idle session timeout")
 	name := fs.String("name", "relay", "this relay's name")
+	dataPorts := fs.String("data-ports", "",
+		"UDP range data sockets may use, e.g. 51900-52400; empty lets the kernel choose")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	portFrom, portTo, err := parsePortRange(*dataPorts)
+	if err != nil {
 		return err
 	}
 
@@ -116,11 +126,13 @@ func runServe(args []string) error {
 	}
 
 	relay, err := forwarder.New(forwarder.Options{
-		Control:     *control,
-		ListenIP:    *listenIP,
-		Secret:      []byte(secret),
-		IdleTimeout: *idle,
-		Logf:        logf,
+		Control:      *control,
+		ListenIP:     *listenIP,
+		DataPortFrom: portFrom,
+		DataPortTo:   portTo,
+		Secret:       []byte(secret),
+		IdleTimeout:  *idle,
+		Logf:         logf,
 		OnUsage: func(usage map[uint64]forwarder.Usage) {
 			// Logged as well as reported: the log is what an operator reads
 			// when a customer disputes an invoice, and it is the only copy
@@ -140,4 +152,45 @@ func runServe(args []string) error {
 	defer stop()
 
 	return relay.Run(ctx)
+}
+
+// parsePortRange reads "from-to", or nothing.
+//
+// A relay on a public server needs its data sockets inside a range somebody
+// can open in a firewall. Without one the kernel hands out ephemeral ports —
+// 32768 to 60999 on a normal Linux box — and "open most of the unprivileged
+// port space" is not an instruction to give anybody.
+func parsePortRange(spec string) (int, int, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return 0, 0, nil
+	}
+
+	fromText, toText, ok := strings.Cut(spec, "-")
+	if !ok {
+		return 0, 0, fmt.Errorf("--data-ports must look like 51900-52400, not %q", spec)
+	}
+
+	from, err := strconv.Atoi(strings.TrimSpace(fromText))
+	if err != nil {
+		return 0, 0, fmt.Errorf("--data-ports: %q is not a port number", fromText)
+	}
+	to, err := strconv.Atoi(strings.TrimSpace(toText))
+	if err != nil {
+		return 0, 0, fmt.Errorf("--data-ports: %q is not a port number", toText)
+	}
+
+	if from < 1024 || to > 65535 || to < from {
+		return 0, 0, fmt.Errorf(
+			"--data-ports must be a range between 1024 and 65535 with the lower number first, not %q", spec)
+	}
+
+	// Two ports per session, and a relay with room for only a handful is one
+	// that will start refusing customers without anybody understanding why.
+	if to-from+1 < 64 {
+		return 0, 0, fmt.Errorf(
+			"--data-ports %q leaves room for %d sessions; give it at least 64 ports", spec, (to-from+1)/2)
+	}
+
+	return from, to, nil
 }

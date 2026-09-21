@@ -1,0 +1,45 @@
+[Unit]
+Description=AKConnect coordinator (peer rendezvous)
+Documentation=https://github.com/akshaykananidwk/network.akdwk.in/blob/main/DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=akconnect
+Group=akconnect
+
+# Keys and secrets come from a file root owns, never from the command line: a
+# flag is visible in `ps` to every user on the machine.
+EnvironmentFile=/etc/akconnect/coordinator.env
+ExecStart=/usr/local/bin/akconnect-coordinator serve --listen :8443
+
+Restart=always
+RestartSec=3
+
+# It binds one UDP port and talks to the panel over HTTPS. Nothing else it can
+# be persuaded to do should be possible.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=akconnect-coordinator
+
+[Install]
+WantedBy=multi-user.target

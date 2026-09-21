@@ -1685,6 +1685,75 @@ all four are clean.
 
 ---
 
+### The installer, and what could not be tested about it
+
+§33 asks for one signed-ready file that installs the agent and asks only for
+the join code. `akconnect-setup.exe` is that, and almost none of it can be
+tested here.
+
+What was verified:
+
+- it builds for amd64 and arm64, and **the built file genuinely contains both
+  payloads** — checked by searching the executable for the first 4 KB of each,
+  because an `//go:embed` that silently resolved to nothing would produce a
+  plausible-looking binary that failed on a customer's machine;
+- a build whose payload was never filled in **refuses to install**, naming the
+  file and the script that fixes it, rather than writing a placeholder into
+  Program Files and registering a service pointing at it;
+- `-silent` without a join code fails with a reason instead of waiting for a
+  dialog no deployment tool can answer;
+- failures carry the steps that came before them, because "could not start the
+  service" means something different depending on whether enrolment had already
+  succeeded.
+
+What was not, and cannot be from here: the UAC prompt, the dialog, SmartScreen,
+the service registration, the firewall rule, the Wintun adapter, and the
+uninstall leaving nothing behind. Stage 15 of the test pack is that list, one
+check at a time, and it is the stage I would run first.
+
+### Deployment
+
+`DEPLOY.md` is a checklist for the real servers, not a description of one.
+
+The expected output in it is real where it could be: the panel installer's
+output is a transcript of an actual unattended install against a scratch
+database, including the line about URL rewriting that a command-line install
+always produces and a browser install should not. The sizing numbers are
+measured — 5.2 MB resident for a relay, 2 KB of process memory per session,
+with a test that fails if that grows fourfold, because somebody buys a server
+on the strength of it.
+
+`install-edge.sh` was run as far as this machine allows, which is up to its
+first `systemctl` call:
+
+```
+── creating the service account
+  created the akconnect system user
+── generating keys and secrets
+  generated a coordinator keypair and two shared secrets
+── installing the services
+  System has not been booted with systemd as init system (PID 1).
+  ✗ the relay would not start
+```
+
+Stopping there rather than half-configuring is the behaviour wanted. The files
+it wrote have the right modes (`640 root:akconnect` for anything with a secret
+in it), both units pass `systemd-analyze verify`, **both services start from
+those exact files**, and the public key the coordinator prints on startup is
+byte-for-byte the one written to `coordinator.pub` for pasting into the panel.
+
+What could not be verified is everything that needs the VPS: TLS, the vhost,
+the document root, the firewall. `DEPLOY.md` says so at each of those steps
+rather than implying otherwise.
+
+**One number in it was a bug before it was a document.** The relay's data
+sockets took whatever port the kernel handed out, so the honest firewall
+instruction would have been "open UDP 32768–60999" — most of the unprivileged
+port space. `--data-ports` pins the range instead; the systemd unit uses
+51900–52400, which is 250 concurrent sessions.
+
+---
+
 ## What this verification found
 
 The single most important result is not in the table above. It is that **three

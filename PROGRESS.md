@@ -59,9 +59,10 @@ now checks for it and says where to get it.
 | P3 Relay | Relay service, fallback and silent upgrade to direct, RTT-based selection, failover, usage accounting | **Working in the lab**, selection on measured RTT, failover drilled; accounting verified against the relay's own count |
 | P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | **ACL, subnet-router mode with 1:1 subnet mapping, and split DNS all working and drilled on Linux**, including against a client with its enforcement compiled out; Windows untested on hardware; site-to-site not started |
 | P5 Commercial | Plans, limits, billing, invoices, API keys, OpenAPI, white-label | Mostly done (see below) |
+| **Deployment** | Panel on aaPanel, coordinator + relay on a VPS, field kit pointed at both | `DEPLOY.md` and `deploy/`; **not yet run on the real servers** |
 | P6 Enterprise | HA, multi-region relays, SSO/SAML, staged agent rollout | Not started |
 
-**494 assertions pass** (`php tests/run.php --url=…`; 376 without an HTTP
+**409 assertions pass** (`php tests/run.php --url=…`; 376 without an HTTP
 server), and
 **`services/lab/run-all.sh` is the networking gate** — it builds the
 namespaces, runs every scenario, prints one table and exits non-zero on any
@@ -251,24 +252,29 @@ Listed so nobody discovers them the hard way.
 
 1. **Windows, on real hardware.** The pack is built and committed; nothing has
    run on Windows, and nearly every customer device is Windows. This is the
-   item that decides whether the product can be sold at all.
-2. **Two sites on real ISPs, one on 4G.** Everything in §D and §H is one
+   item that decides whether the product can be sold at all. **Stage 15 — the
+   installer — is now the first stage to run**: it is what a customer
+   experiences, and everything before it tests pieces rather than the product.
+2. **Deploy, and pilot.** `DEPLOY.md` is the checklist. The panel on aaPanel at
+   network.akdwk.in, the coordinator and one relay on an India VPS, and then
+   the shop / hotel / 4G test against *that* rather than against the lab.
+3. **Two sites on real ISPs, one on 4G.** Everything in §D and §H is one
    machine's network namespaces. It is real networking and it is not two ISPs.
-3. **Windows gateway mode, on real hardware.** Stage 13 of the test pack.
+   Stage 5 of DEPLOY.md is this.
+4. **Windows gateway mode, on real hardware.** Stage 13 of the test pack.
    `New-NetNat` is the only mechanism that works on the Windows 10 and 11
    machines customers have — RRAS is Server-only and ICS cannot target a
    prefix — and it has never run. The case I expect to hurt is a PC where
    Internet Connection Sharing already owns NAT, where Windows reports the
    failure as "The parameter is incorrect".
-4. **Multi-network membership.** One support laptop, many customers. Blocked
+5. **Multi-network membership.** One support laptop, many customers. Blocked
    on `devices.network_id` being a single column, and on the fact that twenty
    customers all using 192.168.1.0/24 would collide in one routing table even
    if it were not.
-5. **Exercise the two split-DNS mechanisms.** systemd-resolved and NRPT both
-   work by argument and neither has run. A machine with systemd-resolved would
-   settle the Linux half in an afternoon; the Windows half is Stage 14.
-6. **Site-to-site** — the rest of Phase 4.
-7. Then Phase 6.
+6. **NRPT, on real hardware.** systemd-resolved is now exercised by the gate;
+   NRPT is the half that remains an argument from the code. Stage 14.
+7. **Site-to-site** — the rest of Phase 4.
+8. Then Phase 6.
 
 The order is deliberate: items 1 and 3 decide whether any of the rest matters
 commercially.
