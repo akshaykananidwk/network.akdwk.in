@@ -1540,6 +1540,34 @@ $ php cli/update.php --rollback=1 --yes
   14 checks, all passed.
 ```
 
+And 1.6.0 → 1.7.0 → 1.6.0, which is the one that exercises a migration:
+
+```
+  ✓ MIGRATE        Applied 1 migration(s) in batch 1 (10ms). 1 new migration file(s) copied.
+  ✓ APPLY          Applied: 41 file(s) written (8 new), 0 removed.
+
+  ✓ Files: 33 restored, 8 removed.
+  ✓ Migrations: 1 reversed, 0 not reversible (covered by the database restore).
+  ✓ Removed 1 migration file(s) this update had added.
+  ✓ Database restored from backup #1 (64 statements).
+
+  dogfood/schema-changed    PASS  1 migration(s) changed the schema to 3ac9e9991fef,
+                                  so the restore below is tested
+  dogfood/schema            PASS  the database schema is back to 5ecab8f3b902
+
+  15 checks, all passed.
+```
+
+`dogfood/schema-changed` exists because the first version of this drill could
+have passed on nothing. It compared the schema before the update with the
+schema after the rollback and found them equal — which is also what happens
+when the migration is a no-op, which most of ours are on a freshly installed
+schema. The drill now says, in the table, whether the schema actually moved
+during the update, and therefore whether the restore it checks afterwards was
+tested at all. The fingerprint covers indexes as well as columns, because
+1.7.0's migration adds a unique key and a column-only fingerprint could not
+have seen it.
+
 One line in that table is a "did not run" rather than a pass in disguise:
 **APPLY removed nothing**, because 1.6.0's manifest deletes no files. That path
 is exercised only by a release that removes one, and the drill says so instead

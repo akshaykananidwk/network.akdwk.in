@@ -122,12 +122,31 @@ manifest() {
 # Contents change legitimately during an update — the run writes its own rows
 # into app_updates. The shape is what a migration alters and what a rollback
 # has to put back.
+#
+# Indexes as well as columns: a migration that only adds a unique key changes
+# nothing about the columns, and a fingerprint that could not see it would let
+# that whole class of migration through unchecked. 1.7.0's is one.
 schema_fingerprint() {
-    mysql -uroot --batch --skip-column-names "$SCRATCH_DB" -e "
-        SELECT CONCAT(TABLE_NAME, '.', COLUMN_NAME, ':', COLUMN_TYPE, ':', IS_NULLABLE)
+    local shape
+    shape="$(mysql -uroot --batch --skip-column-names "$SCRATCH_DB" -e "
+        SELECT CONCAT('col ', TABLE_NAME, '.', COLUMN_NAME, ':', COLUMN_TYPE, ':', IS_NULLABLE)
         FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = '$SCRATCH_DB'
-        ORDER BY TABLE_NAME, COLUMN_NAME" 2>/dev/null | md5sum | awk '{print $1}'
+        UNION ALL
+        SELECT CONCAT('idx ', TABLE_NAME, '.', INDEX_NAME, ':', SEQ_IN_INDEX, ':', COLUMN_NAME, ':', NON_UNIQUE)
+        FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = '$SCRATCH_DB'
+        ORDER BY 1" 2>/dev/null)"
+
+    # An unreadable database must not fingerprint as a readable empty one, or
+    # "the schema came back" would pass on a database that had gone.
+    if [ -z "$shape" ]; then
+        printf 'UNREADABLE\n'
+
+        return
+    fi
+
+    printf '%s' "$shape" | md5sum | awk '{print $1}'
 }
 
 # data_fingerprint is the contents of the tables a rollback has to put back.
@@ -280,6 +299,12 @@ if [ "$BEFORE_COUNT" -lt 50 ]; then
     print_table
     exit 1
 fi
+
+if [ "$SCHEMA_BEFORE" = "UNREADABLE" ]; then
+    record "dogfood/manifest" FAIL "the scratch database could not be read, so no schema check below means anything"
+    print_table
+    exit 1
+fi
 record "dogfood/manifest" PASS "$BEFORE_COUNT files checksummed, schema fingerprint ${SCHEMA_BEFORE:0:12}"
 
 step "updating $FROM_VERSION → $TO_VERSION through our own updater"
@@ -333,6 +358,24 @@ if [ "$CHANGED" -lt 2 ]; then
     record "dogfood/files-changed" FAIL "the manifest is unchanged; nothing was actually written to disk"
 else
     record "dogfood/files-changed" PASS "$CHANGED manifest line(s) differ — the files on disk really changed"
+fi
+
+# The schema as the update left it. Compared against the starting shape below,
+# this says whether the migration actually did anything — and a rollback that
+# restores a schema nothing changed proves nothing about restoring a schema.
+SCHEMA_MID="$(schema_fingerprint)"
+MIGRATIONS="$(sed -n 's/.*Applied \([0-9]\+\) migration(s).*/\1/p' "$SCRATCH_ROOT/../update.out")"
+MIGRATIONS="${MIGRATIONS:-0}"
+
+if [ "$SCHEMA_MID" != "$SCHEMA_BEFORE" ]; then
+    record "dogfood/schema-changed" PASS \
+        "$MIGRATIONS migration(s) changed the schema to ${SCHEMA_MID:0:12}, so the restore below is tested"
+elif [ "$MIGRATIONS" -gt 0 ]; then
+    record "dogfood/schema-changed" PASS \
+        "$MIGRATIONS migration(s) ran and changed nothing — they were no-ops on a fresh schema, so the schema restore did not run"
+else
+    record "dogfood/schema-changed" PASS \
+        "no migrations in this release, so the schema restore did not run"
 fi
 
 UPDATE_ID="$(php "$SCRATCH_ROOT/cli/update.php" --status 2>/dev/null | sed -n 's/.*Last: #\([0-9]\+\).*/\1/p')"
