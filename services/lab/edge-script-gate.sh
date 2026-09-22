@@ -607,6 +607,139 @@ else
     bad "an unrecognised option exits without a summary" "see $WORK/badopt.out"
 fi
 
+# 10. The target release's pack builder predates AKCONNECT_BUILD_DIR.
+#
+# Defect 28. The script and the builder it runs come from two different
+# releases whenever the panel is behind: the script is whatever the operator
+# has, the builder is the target's. AKCONNECT_BUILD_DIR arrived in 1.9.4, so a
+# target older than that ignored it, wrote into services/kit, and the new
+# script looked in its temp directory and reported
+#
+#   windows installer  FAIL  the build reported success but no akconnect-setup.exe was found
+#
+# having dirtied the checkout on the way, so the next run refused as well.
+#
+# Everything around the pack step is stubbed here — go, systemctl, ss — because
+# what is under test is which directory the script looks in and what it tidies
+# up, not whether Go can compile. The real build is exercised by the release
+# gate's own Windows pack step.
+group "the target's pack builder predates AKCONNECT_BUILD_DIR"
+
+SKEW="$WORK/skew"
+mkdir -p "$SKEW/bin" "$SKEW/stub"
+
+# A worktree of this repository, so the script under test runs against a real
+# checkout with real git history.
+git -C "$REPO" worktree add --quiet --detach "$SKEW/src" HEAD 2>/dev/null     || bad "could not create a worktree to test against"
+
+if [ -d "$SKEW/src" ]; then
+    # The target release's builder: the shape every release before 1.9.4 had.
+    # It ignores AKCONNECT_BUILD_DIR and writes into the checkout.
+    cat > "$SKEW/src/services/kit/build-windows-pack.sh" <<'OLDBUILDER'
+#!/usr/bin/env bash
+# Stands in for a pre-1.9.4 pack builder: writes into the source tree and has
+# never heard of an output directory.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+mkdir -p "$ROOT/services/kit/pack"
+printf 'setup
+' > "$ROOT/services/kit/pack/akconnect-setup.exe"
+printf 'agent
+' > "$ROOT/services/kit/pack/akconnect-agent.exe"
+printf 'zip
+'   > "$ROOT/services/kit/akconnect-windows-test-pack.zip"
+echo "  pack: $ROOT/services/kit/akconnect-windows-test-pack.zip"
+OLDBUILDER
+    chmod +x "$SKEW/src/services/kit/build-windows-pack.sh"
+
+    # Tracked, as it was in those releases, so removing it leaves a deletion
+    # the clean-up has to restore rather than a file it can just delete.
+    printf 'zip
+' > "$SKEW/src/services/kit/akconnect-windows-test-pack.zip"
+    git -C "$SKEW/src" add -f services/kit/build-windows-pack.sh         services/kit/akconnect-windows-test-pack.zip >/dev/null 2>&1
+    git -C "$SKEW/src" -c user.email=g@l -c user.name=gate commit --quiet -m "old pack builder"
+    SKEW_SHA="$(git -C "$SKEW/src" rev-parse HEAD)"
+
+    # go, systemctl and ss, stubbed. The "binaries" go build produces are
+    # shell scripts that report the version the panel asked for, which is
+    # exactly what the script checks before installing anything.
+    cat > "$SKEW/stub/go" <<'GOSTUB'
+#!/usr/bin/env bash
+case "${1:-}" in
+    version) echo "go version go1.24.7 linux/amd64" ;;
+    build)
+        out=""
+        while [ $# -gt 0 ]; do
+            [ "$1" = "-o" ] && { out="$2"; shift 2; continue; }
+            shift
+        done
+        [ -n "$out" ] || exit 0
+        printf '#!/bin/sh
+echo "%s 9.9.9-capture"
+' "$(basename "$out")" > "$out"
+        chmod +x "$out"
+        ;;
+esac
+GOSTUB
+    printf '#!/usr/bin/env bash
+[ "${1:-}" = "is-active" ] && { echo active; exit 0; }
+exit 0
+'         > "$SKEW/stub/systemctl"
+    printf '#!/usr/bin/env bash
+echo "UNCONN 0 0 0.0.0.0:8443 0.0.0.0:*"
+echo "UNCONN 0 0 0.0.0.0:9000 0.0.0.0:*"
+'         > "$SKEW/stub/ss"
+    chmod +x "$SKEW/stub"/*
+
+    python3 "$LAB/capture-panel.py" 8796 "$WORK/cap4.jsonl" --secret "$CAP_SECRET"         --version 9.9.9-capture --commit "$SKEW_SHA" --branch HEAD >"$WORK/panel4.log" 2>&1 &
+    CAP4_PID=$!
+    trap 'kill "$CAP_PID" "$CAP2_PID" "$CAP3_PID" "$CAP4_PID" 2>/dev/null; git -C "$REPO" worktree remove --force "$SKEW/src" 2>/dev/null; rm -rf "$WORK"' EXIT
+
+    for _ in $(seq 1 40); do
+        (exec 3<>"/dev/tcp/127.0.0.1/8796") 2>/dev/null && break
+        sleep 0.25
+    done
+
+    mkdir -p "$WORK/etc4"
+    cat > "$WORK/etc4/coordinator.env" <<ENVFILE
+AKCONNECT_PANEL_URL=http://127.0.0.1:8796
+AKCONNECT_COORDINATOR_SECRET=$CAP_SECRET
+ENVFILE
+
+    env PATH="$SKEW/stub:$PATH" HOME="$WORK"         AKCONNECT_ETC="$WORK/etc4" AKCONNECT_SRC="$SKEW/src"         AKCONNECT_BIN_DIR="$SKEW/bin" AKCONNECT_REEXEC=1         WINTUN_ZIP="$WORK/wintun.zip"         "$SCRIPT" >"$WORK/skew.out" 2>&1
+    SKEW_CODE=$?
+
+    if grep -q "no akconnect-setup.exe was found" "$WORK/skew.out"; then
+        bad "the installer was not found" "the script looked in its own directory, not the builder's"
+    elif grep -q "windows installer .*PASS" "$WORK/skew.out"; then
+        ok "the installer the old builder produced was found"
+    else
+        ok "the pack step did not fail on the output path"
+    fi
+
+    DIRT="$(git -C "$SKEW/src" status --porcelain)"
+    if [ -z "$DIRT" ]; then
+        ok "and the old builder's output was cleaned out of the checkout"
+    else
+        bad "the checkout is dirty after a legacy pack build"             "$(printf '%s' "$DIRT" | head -3 | tr '
+' ' ')"
+    fi
+
+    # The summary must not claim the edge is unchanged when the services were
+    # installed and restarted and only a later step failed.
+    if grep -q "the edge is NOT upgraded" "$WORK/skew.out"         && grep -q "installed .*PASS" "$WORK/skew.out"; then
+        bad "the summary says the edge is NOT upgraded" "the coordinator and relay were installed"
+    else
+        ok "the summary does not claim the edge is unchanged when it is not"
+    fi
+
+    if [ -n "${EDGE_GATE_VERBOSE:-}" ]; then
+        sed 's/^/      /' "$WORK/skew.out" | tail -20
+    fi
+
+    kill "$CAP4_PID" 2>/dev/null
+fi
+
 # --check is the other half of the contract: it reports and changes nothing.
 # A "tell me whether I am behind" that moved the working tree would be a trap.
 git -C "$CLONE" checkout --quiet --detach HEAD 2>/dev/null

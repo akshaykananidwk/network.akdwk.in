@@ -23,7 +23,10 @@
 set -uo pipefail
 
 SRC_DIR="${AKCONNECT_SRC:-/opt/akconnect/src}"
-BIN_DIR="/usr/local/bin"
+# Overridable so the edge gate can run this end to end without writing into
+# /usr/local/bin, and because a distribution that puts binaries elsewhere
+# should not need this script patched.
+BIN_DIR="${AKCONNECT_BIN_DIR:-/usr/local/bin}"
 ETC_DIR="${AKCONNECT_ETC:-/etc/akconnect}"
 WINTUN_URL="https://www.wintun.net/builds/wintun-0.14.1.zip"
 WINTUN_ZIP="${WINTUN_ZIP:-/var/cache/akconnect/wintun.zip}"
@@ -71,6 +74,13 @@ ORIGINAL_ARGS=("$@")
 RESULTS=()
 FAILED=0
 REACHED_END=0
+# SERVICES_INSTALLED records that the new binaries are in place and the
+# services were restarted on them. It is what makes "the edge is NOT upgraded"
+# either true or a lie, and the summary used to say it either way: a run where
+# the coordinator and relay upgraded cleanly and only the Windows installer
+# failed still ended with "FAIL — the edge is NOT upgraded", which sends an
+# operator to undo work that was fine.
+SERVICES_INSTALLED=0
 STOPPED_BECAUSE=""
 TEMP_PATHS=()
 
@@ -110,6 +120,25 @@ summary() {
     fi
 
     if [ "$FAILED" -gt 0 ] || [ "$REACHED_END" -ne 1 ] || [ "${#RESULTS[@]}" -eq 0 ]; then
+        # Two different failures, and telling them apart is the whole point.
+        # "The edge is NOT upgraded" is a statement about the coordinator and
+        # the relay. When those are on the new release and something after
+        # them failed — the Windows installer, the upload, the timer — saying
+        # they are not upgraded is false, and it sends an operator to undo
+        # work that was fine.
+        if [ "$SERVICES_INSTALLED" -eq 1 ]; then
+            printf '\n  \033[33mPARTIAL\033[0m — the coordinator and relay ARE upgraded to %s and running.' \
+                "${TARGET_VERSION:-the target release}"
+            if [ "$FAILED" -gt 0 ]; then
+                printf '\n  %d later step(s) failed; the table above says which.' "$FAILED"
+            else
+                printf '\n  The run did not finish; the table above says how far it got.'
+            fi
+            printf '\n  Nothing needs undoing. Fix what failed and run this again.\n\n'
+
+            return 1
+        fi
+
         printf '\n  \033[31mFAIL\033[0m — the edge is NOT upgraded.'
         if [ "$FAILED" -gt 0 ]; then
             printf ' %d step(s) failed.' "$FAILED"
@@ -675,6 +704,7 @@ for svc in coordinator relay; do
         || die "could not install akconnect-$svc into $BIN_DIR"
 done
 pass "installed" "$BIN_DIR/akconnect-{coordinator,relay}"
+SERVICES_INSTALLED=1
 
 for svc in coordinator relay; do
     systemctl restart "akconnect-$svc" || die "systemctl restart akconnect-$svc failed.
@@ -744,15 +774,39 @@ else
             || say "could not fetch wintun"
     fi
 
+    # Where the target release's builder will put things.
+    #
+    # This script and the builder it runs come from two different releases
+    # whenever the panel is behind: the script is whatever the operator has,
+    # the builder is the target's. AKCONNECT_BUILD_DIR arrived in 1.9.4, so a
+    # target older than that ignores it and writes into services/kit — and the
+    # run then failed with "the build reported success but no
+    # akconnect-setup.exe was found", having quietly dirtied the checkout on
+    # the way, so the NEXT run refused as well.
+    #
+    # Asking the builder what it understands is the only honest way to know.
+    PACK_BUILDER="$SRC_DIR/services/kit/build-windows-pack.sh"
+    LEGACY_PACK=0
+
+    if grep -q 'AKCONNECT_BUILD_DIR' "$PACK_BUILDER" 2>/dev/null; then
+        PACK_OUT="$BUILD_DIR/kit"
+    else
+        # Its own default, which is inside the checkout. Cleaned up below,
+        # because leaving it there is what breaks the next run.
+        PACK_OUT="$SRC_DIR/services/kit"
+        LEGACY_PACK=1
+        say "this release's pack builder predates AKCONNECT_BUILD_DIR; using its own output path"
+    fi
+
     if [ ! -f "$WINTUN_ZIP" ]; then
         fail "windows installer" "wintun is not available; fetch $WINTUN_URL to $WINTUN_ZIP"
-    elif ! WINTUN_ZIP="$WINTUN_ZIP" AKCONNECT_BUILD_DIR="$BUILD_DIR/kit" \
-            "$SRC_DIR/services/kit/build-windows-pack.sh" \
+    elif ! WINTUN_ZIP="$WINTUN_ZIP" AKCONNECT_BUILD_DIR="$PACK_OUT" \
+            "$PACK_BUILDER" \
             "$TARGET_VERSION" "$PANEL" >"$BUILD_DIR/pack.log" 2>&1; then
         fail "windows installer" "the build failed; see $BUILD_DIR/pack.log"
         tail -12 "$BUILD_DIR/pack.log" | sed 's/^/    /'
     else
-        SETUP_EXE="$BUILD_DIR/kit/pack/akconnect-setup.exe"
+        SETUP_EXE="$PACK_OUT/pack/akconnect-setup.exe"
 
         if [ ! -f "$SETUP_EXE" ]; then
             fail "windows installer" "the build reported success but no akconnect-setup.exe was found"
@@ -771,7 +825,7 @@ else
             # what the panel signs and offers to already-installed devices
             # (§14), so publishing it is the difference between fixing a defect
             # once and visiting every PC to fix it.
-            AGENT_EXE="$BUILD_DIR/kit/pack/akconnect-agent.exe"
+            AGENT_EXE="$PACK_OUT/pack/akconnect-agent.exe"
 
             if [ ! -f "$AGENT_EXE" ]; then
                 fail "self-update" "the pack build left no akconnect-agent.exe to publish"
@@ -780,6 +834,29 @@ else
             else
                 fail "self-update" "the panel would not accept the agent binary"
             fi
+        fi
+    fi
+
+    # An old builder wrote inside the checkout, so the checkout has to be put
+    # back. Not optional and not best-effort: leaving it dirty is exactly what
+    # makes the next run refuse with "has local changes", which is how one
+    # skew defect turns into a second one that looks unrelated.
+    #
+    # Targeted, never `git clean`: the operator's own files in that directory
+    # are none of this script's business.
+    if [ "$LEGACY_PACK" -eq 1 ]; then
+        rm -rf "$PACK_OUT/pack" "$PACK_OUT/dist"
+        rm -f "$PACK_OUT/akconnect-windows-test-pack.zip"
+
+        # The zip was a tracked file in those releases, so removing it leaves a
+        # deletion rather than a clean tree. git restores exactly that path.
+        git -C "$SRC_DIR" checkout --quiet -- services/kit 2>/dev/null || true
+
+        if [ -z "$(git -C "$SRC_DIR" status --porcelain 2>/dev/null)" ]; then
+            pass "checkout left clean" "the old builder's output was removed"
+        else
+            fail "checkout left clean" \
+                "$SRC_DIR is still dirty; the next run will refuse with 'has local changes'"
         fi
     fi
 fi
