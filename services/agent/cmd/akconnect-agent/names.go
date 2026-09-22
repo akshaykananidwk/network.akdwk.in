@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/dnsd"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/netcfg"
@@ -176,6 +177,15 @@ func zoneFingerprint(cfg *panel.Config) string {
 // moment it happened and never again is one that disappears from the panel the
 // first time a row is updated, and these are exactly the problems somebody
 // only looks for a week later when a customer complains.
+// unansweredProblemAfter is how many unanswered announcements are worth
+// telling an administrator about.
+//
+// Six, which at the retry cadence is about half a minute. Fewer would report a
+// device that is merely starting up — the first announcement is unanswered by
+// definition until the reply arrives — and a support call is not worth
+// generating for that.
+const unansweredProblemAfter = 6
+
 func (s *session) problems() []panel.Problem {
 	var out []panel.Problem
 
@@ -203,6 +213,30 @@ func (s *session) problems() []panel.Problem {
 					"told where it is and it cannot be introduced to theirs. The agent is " +
 					"reopening its socket; if this persists, restart the AKConnect service. " +
 					detail,
+			})
+		}
+	}
+
+	// The opposite fault, and the one a customer's firewall or router actually
+	// produces: every send succeeds and nothing ever comes back.
+	//
+	// From the outside this is indistinguishable from "still connecting", so
+	// a device sat on it silently for as long as anybody watched — which is
+	// exactly what happened on an office Wi-Fi where the same laptop worked
+	// on a phone hotspot an hour earlier. It says so now, and names the port,
+	// because the port is what a firewall rule has to mention.
+	if s.discovery != nil && s.discovery.TransportProblem() == "" {
+		if count, since := s.discovery.Unanswered(); count >= unansweredProblemAfter {
+			out = append(out, panel.Problem{
+				Code: "discovery.no_reply",
+				Detail: fmt.Sprintf(
+					"This device is announcing itself and the coordinator never answers: %d "+
+						"announcement(s) unanswered over %s. Its traffic is leaving the machine, so "+
+						"nothing here is broken — something between it and the coordinator is "+
+						"dropping the replies. Check that inbound UDP %d is allowed on this "+
+						"network's firewall profile, and that the router is not blocking it. "+
+						"Until this clears the device cannot be introduced to any peer.",
+					count, since.Round(time.Second), s.port),
 			})
 		}
 	}

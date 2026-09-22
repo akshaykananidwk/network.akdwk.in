@@ -47,8 +47,9 @@ declare(strict_types=1);
         <div class="alert alert-warning">
             <h3>This device reported <?= count($problems) === 1 ? 'a problem' : count($problems) . ' problems' ?></h3>
             <p class="text-muted">
-                The agent is running and could not do these things by itself. Nothing here is fixed
-                from the device &mdash; each one needs a change on this panel.
+                The agent is running and could not do these things by itself. Most need a change
+                on this panel; one of them &mdash; nothing answering its announcements &mdash;
+                needs a change on the network that device is on.
             </p>
             <ul>
                 <?php foreach ($problems as $problem): ?>

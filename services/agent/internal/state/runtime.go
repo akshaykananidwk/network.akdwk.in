@@ -18,15 +18,25 @@ import (
 //
 // It is disposable: stale contents are detected by age, not trusted.
 type Runtime struct {
-	UpdatedAt      time.Time     `json:"updated_at"`
-	PID            int           `json:"pid"`
-	Interface      string        `json:"interface"`
-	ListenPort     int           `json:"listen_port"`
-	VirtualIP      string        `json:"virtual_ip"`
-	OverlayCIDR    string        `json:"overlay_cidr"`
-	Revision       int           `json:"revision"`
-	Reflexive      string        `json:"reflexive_endpoint"`
-	CoordinatorUp  bool          `json:"coordinator_reachable"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	PID           int       `json:"pid"`
+	Interface     string    `json:"interface"`
+	ListenPort    int       `json:"listen_port"`
+	VirtualIP     string    `json:"virtual_ip"`
+	OverlayCIDR   string    `json:"overlay_cidr"`
+	Revision      int       `json:"revision"`
+	Reflexive     string    `json:"reflexive_endpoint"`
+	CoordinatorUp bool      `json:"coordinator_reachable"`
+	// Unanswered is how many announcements have gone out with nothing coming
+	// back, and UnansweredFor is how long that has been true. Both are zero
+	// when the coordinator is answering.
+	//
+	// In the status file because it is the one number that separates "this
+	// device is still connecting" from "something on this network is dropping
+	// the replies", and a customer's diagnostics bundle is often the only
+	// place anybody can see it.
+	Unanswered     int           `json:"unanswered,omitempty"`
+	UnansweredFor  time.Duration `json:"unanswered_for_ns,omitempty"`
 	ControlPlaneUp bool          `json:"control_plane_reachable"`
 	Peers          []RuntimePeer `json:"peers"`
 	// Mappings are the LANs this device is the gateway for, each shown in both

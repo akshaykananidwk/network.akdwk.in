@@ -441,6 +441,10 @@ textarea { resize: vertical; font-family: var(--font-mono); font-size: .82rem; }
 .conn-offline { color: var(--text-muted); }
 /* Online, heartbeating, no path to a peer yet. Not a fault and not offline. */
 .conn-connecting { color: var(--info, #3b82f6); }
+/* Heartbeating, and nothing answers its announcements. Deliberately not the
+   same colour as "connecting": one of them resolves itself and the other one
+   never will until somebody changes a firewall. */
+.conn-blocked { color: var(--warning); font-weight: 500; }
 .conn-path { font-size: 0.85em; text-transform: lowercase; }
 
 .badge-dot {

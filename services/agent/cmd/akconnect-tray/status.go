@@ -93,6 +93,23 @@ func fromRuntime(rt *state.Runtime) view {
 			Detail:   "This computer cannot reach the internet, or the panel is down.",
 			IP:       rt.VirtualIP,
 		}
+	case !rt.CoordinatorUp:
+		// The panel answers and the coordinator does not. That combination is
+		// not "still connecting": it means this computer's messages are
+		// leaving and nothing is coming back, which on a customer's network is
+		// a firewall or a router and not something the agent can fix.
+		//
+		// It used to show "Connecting to the other computers", indefinitely,
+		// on a machine that was never going to connect — an office Wi-Fi where
+		// the same laptop had worked on a phone hotspot an hour before, and
+		// the tray said the same hopeful thing all afternoon.
+		return view{
+			Headline: "Something here is blocking " + displayName,
+			Detail: "This computer reaches the panel, but nothing answers it back — usually a " +
+				"firewall on this network. Right-click here, choose Collect diagnostics, and " +
+				"send the file to your supplier.",
+			IP: rt.VirtualIP,
+		}
 	case total == 0:
 		return view{
 			Headline: "Connected",

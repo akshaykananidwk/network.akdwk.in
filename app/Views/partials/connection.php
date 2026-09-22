@@ -41,6 +41,26 @@ $path = $online
         default  => 'connecting',
     }
     : '';
+
+// "Connecting" is a hopeful word, and on one office Wi-Fi it was wrong for an
+// entire afternoon: the laptop's announcements reached the coordinator every
+// few seconds and not one reply ever came back, while this indicator said it
+// was still getting there. The agent now says so itself — if it has reported
+// that nothing answers it, the dot says that instead of implying patience
+// will fix it.
+if ($online && $path === 'connecting') {
+    $reported = json_decode((string) ($device['problems_json'] ?? ''), true);
+    foreach (is_array($reported) ? $reported : [] as $problem) {
+        if ((string) ($problem['code'] ?? '') === 'discovery.no_reply') {
+            $class = 'conn-blocked';
+            $dot   = "\u{1F7E0}";
+            $path  = 'blocked';
+            $title = 'Online and heartbeating, but nothing answers its announcements — '
+                . 'something on that network is dropping the replies. See the problem below.';
+            break;
+        }
+    }
+}
 ?>
 <span class="conn <?= e($class) ?>" title="<?= e($title) ?>">
     <span aria-hidden="true"><?= e($dot) ?></span>

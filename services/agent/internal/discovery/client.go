@@ -105,6 +105,10 @@ type Client struct {
 	unacked   int
 	lastSend  time.Time
 	portMoves int
+	// firstSend is when this agent first announced itself, so a device that
+	// has NEVER been answered can say how long that has been true rather than
+	// measuring from a lastAck it does not have.
+	firstSend time.Time
 	// candidates is every address currently being tried for a peer, so a punch
 	// reply can be matched back to the peer it proves.
 	candidates map[[32]byte][]netip.AddrPort

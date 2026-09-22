@@ -52,7 +52,54 @@ func (c *Client) noteAnnouncementSent() {
 	c.mu.Lock()
 	c.unacked++
 	c.lastSend = time.Now()
+	if c.firstSend.IsZero() {
+		c.firstSend = c.lastSend
+	}
 	c.mu.Unlock()
+}
+
+// Unanswered reports how many announcements have gone out with no reply, and
+// how long it has been since the coordinator last answered.
+//
+// The two faults are opposite and are told apart by the caller: sends that
+// FAIL are a dead socket, and TransportProblem reports those. This is the
+// other one — every send succeeds, nothing ever comes back — which on Windows
+// means a firewall, a router, or an adapter that is not carrying the return
+// path. It looks identical to "still connecting" from the outside, and a
+// device that sits on "connecting" for ever tells nobody anything.
+//
+// since is measured from the last ack, or from the first announcement when
+// there has never been one.
+func (c *Client) Unanswered() (int, time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.unacked == 0 {
+		return 0, 0
+	}
+
+	from := c.lastAck
+	if from.IsZero() {
+		from = c.firstSend
+	}
+	if from.IsZero() {
+		return c.unacked, 0
+	}
+
+	return c.unacked, time.Since(from)
+}
+
+// Answered reports whether the coordinator has replied recently enough to call
+// the path out of this machine working.
+//
+// Recently, not ever. The status file used to latch this on the first reply,
+// so a device that was answered once at nine in the morning and never again
+// reported a reachable coordinator all day.
+func (c *Client) Answered(within time.Duration) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return !c.lastAck.IsZero() && time.Since(c.lastAck) <= within
 }
 
 // undoAnnouncementSent takes back a count for an announcement that never left

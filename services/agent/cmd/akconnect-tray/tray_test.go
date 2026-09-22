@@ -41,7 +41,7 @@ func TestWhatTheIconSays(t *testing.T) {
 			name: "the status file is stale, so it is not running whatever it says",
 			st:   &state.State{PanelURL: "https://p", DeviceUID: "dev_1", DeviceToken: "t", VirtualIP: "10.50.0.3"},
 			rt: &state.Runtime{
-				UpdatedAt: now.Add(-10 * time.Minute), VirtualIP: "10.50.0.3", ControlPlaneUp: true,
+				UpdatedAt: now.Add(-10 * time.Minute), VirtualIP: "10.50.0.3", ControlPlaneUp: true, CoordinatorUp: true,
 			},
 			headline: "AK Connect is not running",
 			ip:       "10.50.0.3",
@@ -49,7 +49,7 @@ func TestWhatTheIconSays(t *testing.T) {
 		{
 			name: "running, alone on the network",
 			rt: &state.Runtime{
-				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: true,
+				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: true, CoordinatorUp: true,
 			},
 			headline: "Connected",
 			ok:       true,
@@ -58,7 +58,7 @@ func TestWhatTheIconSays(t *testing.T) {
 		{
 			name: "running, everyone reachable",
 			rt: &state.Runtime{
-				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: true,
+				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: true, CoordinatorUp: true,
 				Peers: []state.RuntimePeer{{Path: "direct"}, {Path: "relay"}},
 			},
 			headline: "Connected",
@@ -68,7 +68,7 @@ func TestWhatTheIconSays(t *testing.T) {
 		{
 			name: "running, nobody reachable yet",
 			rt: &state.Runtime{
-				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: true,
+				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: true, CoordinatorUp: true,
 				Peers: []state.RuntimePeer{{Path: "connecting"}},
 			},
 			headline: "Connecting to the other computers",
@@ -77,9 +77,26 @@ func TestWhatTheIconSays(t *testing.T) {
 		{
 			name: "running, but the panel cannot be reached",
 			rt: &state.Runtime{
-				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: false,
+				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: false, CoordinatorUp: true,
 			},
 			headline: "No connection to AK Connect",
+			ip:       "10.50.0.3",
+		},
+		{
+			// The office Wi-Fi case, reported from the field: the laptop's
+			// hellos reached the coordinator, nothing ever came back, and the
+			// tray sat on "Connecting to the other computers" all afternoon on
+			// a machine that was never going to connect.
+			//
+			// The panel being reachable is what makes this different from an
+			// internet problem, and it is the whole diagnosis: traffic leaves
+			// this computer and does not return.
+			name: "the panel answers but the coordinator never does",
+			rt: &state.Runtime{
+				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: true, CoordinatorUp: false,
+				Unanswered: 14, Peers: []state.RuntimePeer{{Path: "connecting"}},
+			},
+			headline: "Something here is blocking AK Connect",
 			ip:       "10.50.0.3",
 		},
 		{
@@ -88,7 +105,7 @@ func TestWhatTheIconSays(t *testing.T) {
 			// broken-looking one.
 			name: "the status file is readable and nothing else is",
 			rt: &state.Runtime{
-				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: true,
+				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: true, CoordinatorUp: true,
 				Peers: []state.RuntimePeer{{Path: "direct"}},
 			},
 			headline: "Connected",
@@ -211,4 +228,97 @@ func TestAMissingFileIsReportedInTheBundle(t *testing.T) {
 	if content := readOnly(t, out, "service.log"); !strings.Contains(content, "could not be read") {
 		t.Errorf("a missing file produced %q", content)
 	}
+}
+
+// The bundle has to be able to answer the question it is collected for.
+//
+// A laptop on an office Wi-Fi announced itself every few seconds and the
+// coordinator's replies never arrived. The same laptop had worked on a phone
+// hotspot an hour earlier. Firewall on a Public profile, a second adapter
+// carrying the return path, or the office router? The bundle at the time held
+// the agent's status file and its log, and could not tell those apart — so
+// nobody could say which, and the customer was asked to try things.
+func TestTheBundleCanTellTheSuspectsApart(t *testing.T) {
+	probes := machineProbes()
+
+	needed := map[string]string{
+		"network-profile.txt":   "which profile Windows put this network in",
+		"adapters.txt":          "the adapter list, with addresses and metrics",
+		"routes.txt":            "where traffic actually leaves by",
+		"firewall-profiles.txt": "whether inbound is blocked by default",
+		"firewall-ours.txt":     "the port our own rule names",
+		"firewall-blocking.txt": "a blocking rule from another product",
+		"udp-listeners.txt":     "who holds the port",
+	}
+
+	have := map[string]bool{}
+	for _, p := range probes {
+		have[p.Name] = true
+	}
+
+	for name, why := range needed {
+		if !have[name] {
+			t.Errorf("the bundle cannot show %s (%s)", name, why)
+		}
+	}
+}
+
+// Everything collected is read-only, and nothing collected may print a
+// credential. The bundle is emailed by a customer who will not read it first.
+func TestEveryProbeIsReadOnlyAndTellsNoSecrets(t *testing.T) {
+	for _, p := range machineProbes() {
+		if len(p.Statements) != len(p.Headings) {
+			t.Errorf("%s has %d statements and %d headings; they are printed in pairs",
+				p.Name, len(p.Statements), len(p.Headings))
+		}
+
+		for _, statement := range p.Statements {
+			// Read-only: a Get-, or netsh's own show.
+			if !strings.HasPrefix(statement, "Get-") && !strings.HasPrefix(statement, "netsh advfirewall show") {
+				t.Errorf("%s runs %q, which is not a read-only command", p.Name, first(statement))
+			}
+
+			// Nothing that changes state, however it is spelled.
+			for _, forbidden := range []string{
+				"Set-", "New-", "Remove-", "Disable-", "Enable-", "Restart-", "Stop-", "Start-",
+				"Invoke-", "Add-", "Clear-", "pnputil", "reg ", "Get-Content", "Get-ItemProperty",
+			} {
+				if strings.Contains(statement, forbidden) {
+					t.Errorf("%s runs %q, which contains %q", p.Name, first(statement), forbidden)
+				}
+			}
+		}
+	}
+}
+
+// And whatever they print goes through the same redaction as everything else.
+func TestProbeOutputIsRedactedLikeEverythingElse(t *testing.T) {
+	dir := t.TempDir()
+
+	// A firewall rule listing that happens to contain something token-shaped —
+	// a rule named after an application, say — must not come out intact.
+	text := "AKConnect Agent | Inbound | Allow | profile=Any | UDP/53722\n" +
+		"Some Product | Inbound | Block | authorization: Bearer tok_live_abc123\n"
+
+	out, err := collect(dir, []source{{Name: "firewall-ours.txt", Text: text}}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content := readOnly(t, out, "firewall-ours.txt")
+	if strings.Contains(content, "tok_live_abc123") {
+		t.Error("a credential in a collected command's output reached the bundle")
+	}
+	if !strings.Contains(content, "UDP/53722") {
+		t.Error("the port the rule names was redacted; that is the answer we collect this for")
+	}
+}
+
+// first is a short prefix of a statement, for an error message.
+func first(statement string) string {
+	if len(statement) > 60 {
+		return statement[:60] + "..."
+	}
+
+	return statement
 }

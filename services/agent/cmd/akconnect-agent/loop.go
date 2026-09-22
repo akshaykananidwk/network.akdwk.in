@@ -18,6 +18,14 @@ type wgPrivate = wgkey.Private
 // defaultPoll is used when the panel does not say how long to wait.
 const defaultPoll = 10 * time.Second
 
+// coordinatorSilentAfter is how long without an answer means the coordinator
+// is not reachable FROM HERE, whatever it was doing earlier.
+//
+// Ninety seconds: announcements are twenty seconds apart when everything is
+// working and five apart when they are not, so this cannot be tripped by one
+// lost packet or a coordinator restart.
+const coordinatorSilentAfter = 90 * time.Second
+
 // revokedGracePeriod bounds how long a revoked device keeps passing traffic.
 // The panel refuses its next call; this is the longest that call can be away.
 const revokedGracePeriod = 10 * time.Second
@@ -246,8 +254,17 @@ func (s *session) publishRuntime(controlPlaneUp bool) {
 	if s.discovery != nil {
 		if reflexive := s.discovery.Reflexive(); reflexive.IsValid() {
 			rt.Reflexive = reflexive.String()
-			rt.CoordinatorUp = true
 		}
+
+		// Recently answered, not ever answered.
+		//
+		// This used to be set from the reflexive address alone, which is
+		// written once and never cleared — so a device answered at nine in the
+		// morning reported a reachable coordinator all day, including while it
+		// sat unable to receive a thing. The status file is what the tray and
+		// `status` read, and both were repeating that.
+		rt.CoordinatorUp = s.discovery.Answered(coordinatorSilentAfter)
+		rt.Unanswered, rt.UnansweredFor = s.discovery.Unanswered()
 	}
 
 	rt.Peers = s.peerStatus()

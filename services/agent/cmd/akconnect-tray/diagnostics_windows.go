@@ -62,6 +62,12 @@ func gatherSources() []source {
 		source{Name: "service.log", Path: state.ServiceLogPath(), Limit: 1 << 20},
 	)
 
+	// And what Windows knows that the agent does not: adapters, routes,
+	// firewall profiles and rules, and which process holds which UDP port.
+	// Without these a bundle can say the agent is announcing and getting no
+	// answer, and nothing about why. See collect_windows.go.
+	sources = append(sources, machineSources()...)
+
 	return sources
 }
 
