@@ -324,7 +324,7 @@ lab::path() {
 #
 # A ping can succeed a second or two before the agent next writes its runtime
 # file, so reading the path the instant traffic flows gets "-" — which is not
-# "direct" or "relay", it is "the harness asked too early". Recording that as
+# "direct" or a relay, it is "the harness asked too early". Recording that as
 # the result of a scenario whose entire question is *which path* would be
 # reporting nothing and calling it a pass.
 lab::settled_path() {
@@ -333,7 +333,7 @@ lab::settled_path() {
     while [ "$(date +%s)" -lt "$deadline" ]; do
         now="$(lab::path "$ns")"
         case "$now" in
-            direct|relay) printf '%s\n' "$now"; return 0 ;;
+            direct|relay-udp|relay-https) printf '%s\n' "$now"; return 0 ;;
         esac
         sleep 1
     done

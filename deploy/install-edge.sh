@@ -134,6 +134,39 @@ for unit in akconnect-relay akconnect-coordinator; do
     say "$unit is running"
 done
 
+step "the HTTPS fallback"
+
+# Without this a device on a network that carries no UDP cannot connect at
+# all — not to a relay, and not even to the coordinator to ask for one. It is
+# configured here rather than written down for somebody to do later, because
+# "somebody will add an Apache stanza" is how a customer ends up being asked
+# to change their firewall.
+# shellcheck source=lib-edge-apache.sh
+. "$(dirname "$0")/lib-edge-apache.sh"
+
+akconnect_apache_fallback "$(dirname "$0")/apache" say
+apache_state=$?
+
+case "$apache_state" in
+    0)
+        if akconnect_fallback_reachable "$PANEL"; then
+            say "and $PANEL/fallback/health answers, so the path works end to end"
+        else
+            say "note: $PANEL/fallback/health did not answer. If the panel is on another"
+            say "      server, install this configuration there instead — the fallback has"
+            say "      to arrive on the address agents already trust."
+        fi
+        ;;
+    1)
+        say "install deploy/apache/akconnect-fallback.conf on whichever machine serves"
+        say "$PANEL on 443, and point it at this server's 127.0.0.1:9443."
+        ;;
+    *)
+        die "Apache is here but would not take the fallback configuration. Devices on
+    networks that block UDP will not be able to connect until it does."
+        ;;
+esac
+
 step "what to do next"
 
 cat <<NEXT
@@ -143,6 +176,7 @@ cat <<NEXT
     UDP  8443           the coordinator
     UDP  9000           the relay's control port
     UDP  51900-52400    the relay's data sockets
+    TCP  443            the panel, and the HTTPS fallback on /fallback
     TCP  22             ssh, if it is not already
 
   Then put these two values into the panel, under Settings → Coordinator:

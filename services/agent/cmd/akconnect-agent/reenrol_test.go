@@ -117,35 +117,65 @@ func TestAMachineWithNoKeyIsNotReportedAsForgotten(t *testing.T) {
 	}
 }
 
-// The inbound firewall rule has to name the port the agent actually uses.
+// The firewall rules name the program, not a port.
 //
-// It was created once, at install time, for a fixed 51820 — right until
-// defect 23 made every device pick its own. From that moment the rule named a
-// port nothing was listening on, and Windows dropped every inbound discovery
-// and WireGuard packet: a device that announced happily, looked healthy in the
-// panel, and could be reached by nobody. The fix for two PCs behind one router
-// would have broken the inbound path for every Windows device.
+// They named a port once, and the history is worth keeping because it is the
+// reason this is now a rule about the executable. The rule was created at
+// install time for a fixed 51820, right until defect 23 made every device pick
+// its own port and move off one its router would not carry. From that moment
+// the rule named a port nothing was listening on, and Windows dropped every
+// inbound packet: a device that announced happily, looked healthy in the
+// panel, and could be reached by nobody.
 //
-// This asserts the two places that must name the live port do so.
-func TestTheFirewallRuleFollowsThePortInUse(t *testing.T) {
-	for _, file := range []string{"up.go", "discovery.go"} {
+// Following the port with the rule fixed that, and left the same shape of
+// defect one step away — a rule that has to be kept in step with a value that
+// changes. A rule naming the executable cannot fall out of step, covers the
+// TCP the HTTPS fallback needs, and covers the outbound direction a managed
+// fleet filters.
+//
+// This asserts every place that creates them does it that way.
+func TestTheFirewallRulesNameTheProgram(t *testing.T) {
+	for _, file := range []string{"up.go", "discovery.go", "service.go"} {
 		source, err := os.ReadFile(file)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		if !strings.Contains(string(source), "winenv.EnsureFirewallRule(") {
-			t.Errorf("%s does not open the firewall for the port it is using", file)
+		if !strings.Contains(string(source), "winenv.EnsureFirewallRules(") {
+			t.Errorf("%s does not allow this program through the firewall", file)
+		}
+
+		// The old call took a port. Nothing may take one again: that is what
+		// put the rule and the socket out of step.
+		if strings.Contains(string(source), "winenv.EnsureFirewallRule(") {
+			t.Errorf("%s still creates a rule for a port number", file)
 		}
 	}
 
-	// And nothing pins the rule to the old fixed port.
-	source, err := os.ReadFile("service.go")
+	// And the rules themselves have to cover both protocols and both
+	// directions, on every profile — the fallback is TCP, and an office
+	// machine with outbound filtering fails silently without the out rules.
+	rules, err := os.ReadFile("../../internal/winenv/firewall_windows.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if strings.Contains(string(source), `fs.Int("port", tunnel.DefaultListenPort`) {
-		t.Error("service install still opens the firewall for 51820 whatever this device uses")
+	for _, want := range []string{
+		`{"inbound UDP", "in", "UDP"}`,
+		`{"inbound TCP", "in", "TCP"}`,
+		`{"outbound UDP", "out", "UDP"}`,
+		`{"outbound TCP", "out", "TCP"}`,
+		`"program="+exe`,
+		`"profile=any"`,
+	} {
+		if !strings.Contains(string(rules), want) {
+			t.Errorf("the firewall rules are missing %s", want)
+		}
+	}
+
+	// An upgrade has to take away the rule earlier versions made, or a port
+	// this device no longer uses stays open for ever.
+	if !strings.Contains(string(rules), `"AKConnect Agent (WireGuard UDP)"`) {
+		t.Error("the old port-named rule is never removed, so an upgrade leaves it behind")
 	}
 }

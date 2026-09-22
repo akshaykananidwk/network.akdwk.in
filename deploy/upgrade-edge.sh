@@ -735,6 +735,32 @@ done
 pass "installed" "$BIN_DIR/akconnect-{coordinator,relay}"
 SERVICES_INSTALLED=1
 
+# The unit files come with the release, not only the binaries.
+#
+# They carry the flags a version needs, and 1.9.6 is the case that proves it:
+# the relay's HTTPS fallback is switched on by --ws-listen, and an upgrade that
+# replaced the binary and left a 1.9.5 unit behind would install the fallback
+# and never start it. Nobody would notice until a device on a blocked network
+# failed, which is months later and somewhere else.
+units_changed=0
+for svc in coordinator relay; do
+    unit="$SRC_DIR/deploy/systemd/akconnect-$svc.service"
+    [ -f "$unit" ] || continue
+
+    if ! cmp -s "$unit" "/etc/systemd/system/akconnect-$svc.service"; then
+        install -m 644 "$unit" "/etc/systemd/system/akconnect-$svc.service" \
+            || die "could not install the akconnect-$svc unit"
+        units_changed=1
+    fi
+done
+
+if [ "$units_changed" -eq 1 ]; then
+    systemctl daemon-reload || die "systemctl daemon-reload failed"
+    pass "unit files" "refreshed from $BUILT_FROM"
+else
+    pass "unit files" "already current"
+fi
+
 for svc in coordinator relay; do
     systemctl restart "akconnect-$svc" || die "systemctl restart akconnect-$svc failed.
     Look at: journalctl -u akconnect-$svc -n 50"
@@ -772,6 +798,34 @@ RELAY_PORT="$(sed -n 's/.*--control[= ]:\?\([0-9]*\).*/\1/p' \
 
 check_listening "coordinator" "${COORD_PORT:-8443}"
 check_listening "relay" "${RELAY_PORT:-9000}"
+
+# The HTTPS fallback, which is how a device on a network that carries no UDP
+# connects at all. Checked on every upgrade rather than assumed: an Apache
+# package update can disable a module, and the failure is silent until a
+# customer takes a laptop somewhere with a strict firewall.
+step "the HTTPS fallback"
+
+# shellcheck source=lib-edge-apache.sh
+. "$SRC_DIR/deploy/lib-edge-apache.sh"
+
+if ss -ltn 2>/dev/null | grep -q '127.0.0.1:9443 '; then
+    pass "relay fallback listener" "127.0.0.1:9443"
+else
+    fail "relay fallback listener" "nothing is bound to 127.0.0.1:9443"
+fi
+
+akconnect_apache_fallback "$SRC_DIR/deploy/apache" say
+case "$?" in
+    0) pass "Apache proxy" "/fallback → 127.0.0.1:9443" ;;
+    1) say "no Apache here; the fallback must be proxied wherever the panel is served" ;;
+    *) fail "Apache proxy" "Apache would not take the fallback configuration" ;;
+esac
+
+if akconnect_fallback_reachable "$PANEL"; then
+    pass "fallback reachable" "$PANEL/fallback/health"
+else
+    fail "fallback reachable" "$PANEL/fallback/health did not answer"
+fi
 
 # What the running processes say about themselves, which is the only version
 # that matters now.

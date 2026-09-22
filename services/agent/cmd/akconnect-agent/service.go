@@ -48,19 +48,20 @@ func runService(ctx context.Context, args []string) error {
 
 func serviceInstall(args []string) error {
 	fs := flag.NewFlagSet("service install", flag.ExitOnError)
-	port := fs.Int("port", 0, "UDP listen port to open in the firewall (default: this device's own)")
+	// Accepted and ignored, so an older deployment script or a saved command
+	// line does not start failing. The rules name this program now, on every
+	// port it will ever use — see winenv.EnsureFirewallRules.
+	_ = fs.Int("port", 0, "no longer used: the firewall rules name this program, not a port")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	// This device's port, not everybody's. Since defect 23 each device picks
-	// its own and remembers it, so a rule for 51820 would name a port nothing
-	// is listening on — and the agent re-ensures this rule at runtime anyway,
-	// with the port it actually bound. This one exists for the window before
-	// the first `up`, because the firewall prompt appears on the interactive
-	// desktop and a service running as LocalSystem has no desktop.
-	if *port == 0 {
-		*port = installedListenPort()
+	// The rule has to name the file that will run as the service, which is
+	// this one: `service install` is run from the directory the installer put
+	// the agent in, by that agent.
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("could not find this program's own path: %w", err)
 	}
 
 	if err := winsvc.Install(); err != nil {
@@ -71,11 +72,12 @@ func serviceInstall(args []string) error {
 	// Done here rather than on first run: the firewall prompt appears on the
 	// interactive desktop, and a service running as LocalSystem has no
 	// desktop, so nobody would ever see it and the rule would never be made.
-	if err := winenv.EnsureFirewallRule(*port); err != nil {
-		fmt.Fprintf(os.Stderr, "  warning: could not create the firewall rule: %v\n", err)
-		fmt.Fprintf(os.Stderr, "  inbound UDP %d must be allowed or peers cannot reach this device.\n", *port)
+	if err := winenv.EnsureFirewallRules(exe); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: could not create the firewall rules: %v\n", err)
+		fmt.Fprintf(os.Stderr, "  this program must be allowed through or peers cannot reach this device.\n")
 	} else if winenv.FirewallRuleName != "" {
-		fmt.Printf("  Firewall rule %q allows inbound UDP %d.\n", winenv.FirewallRuleName, *port)
+		fmt.Printf("  Firewall rules named %q allow this program on every profile, in and out.\n",
+			winenv.FirewallRuleName)
 	}
 
 	fmt.Printf("  Start it with: akconnect-agent service start\n")
@@ -89,7 +91,7 @@ func serviceUninstall() error {
 	}
 
 	winenv.RemoveFirewallRule()
-	fmt.Printf("  Service and firewall rule removed.\n")
+	fmt.Printf("  Service and firewall rules removed.\n")
 	fmt.Printf("  The device identity and enrolment are untouched; use 'reset' to clear them.\n")
 
 	return nil

@@ -13,11 +13,19 @@ EnvironmentFile=/etc/akconnect/relay.env
 # --data-ports is pinned so the firewall rule is a range somebody can justify.
 # Without it the kernel hands out ephemeral ports and the rule would have to be
 # 32768-60999, which is most of the unprivileged port space.
+#
+# --ws-listen is the HTTPS fallback, for devices on networks that carry no UDP
+# at all. It is plain HTTP on loopback: Apache terminates TLS in front of it on
+# 443 and proxies /fallback here, which is the whole point — the traffic has to
+# arrive on the port a browser uses. Binding it anywhere but loopback would
+# serve the fallback unencrypted.
 ExecStart=/usr/local/bin/akconnect-relay serve \
     --control :9000 \
     --name ${AKCONNECT_RELAY_NAME} \
     --coordinator ${AKCONNECT_COORDINATOR_ADDR} \
-    --data-ports 51900-52400
+    --data-ports 51900-52400 \
+    --ws-listen 127.0.0.1:9443 \
+    --ws-path /ws
 
 Restart=always
 RestartSec=3

@@ -21,6 +21,16 @@ import (
 // one is noticed.
 const writeTimeout = 10 * time.Second
 
+// dataWriteTimeout is the same bound for tunnel traffic, and much shorter.
+//
+// One connection carries every session a device has, so a write that blocks
+// holds the write lock against all of them — and the peer's own pump goroutine
+// is what is blocked, which means one wedged customer would slow a customer
+// they have never heard of. Two seconds is far longer than any healthy link
+// needs and short enough that a dead one sheds packets instead of queueing
+// them, which is what a datagram path is supposed to do.
+const dataWriteTimeout = 2 * time.Second
+
 // controlIdle closes the proxy socket for an agent that has stopped talking to
 // the coordinator, so a long-lived data session does not hold a UDP port open
 // for nothing.
@@ -63,7 +73,7 @@ func (c *wsClient) serve(parent context.Context) {
 			return err
 		}
 
-		return c.writeMessage(ctx, msg)
+		return c.writeWithin(ctx, msg, dataWriteTimeout)
 	}}
 
 	go c.keepalive(ctx)
@@ -208,9 +218,13 @@ func (c *wsClient) bind(ctx context.Context, payload []byte) error {
 	return c.writeMessage(ctx, ack)
 }
 
-// writeMessage sends one frame, bounded in time.
+// writeMessage sends one control frame, bounded in time.
 func (c *wsClient) writeMessage(ctx context.Context, msg []byte) error {
-	deadline, cancel := context.WithTimeout(ctx, writeTimeout)
+	return c.writeWithin(ctx, msg, writeTimeout)
+}
+
+func (c *wsClient) writeWithin(ctx context.Context, msg []byte, within time.Duration) error {
+	deadline, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
 
 	return c.conn.Write(deadline, websocket.MessageBinary, msg)

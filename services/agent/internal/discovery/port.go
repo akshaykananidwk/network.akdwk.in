@@ -89,6 +89,30 @@ func (c *Client) Unanswered() (int, time.Duration) {
 	return c.unacked, time.Since(from)
 }
 
+// Unreachable reports how many announcements in a row the socket itself
+// refused, and for how long.
+//
+// A different fault from Unanswered and it has to be told apart from it. An
+// announcement that is dropped somewhere out on the network still leaves the
+// machine, so the socket reports success and only the silence that follows
+// says anything is wrong. An announcement a local firewall refuses never
+// leaves at all: the send returns an error, no count of unanswered
+// announcements ever grows, and a device that judged only by silence would
+// conclude everything was fine.
+//
+// Windows Firewall blocking our own program outbound produces exactly the
+// second shape, and so does a lab that drops UDP in the machine's own rules.
+func (c *Client) Unreachable() (int, time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.sendFailures == 0 || c.firstSendFailure.IsZero() {
+		return 0, 0
+	}
+
+	return c.sendFailures, time.Since(c.firstSendFailure)
+}
+
 // Answered reports whether the coordinator has replied recently enough to call
 // the path out of this machine working.
 //
@@ -161,6 +185,17 @@ func (c *Client) maybeMovePort() {
 	}
 
 	c.mu.Lock()
+	// Nothing to escape to. Moving ports is a remedy for one port a router
+	// will not carry, and on a network that carries no UDP at all every port
+	// is that port: the moves churn the one address peers have for this
+	// device, reset the count that says how long the silence has lasted, and
+	// achieve nothing. The device is already connected another way.
+	if c.holdPort {
+		c.mu.Unlock()
+
+		return
+	}
+
 	threshold := portMoveThreshold(c.portMoves)
 	blocked := c.unacked >= threshold && c.sendFailures == 0
 	if blocked && c.anyPeerReachableLocked() {
@@ -199,6 +234,17 @@ func (c *Client) maybeMovePort() {
 	c.opts.Logf("discovery: now on UDP %d; announcing again to find out whether it helped", port)
 
 	c.Rehello()
+}
+
+// HoldPort stops and starts port moves.
+//
+// Set while the HTTPS fallback is carrying this device's control traffic,
+// which is the one situation where unanswered announcements are expected and
+// mean nothing about the port they left from.
+func (c *Client) HoldPort(hold bool) {
+	c.mu.Lock()
+	c.holdPort = hold
+	c.mu.Unlock()
 }
 
 // portMoveThreshold is how many unanswered announcements the next move needs.

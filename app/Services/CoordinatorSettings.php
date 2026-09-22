@@ -55,7 +55,10 @@ final class CoordinatorSettings
             'public_key'    => self::value('public_key', (string) Config::get('coordinator.public_key', '')),
             'shared_secret' => self::value('shared_secret', (string) Config::get('coordinator.shared_secret', '')),
             'signing_key'   => self::value('signing_key', (string) Config::get('coordinator.signing_key', '')),
-            'fallback_url'  => self::value('fallback_url', self::defaultFallbackUrl()),
+            'fallback_url'  => self::value(
+                'fallback_url',
+                (string) Config::get('coordinator.fallback_url', self::defaultFallbackUrl())
+            ),
         ];
     }
 

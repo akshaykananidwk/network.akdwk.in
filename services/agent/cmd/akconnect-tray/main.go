@@ -38,6 +38,22 @@ func main() {
 		return
 	}
 
+	// The installer calls this when it finishes an install it could not fully
+	// verify. A customer who has just been told something did not work should
+	// not then have to find a menu: the file is already on their Desktop by
+	// the time the dialog says so.
+	if len(os.Args) > 1 && (os.Args[1] == "-collect" || os.Args[1] == "--collect") {
+		path, err := collectToDesktop()
+		if err != nil {
+			os.Stderr.WriteString(err.Error() + "\n")
+			os.Exit(1)
+		}
+
+		os.Stdout.WriteString(path + "\n")
+
+		return
+	}
+
 	if err := run(); err != nil {
 		os.Stderr.WriteString(err.Error() + "\n")
 		os.Exit(1)

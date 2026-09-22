@@ -110,7 +110,8 @@ final class StreamController
         $devices = DB::selectOne(
             'SELECT COUNT(*) AS total,
                     SUM(CASE WHEN connection_type = \'direct\' THEN 1 ELSE 0 END) AS direct,
-                    SUM(CASE WHEN connection_type = \'relay\' THEN 1 ELSE 0 END) AS relay,
+                    SUM(CASE WHEN connection_type IN (\'relay\', \'relay_https\')
+                             THEN 1 ELSE 0 END) AS relay,
                     SUM(CASE WHEN connection_type = \'offline\' THEN 1 ELSE 0 END) AS offline,
                     SUM(CASE WHEN status = \'pending\' THEN 1 ELSE 0 END) AS pending
              FROM ' . DB::table('devices') . ' WHERE ' . $where,

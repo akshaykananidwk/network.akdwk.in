@@ -40,6 +40,17 @@ func (t *tray) collectDiagnostics() {
 	open(desktop)
 }
 
+// collectToDesktop writes the bundle without any menu being opened, and prints
+// where it went. This is the path the installer uses.
+func collectToDesktop() (string, error) {
+	desktop, err := desktopDir()
+	if err != nil {
+		return "", err
+	}
+
+	return collect(desktop, gatherSources(), time.Now())
+}
+
 // gatherSources is what goes in the bundle. Deliberately short: the service
 // log, the published status, and what this computer is. Everything is redacted
 // on the way in — see collect.

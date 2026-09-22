@@ -228,7 +228,8 @@ final class AgentController
         // that spent an evening showing as red dots were both running the
         // whole time.
         $connectionType = (string) ($input['connection_type'] ?? 'connecting');
-        if ($connectionType === 'offline' || !in_array($connectionType, ['direct', 'relay', 'connecting'], true)) {
+        $known = ['direct', 'relay', 'relay_https', 'connecting'];
+        if ($connectionType === 'offline' || !in_array($connectionType, $known, true)) {
             $connectionType = 'connecting';
         }
 

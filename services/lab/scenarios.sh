@@ -225,10 +225,13 @@ scenario_accounting() {
         return
     fi
 
-    if [ "$(lab::settled_path alpha 30)" != "relay" ]; then
-        record "accounting/tunnel" FAIL "the pair is not relayed, so there is nothing to bill"
-        return
-    fi
+    case "$(lab::settled_path alpha 30)" in
+        relay-udp|relay-https) ;;
+        *)
+            record "accounting/tunnel" FAIL "the pair is not relayed, so there is nothing to bill"
+            return
+            ;;
+    esac
 
     local payload=1000 packets=400 received
     received="$(lab::push_bytes alpha "$BETA_IP" "$payload" "$packets")"
@@ -314,6 +317,7 @@ source "$LAB/scenarios-gateway.sh"
 source "$LAB/scenarios-dns.sh"
 source "$LAB/scenarios-reconnect.sh"
 source "$LAB/scenarios-resolved.sh"
+source "$LAB/scenarios-fallback.sh"
 
 # ---------------------------------------------------------------- CGNAT
 
@@ -493,7 +497,7 @@ scenario_cgnat_direct() {
 
     if [ "$path" = "direct" ]; then
         record "cgnat-direct/path" PASS "direct from behind two layers of NAT; no relay needed"
-    elif [ "$path" = "relay" ]; then
+    elif [ "${path#relay}" != "$path" ]; then
         # Not a failure — a relayed path is a working path — but it is a
         # regression in quality and worth seeing, because it is the difference
         # between a customer costing nothing to serve and costing bandwidth.

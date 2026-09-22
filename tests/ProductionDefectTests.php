@@ -32,6 +32,89 @@ final class ProductionDefectTests
         self::uploadsControlIsShipped();
         self::deployDocument();
         self::edgeUpgradeScript();
+        self::httpsFallback();
+    }
+
+    // ------------------------------------------------------- the 1.9.6 path
+
+    /**
+     * The fallback for networks that carry nothing but the port a browser uses.
+     *
+     * A customer laptop on an office Wi-Fi announced itself to the coordinator
+     * every few seconds for an afternoon and was never answered: the network
+     * let UDP out and dropped the replies. Nothing in the product could work
+     * around it, because asking for help also needed UDP. The only answers
+     * were "change your firewall", which no customer will do, or a path on
+     * TCP 443.
+     *
+     * The wiring that makes that path exist is checked here, because every
+     * piece of it is silent when it is wrong: an agent with no address to go
+     * to simply never connects, and says nothing about why.
+     */
+    private static function httpsFallback(): void
+    {
+        TestCase::group('1.9.6 — the HTTPS fallback is configured and published');
+
+        // Derived from the panel's own address, because a customer who has to
+        // be told a second URL is a customer who will get it wrong.
+        $derived = CoordinatorSettings::defaultFallbackUrl();
+        TestCase::assert(
+            $derived === '' || str_starts_with($derived, 'wss://'),
+            'the default fallback address is a wss:// URL'
+        );
+        if ($derived !== '') {
+            TestCase::assertContains(
+                CoordinatorSettings::FALLBACK_PATH,
+                $derived,
+                'the default fallback address uses the path Apache proxies'
+            );
+        }
+
+        // ws:// would work and must never be offered: it is cleartext on the
+        // one port every network inspects, which would make the fallback the
+        // least private path in the product instead of the most ordinary.
+        $valid = [
+            'host'       => 'coordinator.example.test',
+            'port'       => 8443,
+            'public_key' => base64_encode(str_repeat("\x2a", 32)),
+        ];
+
+        $refused = [
+            'an unencrypted ws:// fallback is refused' => 'ws://net.example.test/fallback',
+            'an https:// fallback is refused'          => 'https://net.example.test/fallback',
+            'a fallback with no host is refused'       => 'wss:///fallback',
+            'a fallback that is not a URL is refused'  => 'net.example.test/fallback',
+        ];
+
+        foreach ($refused as $name => $url) {
+            TestCase::assertThrows(
+                \App\Core\ValidationException::class,
+                static fn () => CoordinatorSettings::save(array_merge($valid, ['fallback_url' => $url])),
+                $name
+            );
+        }
+
+        // Apache is the half of this that lives outside PHP, and both forms of
+        // the configuration have to be in the release for install-edge.sh to
+        // find one. See services/lab/edge-script-gate.sh for what is in them.
+        foreach (
+            ['akconnect-fallback.conf', 'akconnect-fallback-upgrade.conf'] as $conf
+        ) {
+            TestCase::assert(
+                is_file(APP_ROOT . '/deploy/apache/' . $conf),
+                'deploy/apache/' . $conf . ' ships with the release'
+            );
+        }
+
+        // And the panel has to be able to store what a device reports about
+        // it, or a device on the HTTPS path shows as an ordinary relay and
+        // nobody can tell the two situations apart.
+        $migrations = glob(APP_ROOT . '/database/migrations/*_device_relay_https_state.php') ?: [];
+        TestCase::assert($migrations !== [], 'the relay_https connection state has a migration');
+
+        $view = (string) @file_get_contents(APP_ROOT . '/app/Views/partials/connection.php');
+        TestCase::assertContains('relay_https', $view, 'the device list can show the HTTPS path');
+        TestCase::assertContains('relay-https', $view, 'and names it the way the agent reports it');
     }
 
     // ---------------------------------------------------------------- #1, #9

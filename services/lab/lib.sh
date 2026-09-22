@@ -17,6 +17,15 @@ PANEL_PORT=8099
 COORD_PORT=8443
 RELAY_PORT=9000
 RELAY_B_PORT=9001
+# The relay's HTTPS fallback, and the proxy in front of it.
+#
+# Two ports because that is the production shape: the relay listens on
+# loopback speaking plain websocket, and something else — Apache on a real
+# server, socat here — takes the connection on a public port and passes it
+# through. A lab that pointed agents straight at the relay would not exercise
+# the hop where a real deployment breaks.
+WS_PORT=9443
+WS_PROXY_PORT=9444
 # A name rather than an address, deliberately. See lab::relay_hostname.
 RELAY_HOST=relay.lab.internal
 PANEL_URL="http://$HOST_IP:$PANEL_PORT"
@@ -46,7 +55,7 @@ lab::preflight() {
     [ "$(id -u)" -eq 0 ] || die "run as root: the drills create network namespaces"
 
     local missing=()
-    for tool in ip iptables go php mysql jq ping; do
+    for tool in ip iptables go php mysql jq ping socat; do
         command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
     done
     [ ${#missing[@]} -eq 0 ] || die "missing tools: ${missing[*]}"
@@ -169,6 +178,12 @@ return [
         'port'          => $COORD_PORT,
         'public_key'    => '$COORD_PUBLIC',
         'shared_secret' => '$COORD_SECRET',
+        // ws:// rather than wss:// because there is no certificate authority
+        // in a network namespace. What the drill proves is the path — the
+        // switch to it, the control traffic over it, the relayed tunnel over
+        // it, and the return to UDP — none of which TLS changes. The TLS hop
+        // itself is Apache's and is checked by edge-script-gate.sh.
+        'fallback_url'  => 'ws://$HOST_IP:$WS_PROXY_PORT/ws',
     ],
 ];
 PHP
@@ -252,12 +267,36 @@ lab::relay_start() {
         "$BIN/akconnect-relay" serve \
             --control ":$RELAY_PORT" \
             --coordinator "$HOST_IP:$COORD_PORT" \
+            --ws-listen "127.0.0.1:$WS_PORT" \
+            --ws-path /ws \
             --name lab-a \
         >"$LOGS/relay-a.log" 2>&1 &
     RELAY_PID=$!
     sleep 1
     kill -0 "$RELAY_PID" 2>/dev/null || die "relay lab-a exited (see $LOGS/relay-a.log)"
     say "relay lab-a on :$RELAY_PORT, reachable as $HOST_IP (pid $RELAY_PID)"
+
+    lab::ws_proxy_start
+}
+
+# lab::ws_proxy_start stands in for Apache.
+#
+# On a real server 443 is already serving the panel and proxies /fallback to
+# the relay on loopback. There is no Apache in a network namespace, so socat
+# does the same job: it takes the connection on an address the agents can
+# reach and hands it to the relay, which never sees the agent's own address.
+# That is the part worth reproducing — an agent that only worked when it could
+# see the relay directly would fail on every real deployment.
+lab::ws_proxy_start() {
+    # The wildcard address, for the same reason the coordinator uses it: each
+    # scenario deletes and rebuilds the bridge that carries 10.0.0.1, and a
+    # socket bound to that address would go with it.
+    socat "TCP-LISTEN:$WS_PROXY_PORT,fork,reuseaddr" \
+        "TCP:127.0.0.1:$WS_PORT" >"$LOGS/ws-proxy.log" 2>&1 &
+    WS_PROXY_PID=$!
+    sleep 1
+    kill -0 "$WS_PROXY_PID" 2>/dev/null || die "the fallback proxy exited (see $LOGS/ws-proxy.log)"
+    say "fallback proxy on $HOST_IP:$WS_PROXY_PORT → 127.0.0.1:$WS_PORT (pid $WS_PROXY_PID)"
 }
 
 lab::relay_b_start() {

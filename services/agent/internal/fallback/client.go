@@ -58,7 +58,11 @@ type Options struct {
 type Client struct {
 	opts Options
 
-	up       atomic.Bool
+	up atomic.Bool
+	// everUp records that the last attempt got as far as a working
+	// connection, so the retry after it starts from the beginning rather than
+	// from however long a previous unreachable stretch had grown the wait to.
+	everUp   atomic.Bool
 	observed atomic.Pointer[string]
 	lastData atomic.Int64
 	since    atomic.Int64
@@ -194,6 +198,14 @@ func (c *Client) pseudoFor(peer [32]byte, relay netip.AddrPort) (netip.AddrPort,
 
 	return at, true
 }
+
+// Endpoint is the address a peer is reached by while the fallback carries it.
+//
+// The caller compares it against the endpoint WireGuard is actually using,
+// which is the only exact way to say whether this peer's traffic is on the
+// HTTPS path right now: the agent hands the endpoint out here and discovery
+// replaces it the moment UDP works, without telling anybody.
+func (c *Client) Endpoint(peer [32]byte) (netip.AddrPort, bool) { return c.endpointOf(peer) }
 
 // endpointOf returns a peer's fallback endpoint, if it has one.
 func (c *Client) endpointOf(peer [32]byte) (netip.AddrPort, bool) {

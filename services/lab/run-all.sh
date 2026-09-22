@@ -104,6 +104,13 @@ fixture() {
     UID_ALPHA="$uid_alpha"
     UID_BETA="$uid_beta"
 
+    # A scenario may need something done to the network before any agent
+    # starts — a firewall rule, a route. It has to happen here rather than
+    # afterwards, or the drill measures how fast the agent recovers from a
+    # change instead of whether it can connect on that network at all, which
+    # is what a customer plugging a laptop in is doing.
+    [ -n "${FIXTURE_HOOK:-}" ] && "$FIXTURE_HOOK"
+
     lab::up alpha
     lab::up beta
 }
@@ -248,6 +255,7 @@ cleanup() {
     fi
 
     lab::down_agents
+    lab::stop_pid "${WS_PROXY_PID:-}"
     lab::stop_pid "${RELAY_PID:-}"
     lab::stop_pid "${RELAY_B_PID:-}"
     lab::stop_pid "${COORD_PID:-}"
@@ -315,8 +323,11 @@ declare -A SCENARIOS=(
     [dns]=scenario_dns
     [resolved]=scenario_resolved
     [revocation]=scenario_revocation
+    [https-fallback]=scenario_https_fallback
+    [https-inbound]=scenario_https_inbound_blocked
+    [https-recover]=scenario_https_recover
 )
-ORDER=(cone relay cgnat cgnat-direct late-joiner shared-router reconnect reconnect-both roaming cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash overlay-clash gateway-tamper subnet-mapping dns resolved revocation)
+ORDER=(cone relay cgnat cgnat-direct late-joiner shared-router reconnect reconnect-both roaming https-fallback https-inbound https-recover cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash overlay-clash gateway-tamper subnet-mapping dns resolved revocation)
 
 if [ "${1:-}" = "--list" ]; then
     printf '%s\n' "${ORDER[@]}"

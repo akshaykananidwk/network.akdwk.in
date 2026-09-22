@@ -141,10 +141,14 @@ func fromRuntime(rt *state.Runtime) view {
 }
 
 // countReachable counts peers with a path that carries traffic.
+//
+// Matched by prefix, because a relayed path now says which kind it is —
+// "relay-udp" or "relay-https" — and to the person looking at the tray both of
+// them mean the same thing: that computer is reachable.
 func countReachable(rt *state.Runtime) (int, int) {
 	reachable := 0
 	for _, peer := range rt.Peers {
-		if peer.Path == "direct" || peer.Path == "relay" {
+		if peer.Path == "direct" || strings.HasPrefix(peer.Path, "relay") {
 			reachable++
 		}
 	}

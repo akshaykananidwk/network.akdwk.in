@@ -30,6 +30,9 @@ $online = $type !== 'offline' && $lastSeen !== false && (time() - $lastSeen) < $
     ? match ($type) {
         'direct' => ['conn-direct', '🟢', 'Online', 'Online, and reaching its peers directly. No traffic passes through our servers.'],
         'relay'  => ['conn-relay', '🟡', 'Online', 'Online, reaching its peers through a relay. The agent keeps retrying a direct path in the background.'],
+        'relay_https' => ['conn-relay', '🟡', 'Online', 'Online, but this network carries no UDP at all — hotel wifi, a guest network, '
+            . 'an office firewall. The agent is carrying everything over the same port a browser uses, so the device works; '
+            . 'it will not reach a peer directly from here, and there is nothing to change on the machine.'],
         default  => ['conn-connecting', '🔵', 'Online', 'Online and heartbeating. It has not established a path to a peer yet.'],
     }
     : ['conn-offline', '🔴', 'Offline', 'Not heartbeating. The agent is not running, or this machine cannot reach the panel.'];
@@ -37,7 +40,8 @@ $online = $type !== 'offline' && $lastSeen !== false && (time() - $lastSeen) < $
 $path = $online
     ? match ($type) {
         'direct' => 'direct',
-        'relay'  => 'relay',
+        'relay'  => 'relay-udp',
+        'relay_https' => 'relay-https',
         default  => 'connecting',
     }
     : '';

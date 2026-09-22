@@ -122,8 +122,15 @@ type session struct {
 	refused   []netip.Prefix
 	discovery *discovery.Client
 	// fallback is the HTTPS path, built whenever the panel publishes an
-	// address for it and connected only when UDP stops working.
-	fallback *fallback.Client
+	// address for it and connected only when UDP stops working, and
+	// fallbackURL is where it goes.
+	fallback    *fallback.Client
+	fallbackURL string
+	// coordinator is the address this device resolved and announces to,
+	// recorded so the status file can carry it. Two machines at one site that
+	// are "configured the same" and behave differently are usually two
+	// different answers to this, and it used to exist only in a log line.
+	coordinator string
 	// peerMeta maps a peer's hex public key to the names the panel gave it,
 	// which the WireGuard device itself does not carry.
 	peerMeta  map[string]peerNames
@@ -360,7 +367,7 @@ func (s *session) applyConfig(ctx context.Context, priv wgPrivate, cfg *panel.Co
 	// Done here because this is the only place that knows the port actually in
 	// use, and repeated on every configuration pass because the port can move
 	// underneath it (see movePort).
-	if err := winenv.EnsureFirewallRule(s.port); err != nil {
+	if err := winenv.EnsureFirewallRules(""); err != nil {
 		s.logf("firewall: could not allow inbound UDP %d: %v", s.port, err)
 	}
 

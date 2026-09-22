@@ -146,8 +146,19 @@ func (b *Bind) DivertControl(to netip.AddrPort) {
 
 // RoutePeer sends everything addressed to at through the fallback, as traffic
 // for peer.
+//
+// One entry per peer: a peer given a new pseudo endpoint has left the old one
+// behind, and an entry nothing addresses any more would still divert traffic
+// if that address were ever handed out again.
 func (b *Bind) RoutePeer(at netip.AddrPort, peer [32]byte) {
 	next := b.current().clone(b.current().tunnel)
+
+	for addr, existing := range next.peers {
+		if existing == peer && addr != at {
+			delete(next.peers, addr)
+		}
+	}
+
 	next.peers[at] = peer
 	b.route.Store(next)
 }

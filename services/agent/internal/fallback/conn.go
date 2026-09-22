@@ -62,11 +62,26 @@ func (c *Client) Run(ctx context.Context) {
 		case <-time.After(backoff):
 		}
 
-		if backoff < 30*time.Second {
+		// A connection that worked and then ended is a different situation
+		// from one that has never worked: the address is right, something
+		// interrupted it. Starting that one's retries from the beginning is
+		// what makes a dropped connection cost a second rather than however
+		// long the last unreachable stretch had grown the wait to.
+		if c.everUp.Swap(false) || backoff >= maxBackoff {
+			backoff = time.Second
+		} else {
 			backoff *= 2
 		}
 	}
 }
+
+// maxBackoff caps the wait between attempts.
+//
+// Short, and deliberately inside the budget a customer is promised: this runs
+// only on a machine that has already failed to connect any other way, so the
+// cost of trying too often is a TCP connection nobody answers, and the cost of
+// trying too rarely is a device that does not work.
+const maxBackoff = 15 * time.Second
 
 // session runs one connection from dial to close.
 func (c *Client) session(ctx context.Context) error {
@@ -199,6 +214,7 @@ func (c *Client) detach(conn wsConn) {
 		return
 	}
 
+	c.everUp.Store(true)
 	c.up.Store(false)
 
 	// The peers routed through this connection are addressed by endpoints that

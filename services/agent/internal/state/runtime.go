@@ -18,15 +18,22 @@ import (
 //
 // It is disposable: stale contents are detected by age, not trusted.
 type Runtime struct {
-	UpdatedAt     time.Time `json:"updated_at"`
-	PID           int       `json:"pid"`
-	Interface     string    `json:"interface"`
-	ListenPort    int       `json:"listen_port"`
-	VirtualIP     string    `json:"virtual_ip"`
-	OverlayCIDR   string    `json:"overlay_cidr"`
-	Revision      int       `json:"revision"`
-	Reflexive     string    `json:"reflexive_endpoint"`
-	CoordinatorUp bool      `json:"coordinator_reachable"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	PID         int       `json:"pid"`
+	Interface   string    `json:"interface"`
+	ListenPort  int       `json:"listen_port"`
+	VirtualIP   string    `json:"virtual_ip"`
+	OverlayCIDR string    `json:"overlay_cidr"`
+	Revision    int       `json:"revision"`
+	Reflexive   string    `json:"reflexive_endpoint"`
+	// Coordinator is the address this device resolved and is announcing to.
+	//
+	// It lived only in one line of the service log, which is the first thing
+	// lost to rotation and the single most useful field when comparing two
+	// machines at one site: one working and one not, both "configured the
+	// same", is usually two different answers to this.
+	Coordinator   string `json:"coordinator"`
+	CoordinatorUp bool   `json:"coordinator_reachable"`
 	// Unanswered is how many announcements have gone out with nothing coming
 	// back, and UnansweredFor is how long that has been true. Both are zero
 	// when the coordinator is answering.
@@ -38,7 +45,11 @@ type Runtime struct {
 	Unanswered     int           `json:"unanswered,omitempty"`
 	UnansweredFor  time.Duration `json:"unanswered_for_ns,omitempty"`
 	ControlPlaneUp bool          `json:"control_plane_reachable"`
-	Peers          []RuntimePeer `json:"peers"`
+	// Fallback is the HTTPS path's state when this device is using it: where
+	// it connected and how that relay sees its address. Absent on the
+	// overwhelming majority of devices, which never open it at all.
+	Fallback *RuntimeFallback `json:"fallback,omitempty"`
+	Peers    []RuntimePeer    `json:"peers"`
 	// Mappings are the LANs this device is the gateway for, each shown in both
 	// address spaces. Empty on everything that is not a subnet router.
 	//
@@ -51,6 +62,19 @@ type Runtime struct {
 	// Names is the zone this device answers and where it answers it, so a
 	// technician can see what to type and confirm nothing else was touched.
 	Names *RuntimeNames `json:"names,omitempty"`
+}
+
+// RuntimeFallback is the HTTPS path, for a device that has had to use it.
+type RuntimeFallback struct {
+	// URL is where it connected.
+	URL string `json:"url"`
+	// Observed is the address the relay sees this device coming from, which
+	// on a proxied path is the site's public address as our server sees it.
+	// It is shown to a technician and never used as a path to anything: it is
+	// a TCP mapping, and no UDP packet will ever arrive there.
+	Observed string `json:"observed,omitempty"`
+	// Since is when the connection was made.
+	Since time.Time `json:"since"`
 }
 
 // RuntimeNames is the state of the local resolver.
@@ -87,8 +111,10 @@ type RuntimePeer struct {
 	Name      string `json:"name"`
 	VirtualIP string `json:"virtual_ip"`
 	Endpoint  string `json:"endpoint"`
-	// Path is "direct" once a handshake has completed, "relay" when the
-	// endpoint is a relay, and "connecting" before either.
+	// Path is "direct" once a handshake has completed, "relay-udp" when the
+	// endpoint is a relay reached the ordinary way, "relay-https" when this
+	// network carries no UDP and the traffic is going over TCP 443, and
+	// "connecting" before any of them.
 	Path string `json:"path"`
 	// Relay is the fleet name of the relay carrying this peer, empty when
 	// the path is direct. An operator diagnosing a slow site needs to know

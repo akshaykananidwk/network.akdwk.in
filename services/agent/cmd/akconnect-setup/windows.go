@@ -150,6 +150,36 @@ func removeServiceDirectly() error {
 	return fmt.Errorf("%s", strings.TrimSpace(text))
 }
 
+// serviceImagePath is the program a registered service would run, or "" when
+// there is no such service.
+//
+// Asked of the service manager rather than assumed from where this installer
+// happens to be. A machine that has been through a failed install, a moved
+// folder or a hand-editing session can have a service registered against a
+// path that no longer exists — and every attempt to stop, start or repoint it
+// then fails in a way that reads like our software being broken.
+func serviceImagePath() string {
+	out, err := exec.Command("sc.exe", "qc", serviceName).CombinedOutput()
+	if err != nil {
+		return ""
+	}
+
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, "BINARY_PATH_NAME") {
+			continue
+		}
+
+		_, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+
+		return strings.Trim(strings.TrimSpace(value), `"`)
+	}
+
+	return ""
+}
+
 // removeFirewallRule takes away the inbound rule the service install created.
 func removeFirewallRule() error {
 	out, err := exec.Command("netsh", "advfirewall", "firewall", "delete", "rule",

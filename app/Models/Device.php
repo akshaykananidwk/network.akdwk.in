@@ -449,7 +449,8 @@ final class Device extends Model
                                   . self::OFFLINE_AFTER_SECONDS . ' SECOND)
                              THEN 1 ELSE 0 END) AS online,
                     SUM(CASE WHEN connection_type = \'direct\' THEN 1 ELSE 0 END) AS direct,
-                    SUM(CASE WHEN connection_type = \'relay\' THEN 1 ELSE 0 END) AS relay,
+                    SUM(CASE WHEN connection_type IN (\'relay\', \'relay_https\')
+                             THEN 1 ELSE 0 END) AS relay,
                     SUM(CASE WHEN connection_type = \'connecting\' THEN 1 ELSE 0 END) AS connecting,
                     SUM(CASE WHEN status = \'pending\' THEN 1 ELSE 0 END) AS pending
              FROM ' . self::tableName() . ' WHERE ' . $where,

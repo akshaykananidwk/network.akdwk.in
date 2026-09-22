@@ -7,6 +7,7 @@ import (
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/fallback"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/state"
 )
 
 // When the agent gives up on UDP and opens the HTTPS path.
@@ -63,6 +64,7 @@ func (s *session) startFallback(ctx context.Context, cfg *panel.Config, coordina
 	}
 
 	s.fallback = client
+	s.fallbackURL = cfg.Fallback.URL
 
 	go s.watchFallback(ctx)
 }
@@ -84,6 +86,14 @@ func (s *session) watchFallback(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+
+		// While the fallback is carrying control, an unanswered announcement
+		// says nothing about the port it left from — so the port-move
+		// detector is held. Reasserted on every tick rather than once,
+		// because the connection comes and goes and the two must not drift.
+		if s.discovery != nil {
+			s.discovery.HoldPort(s.fallback != nil && s.fallback.Up())
 		}
 
 		switch {
@@ -109,9 +119,19 @@ func (s *session) udpIsHopeless() bool {
 		return false
 	}
 
-	count, since := s.discovery.Unanswered()
+	if count, since := s.discovery.Unanswered(); count >= fallbackAfterUnanswered &&
+		since >= fallbackAfterSilence {
+		return true
+	}
 
-	return count >= fallbackAfterUnanswered && since >= fallbackAfterSilence
+	// And the other shape of the same conclusion: the socket refusing rather
+	// than the network swallowing. Windows Firewall blocking our program
+	// outbound gives an error on every send, so nothing is ever left
+	// unanswered — there is nothing out there to answer it — and a device
+	// that watched only for silence would wait for ever.
+	refused, failing := s.discovery.Unreachable()
+
+	return refused >= fallbackAfterUnanswered && failing >= fallbackAfterSilence
 }
 
 // fallbackNoLongerNeeded reports whether the HTTPS path can be let go.
@@ -123,12 +143,19 @@ func (s *session) fallbackNoLongerNeeded() bool {
 	return s.discovery.Answered(fallbackSettled) && s.fallback.Idle() > fallbackUnusedFor
 }
 
-// fallbackPath describes how this device is reaching the control plane, for
-// the status file and the tray.
-func (s *session) fallbackPath() string {
+// fallbackState is what the status file says about the HTTPS path.
+//
+// Nil on the overwhelming majority of devices, which never open it: a field
+// that is present and empty reads like a path that failed, and this one has
+// simply never been needed.
+func (s *session) fallbackState() *state.RuntimeFallback {
 	if s.fallback == nil || !s.fallback.Up() {
-		return ""
+		return nil
 	}
 
-	return s.fallback.Observed()
+	return &state.RuntimeFallback{
+		URL:      s.fallbackURL,
+		Observed: s.fallback.Observed(),
+		Since:    time.Now().Add(-s.fallback.Idle()).UTC(),
+	}
 }

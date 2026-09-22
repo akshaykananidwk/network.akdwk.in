@@ -169,14 +169,15 @@ func (s *session) refresh(ctx context.Context, priv wgPrivate) (int, error) {
 // through a relay. A handshake alone proves traffic flows, not how — and the
 // difference is what a customer is billed for.
 //
-// The panel accepts "direct", "relay" and "connecting". It does not accept
-// "offline" from an agent any more, and should not: a heartbeat arriving is
-// proof the device is not offline, and the panel decides that from when it
-// last heard rather than from what it was told.
+// The panel accepts "direct", "relay", "relay_https" and "connecting". It does
+// not accept "offline" from an agent any more, and should not: a heartbeat
+// arriving is proof the device is not offline, and the panel decides that from
+// when it last heard rather than from what it was told.
 func (s *session) connectionType(peers []tunnel.PeerStatus) string {
 	cutoff := time.Now().Add(-3 * time.Minute).Unix()
 	live := false
 	relayed := false
+	overHTTPS := false
 
 	for _, p := range peers {
 		if p.LastHandshake <= cutoff {
@@ -184,9 +185,16 @@ func (s *session) connectionType(peers []tunnel.PeerStatus) string {
 		}
 		live = true
 
-		if meta, ok := s.peerMeta[p.PublicKeyHex]; ok && s.discovery != nil {
-			if s.discovery.Path(meta.publicKey) == "relay" {
-				relayed = true
+		meta, ok := s.peerMeta[p.PublicKeyHex]
+		if !ok || s.discovery == nil {
+			continue
+		}
+
+		if s.discovery.Path(meta.publicKey) == "relay" {
+			relayed = true
+
+			if s.onFallback(meta.publicKey, p.Endpoint) {
+				overHTTPS = true
 			}
 		}
 	}
@@ -199,6 +207,12 @@ func (s *session) connectionType(peers []tunnel.PeerStatus) string {
 		// made two running machines show as red dots in the panel for an
 		// evening.
 		return "connecting"
+	case relayed && overHTTPS:
+		// Distinct from an ordinary relay, because it says something an
+		// operator can act on that "relay" does not: this network will not
+		// carry UDP at all, so the device will never reach a peer directly
+		// from here however long it waits.
+		return "relay_https"
 	case relayed:
 		// Amber if any peer is relayed: the operator needs to know some of
 		// this device's traffic is going through our servers, not that all of
@@ -267,6 +281,9 @@ func (s *session) publishRuntime(controlPlaneUp bool) {
 		rt.Unanswered, rt.UnansweredFor = s.discovery.Unanswered()
 	}
 
+	rt.Coordinator = s.coordinator
+	rt.Fallback = s.fallbackState()
+
 	rt.Peers = s.peerStatus()
 
 	if err := s.stateSt.SaveRuntime(rt); err != nil {
@@ -325,12 +342,39 @@ func (s *session) peerStatus() []state.RuntimePeer {
 				}
 				entry.Relay = s.discovery.RelayName(meta.publicKey)
 			}
+
+			// "relay" is two different situations to whoever is looking at it:
+			// a pair that could not punch through, and a device on a network
+			// that carries no UDP at all. Only the second one will still be
+			// relayed tomorrow.
+			if entry.Path == "relay" {
+				entry.Path = "relay-udp"
+				if s.onFallback(meta.publicKey, p.Endpoint) {
+					entry.Path = "relay-https"
+				}
+			}
 		}
 
 		out = append(out, entry)
 	}
 
 	return out
+}
+
+// onFallback reports whether a peer's traffic is on the HTTPS path right now.
+//
+// Decided by comparing the endpoint WireGuard is actually using against the
+// one the fallback handed out, rather than by remembering that it once did.
+// The two stop matching the instant discovery adopts a real relay port, which
+// is exactly when this should stop being true.
+func (s *session) onFallback(peer [32]byte, endpoint string) bool {
+	if s.fallback == nil || !s.fallback.Up() || endpoint == "" {
+		return false
+	}
+
+	at, ok := s.fallback.Endpoint(peer)
+
+	return ok && at.String() == endpoint
 }
 
 func revoked(err error) bool {

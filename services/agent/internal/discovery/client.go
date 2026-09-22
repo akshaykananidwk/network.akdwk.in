@@ -95,6 +95,9 @@ type Client struct {
 	// transportProblem is what to tell the panel about it, so a device nobody
 	// can reach says so rather than looking healthy.
 	transportProblem string
+	// firstSendFailure is when the current run of them started, so how long
+	// the socket has been refusing can be reported as well as how often.
+	firstSendFailure time.Time
 	// rebinds counts how many times the socket has been reopened without the
 	// sends starting to work, so a recovery that is not recovering says so.
 	rebinds int
@@ -105,6 +108,9 @@ type Client struct {
 	unacked   int
 	lastSend  time.Time
 	portMoves int
+	// holdPort suspends port moves while something else is carrying this
+	// device's control traffic. See HoldPort.
+	holdPort bool
 	// firstSend is when this agent first announced itself, so a device that
 	// has NEVER been answered can say how long that has been true rather than
 	// measuring from a lastAck it does not have.
@@ -421,6 +427,7 @@ func (c *Client) announce(full bool) {
 	c.sendFailures = 0
 	c.rebinds = 0
 	c.transportProblem = ""
+	c.firstSendFailure = time.Time{}
 	c.mu.Unlock()
 
 	if recovered {
@@ -447,6 +454,9 @@ func (c *Client) noteSendFailure(err error) {
 	c.sendFailures++
 	failures := c.sendFailures
 	c.transportProblem = err.Error()
+	if c.firstSendFailure.IsZero() {
+		c.firstSendFailure = time.Now()
+	}
 	c.mu.Unlock()
 
 	// Every failure is logged. A quiet agent that cannot be reached is worse

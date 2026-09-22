@@ -77,6 +77,7 @@ func (s *session) startDiscovery(ctx context.Context, cfg *panel.Config, priv wg
 	client.SetRelays(relayFleet(cfg, s.logf))
 
 	s.discovery = client
+	s.coordinator = addr.String()
 
 	go client.Run(ctx)
 
@@ -161,11 +162,13 @@ func (s *session) movePort() (int, []netip.AddrPort, error) {
 	s.port = port
 	s.st.ListenPort = port
 
-	// The firewall rule names a port, so it moves with it. Without this the
-	// device escapes a port its router would not carry and lands on one its
-	// own firewall will not accept.
-	if err := winenv.EnsureFirewallRule(port); err != nil {
-		s.logf("firewall: could not allow inbound UDP %d: %v", port, err)
+	// The firewall rules name this program rather than a port, so a move
+	// needs no new rule — which is exactly why they were changed. They are
+	// re-asserted anyway, because this is the one moment the agent knows
+	// something about its own reachability has changed, and a rule a cleanup
+	// tool removed is repaired here rather than at the next reboot.
+	if err := winenv.EnsureFirewallRules(""); err != nil {
+		s.logf("firewall: could not allow this program through: %v", err)
 	}
 
 	if err := s.stateSt.Save(s.st); err != nil {
