@@ -116,30 +116,53 @@ final class WhatsAppAlerts
 
     private static function deliver(string $to, string $text): bool
     {
-        $endpoint = self::endpoint();
-        $method = strtoupper((string) (Setting::get(self::PREFIX . 'method', null) ?? 'POST'));
-        $template = (string) (Setting::get(self::PREFIX . 'body', null) ?? '');
         $contentType = (string) (Setting::get(self::PREFIX . 'content_type', null) ?? 'application/json');
+        $template = (string) (Setting::get(self::PREFIX . 'body', null) ?? '');
 
         if ($template === '') {
             return false;
         }
 
-        $body = self::fill($template, $to, $text, $contentType);
-        $url = self::fill($endpoint, $to, $text, 'url');
+        $url = self::fill(self::endpoint(), $to, $text, 'url');
 
         $headers = ['Content-Type: ' . $contentType];
         foreach (self::headerLines() as $line) {
             $headers[] = $line;
         }
 
+        [$ok, $status, $error] = self::request(
+            strtoupper((string) (Setting::get(self::PREFIX . 'method', null) ?? 'POST')),
+            $url,
+            self::fill($template, $to, $text, $contentType),
+            $headers
+        );
+
+        // Host, not URL: a URL can carry a token in its query string, and this
+        // line is written on every failure.
+        Logger::info('app', $ok ? 'WhatsApp alert sent' : 'WhatsApp alert failed', [
+            'host'   => (string) (parse_url($url, PHP_URL_HOST) ?: 'unknown'),
+            'status' => $status,
+            'error'  => $ok ? '' : substr($error, 0, 120),
+        ]);
+
+        return $ok;
+    }
+
+    /**
+     * One HTTP request, and nothing about what it is for.
+     *
+     * @param list<string> $headers
+     * @return array{0: bool, 1: int, 2: string}
+     */
+    private static function request(string $method, string $url, string $body, array $headers): array
+    {
         $curl = curl_init($url);
         if ($curl === false) {
-            return false;
+            return [false, 0, 'curl could not be initialised'];
         }
 
         curl_setopt_array($curl, [
-            CURLOPT_CUSTOMREQUEST  => $method === 'GET' ? 'GET' : $method,
+            CURLOPT_CUSTOMREQUEST  => $method === '' ? 'POST' : $method,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT        => 10,
             CURLOPT_HTTPHEADER     => $headers,
@@ -151,17 +174,7 @@ final class WhatsAppAlerts
         $error = curl_error($curl);
         curl_close($curl);
 
-        $ok = $response !== false && $status >= 200 && $status < 300;
-
-        // Host, not URL: a URL can carry a token in its query string, and this
-        // line is written on every failure.
-        Logger::info('app', $ok ? 'WhatsApp alert sent' : 'WhatsApp alert failed', [
-            'host'   => (string) (parse_url($url, PHP_URL_HOST) ?: 'unknown'),
-            'status' => $status,
-            'error'  => $ok ? '' : substr($error, 0, 120),
-        ]);
-
-        return $ok;
+        return [$response !== false && $status >= 200 && $status < 300, $status, $error];
     }
 
     /**

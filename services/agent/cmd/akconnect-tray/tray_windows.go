@@ -43,27 +43,41 @@ type tray struct {
 var active *tray
 
 func runTray() error {
+	t, err := newTray()
+	if err != nil {
+		return err
+	}
+	defer notifyIcon(nimDelete, &t.data)
+
+	t.refresh()
+	procSetTimer.Call(uintptr(t.hwnd), refreshTimer, uintptr(refreshEvery/time.Millisecond), 0)
+
+	return t.pump()
+}
+
+// newTray registers the window class, creates the message window and puts the
+// icon up.
+func newTray() (*tray, error) {
 	t := &tray{}
 	active = t
 
 	class := utf16(productName + "Tray")
 
 	wc := wndClassEx{
-		Style:         0,
 		LpfnWndProc:   windows.NewCallback(wndProc),
 		LpszClassName: class,
 	}
 	wc.CbSize = uint32(unsafe.Sizeof(wc))
 
 	if ret, _, err := procRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc))); ret == 0 {
-		return fmt.Errorf("could not register the window class: %w", err)
+		return nil, fmt.Errorf("could not register the window class: %w", err)
 	}
 
 	hwnd, _, err := procCreateWindowEx.Call(
 		0, uintptr(unsafe.Pointer(class)), uintptr(unsafe.Pointer(utf16(displayName))),
 		0, cwUseDefault, cwUseDefault, 0, 0, 0, 0, 0, 0)
 	if hwnd == 0 {
-		return fmt.Errorf("could not create the tray window: %w", err)
+		return nil, fmt.Errorf("could not create the tray window: %w", err)
 	}
 
 	t.hwnd = windows.HWND(hwnd)
@@ -80,14 +94,17 @@ func runTray() error {
 	t.data.setTip(displayName)
 
 	if !notifyIcon(nimAdd, &t.data) {
-		return fmt.Errorf("Windows would not accept the tray icon")
+		return nil, fmt.Errorf("Windows would not accept the tray icon")
 	}
-	defer notifyIcon(nimDelete, &t.data)
 
-	t.refresh()
-	procSetTimer.Call(uintptr(t.hwnd), refreshTimer, uintptr(refreshEvery/time.Millisecond), 0)
+	return t, nil
+}
 
+// pump runs the message loop until the session ends or the customer hides the
+// icon.
+func (t *tray) pump() error {
 	var m msg
+
 	for {
 		ret, _, _ := procGetMessage.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
 		if int32(ret) <= 0 {
