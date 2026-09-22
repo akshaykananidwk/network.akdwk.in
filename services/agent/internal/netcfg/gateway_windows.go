@@ -4,6 +4,7 @@ package netcfg
 
 import (
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"strings"
 )
@@ -47,34 +48,57 @@ func applyGateway(plan *GatewayPlan) error {
 		return fmt.Errorf("gateway: enabling forwarding on %s: %w", plan.Interface, err)
 	}
 
-	for _, prefix := range plan.Advertised {
-		name := natPrefix + strings.NewReplacer("/", "-", ".", "_").Replace(prefix.String())
+	if len(plan.Advertised) == 0 {
+		return nil
+	}
 
-		// Remove any instance left by a previous run before adding one:
-		// New-NetNat fails outright if the prefix overlaps an existing
-		// instance, and an agent that crashed leaves exactly that behind.
-		removeNat(name)
+	// ONE instance, named for the overlay.
+	//
+	// This used to create one per advertised prefix, each with the same
+	// -InternalIPInterfaceAddressPrefix — the overlay. New-NetNat refuses an
+	// internal prefix that overlaps an existing instance, and a prefix
+	// overlaps itself, so the first call succeeded and every one after it
+	// failed and failed the whole gateway. A device sharing one LAN worked; a
+	// device sharing two shared neither.
+	//
+	// One is also what is correct. The NAT is defined by what is being
+	// translated — traffic arriving from the overlay — not by where it is
+	// going, and the destinations are already decided by the routes.
+	name := natName(plan.Overlay)
 
-		if err := runPowerShell(fmt.Sprintf(
-			`New-NetNat -Name '%s' -InternalIPInterfaceAddressPrefix '%s' -ErrorAction Stop`,
-			name, plan.Overlay.String(),
-		)); err != nil {
-			return fmt.Errorf("gateway: creating NAT for %s: %w", prefix, err)
-		}
+	// Any instance left by a previous run goes first, for the same
+	// overlap reason: an agent that crashed leaves exactly that behind.
+	removeNat(name)
+
+	if err := runPowerShell(fmt.Sprintf(
+		`New-NetNat -Name '%s' -InternalIPInterfaceAddressPrefix '%s' -ErrorAction Stop`,
+		name, plan.Overlay.String(),
+	)); err != nil {
+		return fmt.Errorf("gateway: creating NAT for %s: %w", plan.Overlay, err)
 	}
 
 	return nil
 }
 
 func removeGateway(plan *GatewayPlan) error {
+	removeNat(natName(plan.Overlay))
+
+	// Instances from before this was one-per-overlay, so upgrading a machine
+	// that ran the old code does not leave NAT rules nobody will ever remove.
 	for _, prefix := range plan.Advertised {
-		removeNat(natPrefix + strings.NewReplacer("/", "-", ".", "_").Replace(prefix.String()))
+		removeNat(natName(prefix))
 	}
 
 	// Forwarding is left enabled, as on Linux: it may have been on before the
 	// agent started and turning it off could break whatever else the machine
 	// was doing.
 	return nil
+}
+
+// natName is the instance name for a prefix. A name rather than an address,
+// because an operator reading Get-NetNat should be able to tell whose it is.
+func natName(prefix netip.Prefix) string {
+	return natPrefix + strings.NewReplacer("/", "-", ".", "_").Replace(prefix.String())
 }
 
 func removeNat(name string) {

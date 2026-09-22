@@ -11,9 +11,11 @@ use App\Core\Session;
 use App\Core\Validator;
 use App\Models\Device;
 use App\Models\Network;
+use App\Core\ValidationException;
 use App\Services\AuditService;
 use App\Services\DeviceService;
 use App\Services\IpamService;
+use App\Services\RouteService;
 
 /**
  * Device list, detail and the approve/revoke/disable lifecycle actions.
@@ -66,6 +68,12 @@ final class DeviceController extends Controller
             'network' => $network,
             // Shown exactly once, immediately after approval, then gone.
             'issued_token' => Session::flash('issued_device_token'),
+            // What this computer's own network probably is, for the one-click
+            // share. A suggestion in an editable box — see suggestLan.
+            'suggested_lan' => RouteService::suggestLan($device['last_lan_endpoint'] ?? null),
+            'shared_lans'   => $device['network_id'] !== null
+                ? RouteService::forDevice((int) $device['id'])
+                : [],
         ]);
     }
 
@@ -108,6 +116,50 @@ final class DeviceController extends Controller
         }
 
         return $this->redirect('devices/' . $deviceId, 'Device revoked. Its peers drop it within 10 seconds.');
+    }
+
+    /**
+     * Share the LAN this device is on, in one click.
+     *
+     * What a customer actually wants — "let the other shops reach the camera
+     * recorder at 192.168.10.1" — took five steps across two pages. This is
+     * the whole of it: the range, confirmed, and a route that is live.
+     *
+     * @param array<string,string> $params
+     */
+    public function shareLan(Request $request, array $params): Response
+    {
+        $deviceId = (int) $params['id'];
+
+        $device = Device::find($deviceId);
+        if ($device === null) {
+            throw new NotFoundException('App\\Models\\Device #' . $deviceId . ' not found');
+        }
+
+        $cidr = trim((string) $request->input('destination_cidr', ''));
+        if ($cidr === '') {
+            return $this->redirect('devices/' . $deviceId, '', 'Enter the range this computer should share.');
+        }
+
+        try {
+            $route = RouteService::shareLan($deviceId, $cidr);
+        } catch (ValidationException $e) {
+            // The service's own words: "that range overlaps the overlay",
+            // "that is not a LAN". They are written for whoever has to act on
+            // them, which is the person who just pressed the button.
+            return $this->redirect('devices/' . $deviceId, '', $e->getMessage());
+        }
+
+        return $this->redirect(
+            'devices/' . $deviceId,
+            sprintf(
+                'Sharing %s through this computer. The others reach it at %s — the same last number, '
+                    . 'so 192.168.10.1 becomes %s.1. Give it up to a minute.',
+                (string) $route['destination_cidr'],
+                (string) $route['mapped_cidr'],
+                rtrim(substr((string) $route['mapped_cidr'], 0, (int) strrpos((string) $route['mapped_cidr'], '.')), '.')
+            )
+        );
     }
 
     /**

@@ -74,6 +74,91 @@ final class RouteService
         return NetworkRoute::findOrFail($id);
     }
 
+    /**
+     * The LANs this device already shares.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public static function forDevice(int $deviceId): array
+    {
+        return NetworkRoute::where(['via_device_id' => $deviceId], 'id', 'ASC');
+    }
+
+    /**
+     * The LAN this device is probably on, from the address it reports.
+     *
+     * A shop router hands out 192.168.10.x and the PC reports 192.168.10.23;
+     * the network is almost always 192.168.10.0/24. "Almost always" is why
+     * this is a suggestion put in an editable box rather than something acted
+     * on: a site on a /16, or on two subnets, would be quietly wrong, and
+     * quietly wrong about which range reaches a customer's cameras is not a
+     * thing to be.
+     *
+     * Returns '' when there is nothing to suggest, which is the honest answer
+     * for a device that has never reported a LAN address.
+     */
+    public static function suggestLan(?string $lanEndpoint): string
+    {
+        $address = trim((string) $lanEndpoint);
+        if ($address === '') {
+            return '';
+        }
+
+        // Endpoints arrive as address:port.
+        if (($colon = strrpos($address, ':')) !== false) {
+            $address = substr($address, 0, $colon);
+        }
+
+        if (filter_var($address, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false) {
+            return '';
+        }
+
+        // Only for addresses that are actually private. A public address is
+        // the device's own internet address, and suggesting a /24 of it would
+        // offer to route a stranger's network.
+        if (filter_var(
+            $address,
+            FILTER_VALIDATE_IP,
+            FILTER_FLAG_IPV4 | FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE
+        ) !== false) {
+            return '';
+        }
+
+        $parts = explode('.', $address);
+
+        return $parts[0] . '.' . $parts[1] . '.' . $parts[2] . '.0/24';
+    }
+
+    /**
+     * Share one LAN through one device, in a single click.
+     *
+     * The long way round is: tick "this device is a gateway", go to the
+     * network, add a route, choose the device, type the range, then approve
+     * it. Five steps and two pages to let a hotel reach its own camera
+     * recorder — which is the single most common thing anybody buys this for.
+     *
+     * Approved here, deliberately. R4 says nothing reaches a customer's LAN
+     * until a person has said it may, and an administrator pressing this
+     * button, on this device, having read the range in the box, IS that
+     * person saying so. Adding a second click to approve what they have just
+     * asked for is ceremony, not consent.
+     *
+     * @return array<string,mixed> the route
+     */
+    public static function shareLan(int $deviceId, string $cidr): array
+    {
+        $device = Device::findOrFail($deviceId);
+        $networkId = (int) $device['network_id'];
+
+        $route = self::advertise($networkId, [
+            'destination_cidr' => $cidr,
+            'via_device_id'    => $deviceId,
+            'description'      => 'Shared from ' . (string) $device['name'],
+        ]);
+
+        return self::approve((int) $route['id']);
+    }
+
     /** Approve a route, which is what actually puts it in front of agents. */
     public static function approve(int $routeId): array
     {

@@ -167,6 +167,66 @@ declare(strict_types=1);
     </form>
 </section>
 
+<?php if (can('network.update') && $device['status'] === 'authorized'): ?>
+<section class="card">
+    <header class="card-header">
+        <h2>Share this computer's network</h2>
+        <p class="text-muted">
+            So the other computers can reach things that cannot run the agent themselves —
+            a camera recorder, a printer, a billing machine.
+        </p>
+    </header>
+
+    <?php if (($shared_lans ?? []) !== []): ?>
+        <table class="table">
+            <thead><tr><th>Shared range</th><th>Others reach it at</th><th>Status</th></tr></thead>
+            <tbody>
+            <?php foreach ($shared_lans as $route): ?>
+                <tr>
+                    <td><code><?= e((string) $route['destination_cidr']) ?></code></td>
+                    <td><code><?= e((string) $route['mapped_cidr']) ?></code></td>
+                    <td>
+                        <?= (int) $route['approved'] === 1
+                            ? '<span class="badge badge-ok">live</span>'
+                            : '<span class="badge">waiting for approval</span>' ?>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <p class="field-hint">
+            The address is translated on purpose: two customers can both use 192.168.1.0/24
+            and neither has to renumber. The last number is kept, so 192.168.10.1 is
+            reachable at the same .1 in the range above.
+        </p>
+    <?php endif; ?>
+
+    <form method="post" action="<?= e(url('devices/' . $device['id'] . '/share-lan')) ?>" class="form">
+        <?= csrf_field() ?>
+        <div class="field">
+            <label for="destination_cidr">Range to share</label>
+            <input type="text" id="destination_cidr" name="destination_cidr"
+                   value="<?= e((string) ($suggested_lan ?? '')) ?>"
+                   placeholder="192.168.10.0/24">
+            <p class="field-hint">
+                <?php if (($suggested_lan ?? '') !== ''): ?>
+                    Filled in from the address this computer reports
+                    (<code><?= e((string) ($device['last_lan_endpoint'] ?? '')) ?></code>).
+                    Check it against the router before sharing — a site on a larger range
+                    needs the larger range typed here.
+                <?php else: ?>
+                    This computer has not reported a local address yet. Type the range its
+                    own network uses, as the router shows it.
+                <?php endif; ?>
+            </p>
+        </div>
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Share this network</button>
+        </div>
+    </form>
+</section>
+<?php endif; ?>
+
 <?php if (can('device.update')): ?>
 <section class="card">
     <header class="card-header"><h2>Agent</h2></header>

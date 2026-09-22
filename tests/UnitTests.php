@@ -13,6 +13,7 @@ use App\Core\Validator;
 use App\Models\UpdateSetting;
 use App\Services\AclService;
 use App\Services\IpamService;
+use App\Services\RouteService;
 use App\Updater\ArchiveExtractor;
 use App\Updater\GithubClient;
 use App\Updater\Manifest;
@@ -44,6 +45,7 @@ final class UnitTests
         self::releaseTags();
         self::sqlSplitter();
         self::totp();
+        self::lanSuggestion();
     }
 
     private static function crypto(): void
@@ -785,4 +787,41 @@ final class UnitTests
         }
         @rmdir($directory);
     }
+    /**
+     * 1.9.5: the range offered by the one-click "share this computer's
+     * network".
+     *
+     * It is a suggestion, and what matters is which way it is wrong. Offering
+     * nothing when it cannot tell costs one typed line. Offering a /24 of a
+     * public address would be offering to route a stranger's network, and
+     * offering one for an address that is not an address at all would put
+     * nonsense in a box an administrator is about to confirm.
+     */
+    private static function lanSuggestion(): void
+    {
+        TestCase::group('Unit — the LAN offered for one-click sharing (1.9.5)');
+
+        $cases = [
+            // What the agent actually reports: address and port.
+            ['192.168.10.23:51820', '192.168.10.0/24', 'a shop router\'s range, from the reported endpoint'],
+            ['192.168.10.23', '192.168.10.0/24', 'and without a port'],
+            ['10.8.4.19:49500', '10.8.4.0/24', 'a 10.x site'],
+            ['172.16.5.9:51820', '172.16.5.0/24', 'a 172.16 site'],
+            // Public: this is the device's own internet address, and a /24 of
+            // it is somebody else's network.
+            ['203.0.113.9:51820', '', 'nothing is offered for a public address'],
+            // Carrier-grade NAT is not a LAN either.
+            ['100.64.3.7:51820', '', 'nothing is offered for a CGNAT address'],
+            ['', '', 'nothing is offered when the device has never reported one'],
+            ['not-an-address', '', 'nothing is offered for nonsense'],
+            ['[fe80::1]:51820', '', 'nothing is offered for IPv6, which this does not map'],
+        ];
+
+        foreach ($cases as [$endpoint, $expected, $why]) {
+            TestCase::assertSame($expected, RouteService::suggestLan($endpoint), $why);
+        }
+
+        TestCase::assertSame('', RouteService::suggestLan(null), 'and nothing at all is not a crash');
+    }
+
 }
