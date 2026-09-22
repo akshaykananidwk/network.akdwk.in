@@ -3,6 +3,7 @@ package discovery
 import (
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/shared/disco"
 )
@@ -382,5 +383,80 @@ func TestResolvingARelayEndpoint(t *testing.T) {
 		if got.String() != tc.want {
 			t.Fatalf("resolveHostPort(%q) = %s, want %s", tc.in, got, tc.want)
 		}
+	}
+}
+
+// A relay that went quiet because the network stopped carrying UDP is not a
+// relay fault, and asking the coordinator for another one is a UDP packet to a
+// party that is not answering either.
+//
+// This is the laptop carried from a working network into an office that drops
+// UDP. The pair was on a relay, so when the network died the relay stopped
+// answering first, and the agent spent eighteen seconds of a thirty-second
+// budget on a relay change that could not possibly work before anything
+// concluded the network was the problem. A device that cannot reach one relay
+// over UDP cannot reach another.
+func TestDoesNotChangeRelayWhileTheCoordinatorIsAlsoSilent(t *testing.T) {
+	h := newHarness(t)
+
+	var peer [32]byte
+	peer[0] = 9
+
+	h.client.mu.Lock()
+	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
+	h.client.relayTicket[peer] = []byte("ticket")
+	h.client.relayName[peer] = "lab-b"
+	h.client.paths[peer] = pathRelay
+	h.client.mu.Unlock()
+
+	// The network dies: announcements go out and nothing comes back. This is
+	// what the fallback supervisor acts on too, and the two must agree.
+	h.client.mu.Lock()
+	h.client.unacked = relayFailoverNeedsAnswers
+	h.client.firstSend = time.Now().Add(-2 * relayFailoverNeedsCoordinator)
+	h.client.lastAck = time.Time{}
+	h.client.mu.Unlock()
+
+	for i := 0; i <= relayMissesBeforeFailover*3; i++ {
+		h.client.rebindRelays()
+	}
+
+	if got := h.transport.count(disco.TypeRelayRequest); got != 0 {
+		t.Fatalf("asked for another relay %d time(s) on a network that carries no UDP", got)
+	}
+
+	// And it keeps re-presenting the ticket, which costs one packet every five
+	// seconds and is how the relay is found again the moment UDP comes back.
+	if got := h.transport.count(disco.TypeRelayBind); got == 0 {
+		t.Fatal("stopped rebinding as well, so nothing would notice UDP returning")
+	}
+}
+
+// The other half: relay failover still has to work when UDP to the
+// coordinator is fine and only the relay has gone. That is the case it was
+// written for, and standing down whenever a relay goes quiet would strand
+// every pair on a dead relay.
+func TestStillChangesRelayWhenTheCoordinatorIsAnswering(t *testing.T) {
+	h := newHarness(t)
+
+	var peer [32]byte
+	peer[0] = 11
+
+	h.client.mu.Lock()
+	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
+	h.client.relayTicket[peer] = []byte("ticket")
+	h.client.relayName[peer] = "lab-a"
+	h.client.paths[peer] = pathRelay
+	// The coordinator answered a moment ago, so UDP is working.
+	h.client.unacked = 0
+	h.client.lastAck = time.Now()
+	h.client.mu.Unlock()
+
+	for i := 0; i <= relayMissesBeforeFailover*2; i++ {
+		h.client.rebindRelays()
+	}
+
+	if got := h.transport.count(disco.TypeRelayRequest); got == 0 {
+		t.Fatal("never asked for another relay although the coordinator was answering")
 	}
 }

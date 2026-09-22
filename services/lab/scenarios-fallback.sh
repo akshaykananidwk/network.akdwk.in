@@ -212,7 +212,8 @@ scenario_https_switch() {
             record "https-switch/budget" FAIL "took ${took}s, over the ${FALLBACK_BUDGET}s budget"
         fi
     else
-        record "https-switch/budget" FAIL "traffic never came back after UDP was blocked"
+        record "https-switch/budget" FAIL \
+            "traffic never came back within $((FALLBACK_BUDGET + 20))s after UDP was blocked"
         lab::tail_log alpha-up 20
     fi
 

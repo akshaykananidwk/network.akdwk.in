@@ -26,6 +26,7 @@ TENANT=""
 NETWORK=""
 RESULTS=()
 FAILED=0
+SKIPPED=0
 LOSS_PCT=""
 
 # How far the panel's billed figure may sit from what the relay says it
@@ -35,12 +36,22 @@ ACCOUNTING_TOLERANCE=${ACCOUNTING_TOLERANCE:-10}
 AGENT_PIDS=()
 SERVER_PIDS=()
 
+# SKIP is for a check this MACHINE cannot run, and nothing else.
+#
+# It is not a soft FAIL and it must never be used for one. A check that could
+# run here and did not pass is a failure; a check that needs a thing this
+# container does not have — systemd-resolved, a Windows kernel — cannot be
+# turned green by trying harder, and recording it red for ever teaches
+# everybody to read past a red line. Every skip is counted separately, listed
+# by name at the end with its reason, and the run says plainly that the skipped
+# ones are unproven.
 record() {
     local name=$1 status=$2 detail=$3
     RESULTS+=("$name|$status|$detail")
     case "$status" in
         PASS) printf '  \033[32m✓ %s\033[0m — %s\n' "$name" "$detail" ;;
         FAIL) printf '  \033[31m✗ %s\033[0m — %s\n' "$name" "$detail"; FAILED=$((FAILED + 1)) ;;
+        SKIP) printf '  \033[33m⊘ %s\033[0m — not run here: %s\n' "$name" "$detail"; SKIPPED=$((SKIPPED + 1)) ;;
         *)    printf '  \033[33m• %s\033[0m — %s\n' "$name" "$detail" ;;
     esac
 }
@@ -286,8 +297,22 @@ print_table() {
     done
 
     printf '\n'
+
+    # Named, not counted. "3 skipped" at the bottom of a green run is how a
+    # gap becomes invisible; the names and the reasons are the point.
+    if [ "$SKIPPED" -gt 0 ]; then
+        printf '  \033[33m%d check(s) could not run on this machine and are UNPROVEN:\033[0m\n' "$SKIPPED"
+        for row in "${RESULTS[@]}"; do
+            IFS='|' read -r name status detail <<<"$row"
+            [ "$status" = SKIP ] && printf '    ⊘ %-20s %s\n' "$name" "$detail"
+        done
+        printf '\n'
+    fi
+
     if [ "$FAILED" -eq 0 ]; then
-        printf '  \033[32m%d checks, all passed.\033[0m The networking proof holds for this build.\n\n' "$checks"
+        printf '  \033[32m%d checks, all passed.\033[0m The networking proof holds for this build' "$checks"
+        [ "$SKIPPED" -gt 0 ] && printf ',\n  except for the %d listed above, which this machine cannot run' "$SKIPPED"
+        printf '.\n\n'
     else
         printf '  \033[31m%d of %d checks FAILED.\033[0m This build does not ship.\n\n' "$FAILED" "$checks"
     fi

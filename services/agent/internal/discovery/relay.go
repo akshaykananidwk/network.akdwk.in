@@ -321,6 +321,27 @@ const relayRebindInterval = 5 * time.Second
 // twenty-plus it took when rebinds rode on the coordinator keepalive.
 const relayMissesBeforeFailover = 3
 
+// relayFailoverNeedsCoordinator is how long the coordinator may have been
+// silent before relay failover stands down.
+//
+// Asking for another relay is a UDP packet to the coordinator, and the answer
+// comes back the same way. On a network that has stopped carrying UDP, that
+// request cannot be sent usefully and cannot be answered — so a relay that
+// "stopped answering" because the network died takes the agent through a
+// relay change that can only fail, before anything concludes the network is
+// the problem. It cost eighteen seconds of a thirty-second budget in the lab,
+// on the one scenario written for a laptop carried from a working network
+// onto an office that drops UDP.
+//
+// Four seconds, matching the silence the fallback supervisor acts on, so the
+// two agree about when UDP has stopped working rather than each deciding
+// separately.
+const relayFailoverNeedsCoordinator = 4 * time.Second
+
+// relayFailoverNeedsAnswers is how many announcements may be outstanding
+// before relay failover stands down, for the same reason.
+const relayFailoverNeedsAnswers = 2
+
 // rebindRelays re-presents tickets and notices when a relay stops answering.
 func (c *Client) rebindRelays() {
 	c.mu.Lock()
@@ -360,6 +381,18 @@ func (c *Client) rebindRelays() {
 		c.relayMissed[peer]++
 		dead := c.relayMissed[peer] > relayMissesBeforeFailover
 
+		// But a relay that went quiet at the same moment the coordinator did
+		// is not a relay fault. A device that cannot reach one relay over UDP
+		// cannot reach another one either, and the request for another relay
+		// is itself a UDP packet to a coordinator that is not answering. Keep
+		// rebinding — it costs one packet every five seconds and it is how the
+		// relay is found again the moment UDP comes back — and let the
+		// fallback take it.
+		if dead && c.udpLooksDeadLocked() {
+			c.relayMissed[peer] = relayMissesBeforeFailover
+			dead = false
+		}
+
 		bindings = append(bindings, binding{
 			peer:    peer,
 			control: control,
@@ -388,6 +421,35 @@ func (c *Client) rebindRelays() {
 
 		c.sendRelayBind(b.peer, b.control, b.ticket)
 	}
+}
+
+// udpLooksDeadLocked reports whether the coordinator has stopped answering.
+//
+// Called with c.mu held, from the rebind loop.
+//
+// Two shapes, and both mean the same thing here. Announcements that leave and
+// are never answered is a network dropping the return path; announcements the
+// socket refuses is a local firewall blocking this program, where no count of
+// unanswered ones ever grows because nothing left the machine. Relay failover
+// is useless in either.
+func (c *Client) udpLooksDeadLocked() bool {
+	if c.sendFailures > 0 {
+		return true
+	}
+
+	if c.unacked < relayFailoverNeedsAnswers {
+		return false
+	}
+
+	from := c.lastAck
+	if from.IsZero() {
+		from = c.firstSend
+	}
+	if from.IsZero() {
+		return false
+	}
+
+	return time.Since(from) >= relayFailoverNeedsCoordinator
 }
 
 func orUnnamed(name string) string {

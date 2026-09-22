@@ -35,11 +35,19 @@ scenario_resolved() {
     step "names — the systemd-resolved path, on a host that actually has it"
 
     if ! lab::resolved_available; then
-        # Not a pass. A machine without systemd-resolved cannot test the
-        # systemd-resolved path, and recording a green tick for a check that
-        # did not run is the worst thing a drill can do.
-        record "resolved/available" FAIL \
-            "systemd-resolved is not running here, so this path is still unproven — install it and re-run"
+        # Not a pass, and not a failure either. A machine without
+        # systemd-resolved cannot test the systemd-resolved path: recording a
+        # green tick for a check that did not run is the worst thing a drill
+        # can do, and recording a red one for ever is the second worst, because
+        # everybody learns to read past it and the next real failure goes with
+        # it. SKIP is listed by name at the end of the run, with this reason,
+        # and the run says the skipped checks are unproven.
+        #
+        # It matters less than it looks: this path is Linux-only. Windows,
+        # which is every customer device, uses NRPT and is covered by the
+        # resolver checks above — this scenario exists for a Linux all-in-one.
+        record "resolved/available" SKIP \
+            "systemd-resolved is not installed here; the resolvectl path is unproven on this build"
         return
     fi
     record "resolved/available" PASS "systemd-resolved is running; the resolvectl path can be exercised"
