@@ -49,16 +49,25 @@ $path = $online
 // that nothing answers it, the dot says that instead of implying patience
 // will fix it.
 if ($online && $path === 'connecting') {
-    $reported = json_decode((string) ($device['problems_json'] ?? ''), true);
-    foreach (is_array($reported) ? $reported : [] as $problem) {
-        if ((string) ($problem['code'] ?? '') === 'discovery.no_reply') {
-            $class = 'conn-blocked';
-            $dot   = "\u{1F7E0}";
-            $path  = 'blocked';
-            $title = 'Online and heartbeating, but nothing answers its announcements — '
-                . 'something on that network is dropping the replies. See the problem below.';
-            break;
+    $blocked = ($device['coordinator_unanswered_at'] ?? null) !== null;
+
+    if (!$blocked) {
+        $reported = json_decode((string) ($device['problems_json'] ?? ''), true);
+        foreach (is_array($reported) ? $reported : [] as $problem) {
+            if ((string) ($problem['code'] ?? '') === 'discovery.no_reply') {
+                $blocked = true;
+                break;
+            }
         }
+    }
+
+    if ($blocked) {
+        $class = 'conn-blocked';
+        $dot   = "\u{1F7E0}";
+        $path  = 'blocked';
+        $title = 'Online and heartbeating, but the coordinator\'s replies are not reaching it — '
+            . 'something on that network is dropping them. This is not something the device can '
+            . 'fix by waiting.';
     }
 }
 ?>

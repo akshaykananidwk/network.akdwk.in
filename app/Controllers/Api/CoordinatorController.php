@@ -237,25 +237,34 @@ final class CoordinatorController
             return false;
         }
 
-        $fields = [];
-        if (isset($update['endpoint']) && is_string($update['endpoint'])) {
-            $fields['last_endpoint'] = $update['endpoint'];
-        }
-        if (isset($update['lan_endpoint']) && is_string($update['lan_endpoint'])) {
-            $fields['last_lan_endpoint'] = $update['lan_endpoint'];
-        }
+        $endpoint = isset($update['endpoint']) && is_string($update['endpoint'])
+            ? $update['endpoint']
+            : null;
+        $lanEndpoint = isset($update['lan_endpoint']) && is_string($update['lan_endpoint'])
+            ? $update['lan_endpoint']
+            : null;
 
-        if ($fields === []) {
-            return false;
-        }
-
+        // Whether the coordinator's replies are reaching this device.
+        //
+        // Only the coordinator can say this: it sees both halves — the
+        // announcements arriving and the device re-announcing as though none
+        // had been answered. The device itself does not know a reply was ever
+        // sent, which is why it can only report "waiting" about the same
+        // fault.
         $tenantId = (int) $device['tenant_id'];
         $deviceId = (int) $device['id'];
 
-        TenantScope::asTenant($tenantId, static function () use ($deviceId, $fields): void {
-            Device::update($deviceId, $fields);
-        });
+        if (($update['unanswered_known'] ?? false) === true) {
+            $unanswered = ($update['unanswered'] ?? false) === true;
 
-        return true;
+            TenantScope::asTenant($tenantId, static function () use ($deviceId, $unanswered): void {
+                Device::recordUnanswered($deviceId, $unanswered);
+            });
+        }
+
+        return (bool) TenantScope::asTenant(
+            $tenantId,
+            static fn (): bool => Device::recordEndpoint($deviceId, $endpoint, $lanEndpoint)
+        );
     }
 }

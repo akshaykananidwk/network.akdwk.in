@@ -47,6 +47,10 @@ type Server struct {
 	usage     *usageLedger
 
 	verifying *reverifier
+	// talking notices a device whose hellos keep coming with no ping between
+	// them, which is the shape of an agent that never hears our replies. See
+	// unanswered.go.
+	talking *talkers
 
 	mu      sync.Mutex
 	pending map[string]panelapi.EndpointReport
@@ -76,6 +80,7 @@ func New(opts Options) (*Server, error) {
 		health:    newRelayHealth(),
 		usage:     newUsageLedger(),
 		verifying: newReverifier(),
+		talking:   newTalkers(),
 		pending:   make(map[string]panelapi.EndpointReport),
 	}, nil
 }
@@ -202,16 +207,33 @@ func (s *Server) flushEndpoints(ctx context.Context) {
 	}
 }
 
+// noteUnanswered records, for the panel, that this device is not receiving our
+// replies — or that it has started to again.
+//
+// It rides the endpoint report, which already goes to the panel on a timer for
+// every device the coordinator has heard from. A separate channel would be a
+// second thing to authenticate, retry and get wrong.
+func (s *Server) noteUnanswered(deviceUID string, unanswered bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	report := s.pending[deviceUID]
+	report.DeviceUID = deviceUID
+	report.Unanswered = unanswered
+	report.UnansweredKnown = true
+	s.pending[deviceUID] = report
+}
+
 func (s *Server) queueEndpoint(deviceUID string, reflexive netip.AddrPort, local []netip.AddrPort) {
-	report := panelapi.EndpointReport{
-		DeviceUID: deviceUID,
-		Endpoint:  reflexive.String(),
-	}
+	s.mu.Lock()
+	// Built on whatever is already queued for this device, so an endpoint
+	// report does not erase a "not hearing us" recorded a moment earlier.
+	report := s.pending[deviceUID]
+	report.DeviceUID = deviceUID
+	report.Endpoint = reflexive.String()
 	if len(local) > 0 {
 		report.LANEndpoint = local[0].String()
 	}
-
-	s.mu.Lock()
 	s.pending[deviceUID] = report
 	s.mu.Unlock()
 }

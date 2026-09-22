@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net/netip"
+	"time"
 
 	"golang.org/x/crypto/curve25519"
 
@@ -91,6 +92,19 @@ func (s *Server) handleHello(ctx context.Context, header disco.Header, sealed []
 	s.opts.Logf("hello from %s at %s (%d allowed peer(s))",
 		hello.DeviceUID, from, len(entry.Peers))
 
+	// An agent that hears our answer pings; one that does not, re-announces.
+	// A run of hellos with no ping between them is therefore a statement
+	// about the return path, and it is the one fault a device cannot report
+	// about itself — it does not know its replies are missing, only that it
+	// has not been answered yet.
+	if s.talking.noteHello(hello.DeviceUID, time.Now()) {
+		s.opts.Logf("%s has said hello %d times without ever pinging: it is not receiving our "+
+			"replies at %s. Something between here and that machine is dropping them — a "+
+			"firewall on its network, or its router",
+			hello.DeviceUID, unansweredAfter, from)
+		s.noteUnanswered(hello.DeviceUID, true)
+	}
+
 	s.sendHelloAck(header.Sender, from)
 	s.sendPeers(header.Sender, from)
 
@@ -127,6 +141,14 @@ func (s *Server) handlePing(header disco.Header, sealed []byte, from netip.AddrP
 
 	if !s.reg.Touch(header.Sender, from) {
 		return
+	}
+
+	// A ping is proof the return path works: only an agent that has been
+	// answered sends one. If we had told the panel this device could not hear
+	// us, that is now over.
+	if s.talking.notePing(previous.DeviceUID, time.Now()) {
+		s.opts.Logf("%s is hearing our replies again", previous.DeviceUID)
+		s.noteUnanswered(previous.DeviceUID, false)
 	}
 
 	s.sendHelloAck(header.Sender, from)

@@ -213,6 +213,79 @@ final class Device extends Model
     }
 
     /**
+     * Record where the coordinator saw this device.
+     *
+     * Written here rather than through update(), which filters by $fillable —
+     * and last_endpoint is deliberately not fillable, because it is not a
+     * field anybody submits. The consequence was that every endpoint report
+     * the coordinator has ever sent was accepted, counted as applied, and
+     * silently written nowhere: the panel's Public endpoint came from the
+     * device's own heartbeat and nothing else. A device that cannot hear the
+     * coordinator still heartbeats, so the one case where the coordinator's
+     * view is the ONLY view is exactly the case it was being dropped in.
+     */
+    public static function recordEndpoint(int $deviceId, ?string $endpoint, ?string $lanEndpoint): bool
+    {
+        $sets = [];
+        $bindings = ['id' => $deviceId];
+
+        if ($endpoint !== null && $endpoint !== '') {
+            $sets[] = 'last_endpoint = :ep';
+            $bindings['ep'] = substr($endpoint, 0, 64);
+        }
+        if ($lanEndpoint !== null && $lanEndpoint !== '') {
+            $sets[] = 'last_lan_endpoint = :lan';
+            $bindings['lan'] = substr($lanEndpoint, 0, 64);
+        }
+
+        if ($sets === []) {
+            return false;
+        }
+
+        DB::execute(
+            'UPDATE ' . self::tableName() . '
+             SET ' . implode(', ', $sets) . ', updated_at = UTC_TIMESTAMP()
+             WHERE id = :id',
+            $bindings
+        );
+
+        return true;
+    }
+
+    /**
+     * Record what the coordinator says about the path back to this device.
+     *
+     * Kept beside the device's own reported problems rather than inside them,
+     * because it is a different kind of statement: the agent reports what IT
+     * could not do, and this is what the coordinator observed ABOUT it. A
+     * device that cannot hear the coordinator cannot report that it cannot
+     * hear the coordinator.
+     */
+    public static function recordUnanswered(int $deviceId, bool $unanswered): void
+    {
+        DB::execute(
+            'UPDATE ' . self::tableName() . '
+             SET coordinator_unanswered_at = ' . ($unanswered ? 'UTC_TIMESTAMP()' : 'NULL') . '
+             WHERE id = :id',
+            ['id' => $deviceId]
+        );
+
+        if ($unanswered) {
+            DB::execute(
+                'UPDATE ' . self::tableName() . '
+                 SET last_error = :e, last_error_at = UTC_TIMESTAMP()
+                 WHERE id = :id',
+                [
+                    'e'  => 'The coordinator is answering this device and the replies are not '
+                        . 'arriving: it keeps re-announcing itself. Something on that network '
+                        . 'is dropping them.',
+                    'id' => $deviceId,
+                ]
+            );
+        }
+    }
+
+    /**
      * Ask a device to check for an update now, instead of in six hours.
      *
      * Recorded rather than pushed. The agent asks the panel for its

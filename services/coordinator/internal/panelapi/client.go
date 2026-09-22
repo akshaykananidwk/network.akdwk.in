@@ -86,6 +86,15 @@ type EndpointReport struct {
 	DeviceUID   string `json:"device_uid"`
 	Endpoint    string `json:"endpoint,omitempty"`
 	LANEndpoint string `json:"lan_endpoint,omitempty"`
+	// Unanswered says this device's announcements keep arriving here and its
+	// replies are not arriving there — it re-announces and never pings. It is
+	// a statement about the path between us, made from the only end that can
+	// see both halves: the device itself does not know a reply was sent.
+	//
+	// UnansweredKnown distinguishes "we are saying it is false" from "this
+	// report is not about that", because Go's zero value for a bool cannot.
+	Unanswered      bool `json:"unanswered,omitempty"`
+	UnansweredKnown bool `json:"unanswered_known,omitempty"`
 }
 
 // ReportEndpoints tells the panel where devices were seen, so the device list

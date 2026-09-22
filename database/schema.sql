@@ -248,6 +248,11 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__devices` (
   -- into a PC behind a shop router, and inventing one would be a far bigger
   -- thing than this button.
   `update_requested_at` DATETIME NULL DEFAULT NULL,
+  -- Set by the COORDINATOR, not by the device: its announcements keep arriving
+  -- and its replies are not getting back to it. An agent that hears nothing
+  -- cannot report that it hears nothing — it only knows it is still waiting —
+  -- so this is the one fault the device cannot tell us about itself.
+  `coordinator_unanswered_at` DATETIME NULL DEFAULT NULL,
   `token_hash` CHAR(64) NULL,
   `token_rotated_at` DATETIME NULL,
   `config_revision` BIGINT UNSIGNED NOT NULL DEFAULT 0,

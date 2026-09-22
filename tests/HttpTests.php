@@ -64,6 +64,7 @@ final class HttpTests
             self::edgeUpgrade();
             self::installLink();
             self::deviceUpdateNow();
+            self::coordinatorSaysUnanswered();
             self::selfUpdate();
         } finally {
             self::removeFixtures();
@@ -870,6 +871,105 @@ final class HttpTests
 
             @unlink(APP_ROOT . '/storage/downloads/akconnect-setup-1.9.5-installlink.exe');
         }
+    }
+
+    /**
+     * 1.9.5: the coordinator reporting that a device cannot hear it.
+     *
+     * The fault a device cannot report about itself: its announcements arrive
+     * at the coordinator, the coordinator answers every one, and not one
+     * answer arrives back. From the device's side that is indistinguishable
+     * from "still connecting", which is what it said for an afternoon on a
+     * real office Wi-Fi. Only the coordinator sees both halves.
+     */
+    private static function coordinatorSaysUnanswered(): void
+    {
+        TestCase::group('HTTP — the coordinator reports a device that cannot hear it (1.9.5)');
+
+        $secret = (string) CoordinatorSettings::current()['shared_secret'];
+        if ($secret === '') {
+            TestCase::skip('coordinator report', 'no coordinator shared secret is configured');
+
+            return;
+        }
+
+        $deviceId = (int) self::$fixtures['alpha']['device_id'];
+        $tenantId = (int) self::$fixtures['alpha']['tenant_id'];
+        $uid = TenantScope::asTenant($tenantId, static fn (): string => (string) Device::find($deviceId)['device_uid']);
+
+        // Heartbeat first, so the device is online and has no peer path — the
+        // exact state the office laptop was in, and the state in which the
+        // panel used to say "connecting" indefinitely.
+        $agent = [
+            'Authorization' => 'Bearer ' . (string) self::$fixtures['alpha']['device_token'],
+            'Content-Type'  => 'application/json',
+            'Accept'        => 'application/json',
+        ];
+        $client = self::client();
+        $client->post('/api/v1/agent/heartbeat',
+            (string) json_encode(['connection_type' => 'connecting']), $agent);
+
+        $body = (string) json_encode(['devices' => [[
+            'device_uid'       => $uid,
+            'endpoint'         => '150.129.167.50:53722',
+            'unanswered'       => true,
+            'unanswered_known' => true,
+        ]]]);
+        self::signedRequest($client, 'POST', '/api/v1/coordinator/endpoints', $body, $secret);
+        TestCase::assertSame(200, $client->status(), 'the coordinator can report it');
+
+        $device = TenantScope::asTenant($tenantId, static fn (): ?array => Device::find($deviceId));
+        TestCase::assert(
+            ($device['coordinator_unanswered_at'] ?? null) !== null,
+            'the panel records that the replies are not arriving'
+        );
+        TestCase::assertContains(
+            'not arriving',
+            (string) ($device['last_error'] ?? ''),
+            'and says so in words on the device page'
+        );
+        TestCase::assertSame(
+            '150.129.167.50:53722',
+            (string) ($device['last_endpoint'] ?? ''),
+            'and the endpoint in the same report still landed'
+        );
+
+        // The device page shows it as blocked, not as connecting.
+        $panel = self::signIn('alpha');
+        $panel->get('/devices/' . $deviceId);
+        TestCase::assertContains('conn-blocked', $panel->body(),
+            'the device page shows it blocked rather than still connecting');
+
+        // And when it starts hearing again, that clears — without a heartbeat
+        // from the device, because the device was never the one reporting it.
+        $body = (string) json_encode(['devices' => [[
+            'device_uid'       => $uid,
+            'unanswered'       => false,
+            'unanswered_known' => true,
+        ]]]);
+        self::signedRequest($client, 'POST', '/api/v1/coordinator/endpoints', $body, $secret);
+
+        $device = TenantScope::asTenant($tenantId, static fn (): ?array => Device::find($deviceId));
+        TestCase::assert(
+            ($device['coordinator_unanswered_at'] ?? null) === null,
+            'and it clears when the coordinator says the replies are getting through'
+        );
+
+        // A report that says nothing about it must not clear it either way.
+        TenantScope::asTenant($tenantId, static fn (): mixed => Device::recordUnanswered($deviceId, true));
+        $body = (string) json_encode(['devices' => [[
+            'device_uid' => $uid,
+            'endpoint'   => '150.129.167.50:53999',
+        ]]]);
+        self::signedRequest($client, 'POST', '/api/v1/coordinator/endpoints', $body, $secret);
+
+        $device = TenantScope::asTenant($tenantId, static fn (): ?array => Device::find($deviceId));
+        TestCase::assert(
+            ($device['coordinator_unanswered_at'] ?? null) !== null,
+            'an ordinary endpoint report does not silently clear it'
+        );
+
+        TenantScope::asTenant($tenantId, static fn (): mixed => Device::recordUnanswered($deviceId, false));
     }
 
     /**
