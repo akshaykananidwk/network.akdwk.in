@@ -129,7 +129,7 @@ final class EdgeRelease
      */
     public static function noteCoordinatorSeen(): void
     {
-        $last = (string) (Setting::get(self::PREFIX . 'coordinator_seen_at', '') ?? '');
+        $last = (string) (Setting::get(self::PREFIX . 'coordinator_seen_at') ?? '');
 
         // A minute's resolution is plenty to answer "is it alive" and keeps
         // this to one write a minute however busy the edge is.
@@ -144,7 +144,7 @@ final class EdgeRelease
     /** Seconds since the coordinator last called in, or null if it never has. */
     public static function coordinatorSeenSecondsAgo(): ?int
     {
-        $last = (string) (Setting::get(self::PREFIX . 'coordinator_seen_at', '') ?? '');
+        $last = (string) (Setting::get(self::PREFIX . 'coordinator_seen_at') ?? '');
         if ($last === '') {
             return null;
         }

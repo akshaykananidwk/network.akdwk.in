@@ -74,7 +74,24 @@ final class StaticAnalysisTests
     {
         TestCase::group('Static — no non-string default reaches a ?string accessor');
 
-        $accessors = ['input', 'query', 'cookie'];
+        // input/query/cookie take a ?string default second. Setting::get
+        // takes a ?int TENANT ID second and its default third — a difference
+        // that is invisible at the call site and cost a 500 on every device
+        // verification the day this check was extended to cover it. Both
+        // shapes are refused the same way: a non-string literal in position
+        // two is a mistake in either.
+        // What position two must look like, per accessor — they differ, and
+        // that is the point. input()/query()/cookie() take a ?string default
+        // there; Setting::get() takes a ?int TENANT ID and puts its default
+        // third. A string is correct for the first three and is the defect for
+        // the fourth: it threw a TypeError on every device verification, so
+        // the coordinator could not confirm a single device.
+        $accessors = [
+            'input'        => 'string',
+            'query'        => 'string',
+            'cookie'       => 'string',
+            'Setting::get' => 'int',
+        ];
         $offenders = [];
 
         foreach (self::phpFiles(true) as $file) {
@@ -85,29 +102,48 @@ final class StaticAnalysisTests
             // people turn off.
             $source = self::withoutComments((string) file_get_contents($file));
 
-            foreach ($accessors as $accessor) {
-                $offset = 0;
-                while (($position = strpos($source, '->' . $accessor . '(', $offset)) !== false) {
-                    $offset = $position + 1;
-
-                    $arguments = self::balancedParens($source, $position + strlen('->' . $accessor));
-                    $default = self::secondArgument($arguments);
-
-                    if ($default === null || self::isStringLiteralOrNull($default)) {
-                        continue;
-                    }
-
-                    $line = substr_count(substr($source, 0, $position), "\n") + 1;
-                    $offenders[] = self::relative($file) . ':' . $line . ' — ' . $accessor . '(…, ' . $default . ')';
-                }
+            foreach ($accessors as $accessor => $expected) {
+                // Setting::get is static and is named in full, because
+                // Config::get's second argument legitimately IS a mixed
+                // default and scanning every ::get( flagged forty of them.
+                $needle = str_contains($accessor, '::') ? $accessor . '(' : '->' . $accessor . '(';
+                self::scanAccessorCalls($source, $file, $accessor, $needle, $expected, $offenders);
             }
         }
 
         TestCase::assert(
             $offenders === [],
-            'every input()/query()/cookie() default is a string or null',
+            'every accessor\'s second argument suits the parameter in that position',
             implode('; ', array_slice($offenders, 0, 5))
         );
+    }
+
+    /**
+     * @param list<string> $offenders
+     */
+    private static function scanAccessorCalls(
+        string $source,
+        string $file,
+        string $accessor,
+        string $needle,
+        string $expected,
+        array &$offenders
+    ): void {
+        $offset = 0;
+
+        while (($position = strpos($source, $needle, $offset)) !== false) {
+            $offset = $position + 1;
+
+            $arguments = self::balancedParens($source, $position + strlen($needle) - 1);
+            $default = self::secondArgument($arguments);
+
+            if ($default === null || self::argumentFits($default, $expected)) {
+                continue;
+            }
+
+            $line = substr_count(substr($source, 0, $position), "\n") + 1;
+            $offenders[] = self::relative($file) . ':' . $line . ' — ' . $accessor . '(…, ' . $default . ')';
+        }
     }
 
     /**
@@ -161,11 +197,36 @@ final class StaticAnalysisTests
      * the call — and the defect this exists for was always a literal: `false`
      * written where the signature wanted `null`.
      */
-    private static function isStringLiteralOrNull(string $argument): bool
+    /**
+     * Does this argument suit the parameter in that position?
+     *
+     * Variables, constants and calls always pass: their type is the caller's
+     * business and PHP enforces it. Only literals are judged, because the
+     * defects this exists for were always literals — a `false` where a ?string
+     * was wanted, and a `''` where a ?int was.
+     */
+    private static function argumentFits(string $argument, string $expected): bool
     {
         $argument = trim($argument);
 
-        return !preg_match('/^(true|false|\d|\[|array\s*\()/i', $argument);
+        if (strcasecmp($argument, 'null') === 0) {
+            return true;
+        }
+
+        if (str_starts_with($argument, "'") || str_starts_with($argument, '"')) {
+            return $expected === 'string';
+        }
+
+        if (preg_match('/^-?\\d+$/', $argument) === 1) {
+            return $expected === 'int';
+        }
+
+        // true, false, an array literal: wrong in either position.
+        if (preg_match('/^(true|false|\\[|array\\s*\\()/i', $argument) === 1) {
+            return false;
+        }
+
+        return true;
     }
 
     /** Source with comments removed, so a docblock cannot be a finding. */
