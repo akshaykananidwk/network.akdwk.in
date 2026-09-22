@@ -460,3 +460,70 @@ func TestStillChangesRelayWhenTheCoordinatorIsAnswering(t *testing.T) {
 		t.Fatal("never asked for another relay although the coordinator was answering")
 	}
 }
+
+// A relay that has gone quiet is a reason to ask the coordinator now.
+//
+// A settled agent talks to the coordinator once every twenty seconds, so when
+// the network dies under it nothing notices until the next keepalive — which
+// was most of the time it then took to reach the fallback. Relay rebinds go
+// out every five seconds and are acknowledged, so on a relayed pair the same
+// silence is visible three times sooner.
+func TestAsksTheCoordinatorWhenRebindsGoQuiet(t *testing.T) {
+	h := newHarness(t)
+
+	var peer [32]byte
+	peer[0] = 13
+
+	h.client.mu.Lock()
+	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
+	h.client.relayTicket[peer] = []byte("ticket")
+	h.client.paths[peer] = pathRelay
+	h.client.lastAck = time.Now()
+	h.client.mu.Unlock()
+
+	before := h.transport.count(disco.TypeHello) + h.transport.count(disco.TypePing)
+
+	// One miss is a lost packet and must not produce anything.
+	h.client.rebindRelays()
+	if got := h.transport.count(disco.TypeHello) + h.transport.count(disco.TypePing); got != before {
+		t.Fatal("one unanswered rebind asked the coordinator; a single lost packet must not")
+	}
+
+	for i := 1; i < relayMissesBeforeAsking; i++ {
+		h.client.rebindRelays()
+	}
+
+	if got := h.transport.count(disco.TypeHello) + h.transport.count(disco.TypePing); got <= before {
+		t.Fatalf("%d unanswered rebinds and the coordinator was never asked", relayMissesBeforeAsking)
+	}
+}
+
+// And nothing extra goes out while the relay is answering, or every healthy
+// relayed pair would announce every five seconds for ever.
+func TestDoesNotAskTheCoordinatorWhileTheRelayAnswers(t *testing.T) {
+	h := newHarness(t)
+
+	var peer [32]byte
+	peer[0] = 17
+
+	h.client.mu.Lock()
+	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
+	h.client.relayTicket[peer] = []byte("ticket")
+	h.client.paths[peer] = pathRelay
+	h.client.lastAck = time.Now()
+	h.client.mu.Unlock()
+
+	before := h.transport.count(disco.TypeHello) + h.transport.count(disco.TypePing)
+
+	for i := 0; i < 10; i++ {
+		h.client.rebindRelays()
+		// The relay answers every time, which is what clears the counter.
+		h.client.mu.Lock()
+		h.client.relayMissed[peer] = 0
+		h.client.mu.Unlock()
+	}
+
+	if got := h.transport.count(disco.TypeHello) + h.transport.count(disco.TypePing); got != before {
+		t.Fatalf("announced %d time(s) while the relay was answering normally", got-before)
+	}
+}

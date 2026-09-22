@@ -579,6 +579,73 @@ It ends in one of two ways and nothing else:
   FAIL — the edge is NOT upgraded. 1 step(s) failed.
 ```
 
+### The HTTPS fallback, and the one time you have to ask for it
+
+From 1.9.6 the relay also serves the fallback for devices on networks that
+carry no UDP. Apache has to proxy `/fallback` to it, and on the panel's own VPS
+that Apache serves thirty other businesses' websites — so this step is the one
+thing in the product that edits something you did not install, and it happens
+only when you ask for it by name:
+
+```bash
+sudo /opt/akconnect/src/deploy/upgrade-edge.sh --configure-apache
+```
+
+Ordinary `upgrade-edge.sh` runs, and the hourly timer, **never** touch Apache.
+The timer reports `Apache fallback not configured yet` and ends PARTIAL. It
+refuses even if the flag is put in the timer unit, and it refuses if there is
+no terminal to confirm on.
+
+What it prints before it changes anything:
+
+```
+  This will add three lines to ONE virtual host:
+
+    file : /www/server/panel/vhost/apache/network.akdwk.in.conf
+    block: the <VirtualHost> opening at line 9, ServerName network.akdwk.in, TLS
+
+        # BEGIN AK Connect HTTPS fallback — managed by deploy/upgrade-edge.sh
+        IncludeOptional /etc/akconnect/apache/akconnect-fallback.conf
+        # END AK Connect HTTPS fallback
+
+  and write /etc/akconnect/apache/akconnect-fallback.conf, which holds the
+  proxy directives.
+  It may also uncomment LoadModule lines in /www/server/apache/conf/httpd.conf
+  for: proxy, proxy_http.
+  Loading a module changes no site's behaviour by itself.
+
+  Nothing else on this server is edited. A copy of every file it touches is
+  kept, and deploy/remove-apache-fallback.sh undoes all of it.
+
+  Go ahead? [y/N]
+```
+
+**Read the file and the line number before typing anything.** They must be the
+panel's own site. If that line names a customer's `.conf`, answer `n` and say
+so — it is meant to refuse that case, and a refusal that had to be caught by
+eye is a defect worth hearing about.
+
+Then it asks every `ServerName` on the machine for `/` and for
+`/fallback/health`, over TLS and over port 80, **before and after** the reload.
+Any site that answers differently, or any name that appears or disappears,
+puts every edited file back from its timestamped copy and fails the run. After
+the reload the panel must answer `/fallback/health` **from the relay** — the
+relay names itself in the reply, because a site with a front controller
+answers 200 for paths it has never heard of — and no other name may answer it
+at all, over TLS or in cleartext.
+
+To undo it completely, at any time:
+
+```bash
+sudo /opt/akconnect/src/deploy/remove-apache-fallback.sh --panel https://network.akdwk.in
+```
+
+It removes the block from every file on the machine that carries it, removes
+the generated configuration, and probes every site before and after the same
+way — rolling back if anything moved. `--dry-run` shows what it would do.
+`LoadModule` lines are left loaded, because another site may be proxying
+through the same modules; it prints which of them this product enabled.
+
 **Go.** The services need 1.24 or newer. The official tarball unpacks to
 `/usr/local/go`, which is on nobody's `PATH` in a root shell — the script looks
 there anyway, and refuses a toolchain too old to build with rather than failing

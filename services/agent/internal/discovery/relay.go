@@ -342,6 +342,24 @@ const relayFailoverNeedsCoordinator = 4 * time.Second
 // before relay failover stands down, for the same reason.
 const relayFailoverNeedsAnswers = 2
 
+// relayMissesBeforeAsking is how many unanswered rebinds prompt an early
+// announcement to the coordinator.
+//
+// A settled agent talks to the coordinator once every twenty seconds, so when
+// the network dies under it nothing notices until the next keepalive is due —
+// which is most of the time it then takes to reach the fallback. But relay
+// rebinds go out every five seconds and are acknowledged, so on a relayed pair
+// the silence is visible three times sooner. Two misses is ten seconds and one
+// lost packet is not enough.
+//
+// This asks a question rather than deciding anything: it makes the
+// announcement go out now, so the count of unanswered ones starts growing when
+// the evidence appeared instead of when the clock came round. Everything that
+// reads that count — the fallback supervisor, the stand-down above — is
+// unchanged. On a network that is working the rebind is answered and this
+// never fires.
+const relayMissesBeforeAsking = 2
+
 // rebindRelays re-presents tickets and notices when a relay stops answering.
 func (c *Client) rebindRelays() {
 	c.mu.Lock()
@@ -355,6 +373,7 @@ func (c *Client) rebindRelays() {
 	}
 
 	var bindings []binding
+	askCoordinator := false
 	for peer, control := range c.relayControl {
 		// Any peer with a relay assigned, not only one whose relay has already
 		// worked.
@@ -393,6 +412,13 @@ func (c *Client) rebindRelays() {
 			dead = false
 		}
 
+		// A relay that has gone quiet is a reason to talk to the coordinator
+		// now rather than at the next keepalive, whether the answer turns out
+		// to be "that relay is gone" or "so has the network".
+		if c.relayMissed[peer] >= relayMissesBeforeAsking {
+			askCoordinator = true
+		}
+
 		bindings = append(bindings, binding{
 			peer:    peer,
 			control: control,
@@ -409,6 +435,11 @@ func (c *Client) rebindRelays() {
 		}
 	}
 	c.mu.Unlock()
+
+	// One announcement for the whole tick, however many peers are stalled.
+	if askCoordinator {
+		c.announce(false)
+	}
 
 	for _, b := range bindings {
 		if b.dead {
