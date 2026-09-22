@@ -10,25 +10,99 @@
 # Sourced by install-edge.sh and upgrade-edge.sh so the two cannot drift.
 # Everything here is idempotent: running it again is how you repair it.
 
+# aaPanel keeps everything of its own under /www/server, including a whole
+# Apache that no distribution package manager knows about.
+#
+# It has to be handled, because it is the deployment this product actually has:
+# the panel is an aaPanel site. On a machine like that /etc/apache2 does not
+# exist, apache2ctl is not on the path, and a script that looked only for those
+# would report "no Apache here" on the one server where the fallback has to
+# work — and print instructions for somebody to follow by hand, which is the
+# thing this release exists to stop doing.
+AAPANEL_APACHE=/www/server/apache
+
 # akconnect_apache_layout prints where this machine's Apache keeps things, as
-# three words: the service name, the directory a config drops into, and the
-# command that enables a module, or "-" when modules are not enabled that way.
+# five words: the service name, the directory a config drops into, the command
+# that enables a module (or "-"), the control program, and the main
+# configuration file an include may have to be added to (or "-" when the
+# directory is included automatically).
 akconnect_apache_layout() {
     if command -v apache2ctl >/dev/null 2>&1 && [ -d /etc/apache2 ]; then
-        printf 'apache2 /etc/apache2/conf-available a2enmod\n'
+        printf 'apache2 /etc/apache2/conf-available a2enmod apache2ctl -\n'
 
         return 0
     fi
 
     if command -v httpd >/dev/null 2>&1 && [ -d /etc/httpd ]; then
         # Red Hat builds ship the proxy modules loaded already, so there is
-        # nothing to enable — only a file to drop in.
-        printf 'httpd /etc/httpd/conf.d -\n'
+        # nothing to enable — only a file to drop in, and conf.d is included
+        # by the stock httpd.conf.
+        printf 'httpd /etc/httpd/conf.d - httpd -\n'
+
+        return 0
+    fi
+
+    if [ -x "$AAPANEL_APACHE/bin/apachectl" ]; then
+        # Nothing here is automatic: the directory is not included unless we
+        # say so, and the modules are present as .so files with their
+        # LoadModule lines commented out.
+        printf 'httpd %s/conf/extra - %s/bin/apachectl %s/conf/httpd.conf\n' \
+            "$AAPANEL_APACHE" "$AAPANEL_APACHE" "$AAPANEL_APACHE"
 
         return 0
     fi
 
     return 1
+}
+
+# akconnect_apache_service names the unit to reload for a given layout.
+#
+# aaPanel's Apache is usually a systemd unit called httpd, and is sometimes
+# only its own init script. Reloading is attempted both ways by the caller, so
+# this only has to get the common case right.
+akconnect_apache_load_module() {
+    local conf=$1 module=$2
+
+    [ "$conf" = "-" ] && return 1
+
+    # Already loaded by a line that is not commented out.
+    grep -Eq "^[[:space:]]*LoadModule[[:space:]]+${module}_module" "$conf" && return 0
+
+    if grep -Eq "^[[:space:]]*#[[:space:]]*LoadModule[[:space:]]+${module}_module" "$conf"; then
+        # Uncommented in place, so the line keeps whatever path this build
+        # uses for its modules.
+        sed -i -E "s|^[[:space:]]*#[[:space:]]*(LoadModule[[:space:]]+${module}_module.*)|\1|" "$conf"
+
+        return 0
+    fi
+
+    # No line at all. Added only if the module is actually there, because a
+    # LoadModule for a file that does not exist stops Apache starting.
+    local so
+    so="$(dirname "$(dirname "$conf")")/modules/mod_${module}.so"
+    if [ -f "$so" ]; then
+        printf '\n# Added by AK Connect install-edge.sh — the HTTPS fallback needs it.\nLoadModule %s_module modules/mod_%s.so\n' \
+            "$module" "$module" >> "$conf"
+
+        return 0
+    fi
+
+    return 1
+}
+
+# akconnect_apache_ensure_include makes the main configuration read our file.
+#
+# Idempotent by a marker rather than by the line itself, so a later change to
+# the path does not leave two includes behind.
+akconnect_apache_ensure_include() {
+    local conf=$1 include=$2
+
+    [ "$conf" = "-" ] && return 0
+
+    grep -q 'AK Connect HTTPS fallback' "$conf" && return 0
+
+    printf '\n# AK Connect HTTPS fallback — see deploy/apache/akconnect-fallback.conf\nIncludeOptional %s\n' \
+        "$include" >> "$conf"
 }
 
 # akconnect_apache_version prints this Apache's version as a comparable
@@ -62,7 +136,7 @@ akconnect_apache_has_module() {
 # server), and 2 when Apache is here and would not take the configuration.
 akconnect_apache_fallback() {
     local conf_dir=$1 report=${2:-echo}
-    local service confdir enabler layout ctl version source_conf mods
+    local service confdir enabler ctl mainconf layout version source_conf mods backup
 
     layout="$(akconnect_apache_layout)" || {
         $report "no Apache on this machine, so the HTTPS fallback is not proxied here"
@@ -70,13 +144,22 @@ akconnect_apache_fallback() {
         return 1
     }
 
-    read -r service confdir enabler <<<"$layout"
-
-    # apache2ctl on Debian, httpd on Red Hat. Both answer -v and -M.
-    ctl="$service"
-    [ "$service" = "apache2" ] && ctl=apache2ctl
+    read -r service confdir enabler ctl mainconf <<<"$layout"
 
     version="$(akconnect_apache_version "$ctl")" || version=0
+
+    # The main configuration is edited on layouts that need it — aaPanel's,
+    # where nothing is automatic. Kept first, and put back if Apache then
+    # refuses the result: a broken httpd.conf takes the customer's panel down
+    # with it, and the panel is how anybody would find out.
+    if [ "$mainconf" != "-" ]; then
+        backup="$mainconf.akconnect-$(date +%s)"
+        cp -p "$mainconf" "$backup" || {
+            $report "could not keep a copy of $mainconf"
+
+            return 2
+        }
+    fi
 
     # mod_proxy_wstunnel is deprecated from 2.4.47, where mod_proxy_http
     # carries the upgrade itself, and some builds no longer ship it. Choosing
@@ -97,26 +180,30 @@ akconnect_apache_fallback() {
         return 2
     }
 
-    if [ "$enabler" != "-" ]; then
-        for mod in $mods; do
-            "$enabler" "$mod" >/dev/null 2>&1 || {
-                $report "Apache would not enable mod_$mod"
+    for mod in $mods; do
+        akconnect_apache_has_module "$ctl" "$mod" && continue
 
-                return 2
-            }
-        done
-    fi
+        if [ "$enabler" != "-" ]; then
+            "$enabler" "$mod" >/dev/null 2>&1
+        else
+            akconnect_apache_load_module "$mainconf" "$mod"
+        fi
+    done
 
     # Enabled is not the same as loaded, and only loaded carries a websocket.
+    # Asked again after the attempt, because "a2enmod said yes" and "Apache is
+    # serving with it" are different claims and only the second one matters.
     for mod in $mods; do
         akconnect_apache_has_module "$ctl" "$mod" || {
             $report "mod_$mod is not loaded, so the fallback would accept nothing"
+            akconnect_apache_restore "$mainconf" "$backup"
 
             return 2
         }
     done
     $report "Apache $(( version / 1000000 )).$(( version / 1000 % 1000 )).$(( version % 1000 )) with ${mods// /, }"
 
+    mkdir -p "$confdir"
     install -m 644 "$source_conf" "$confdir/akconnect-fallback.conf" || return 2
 
     if command -v a2enconf >/dev/null 2>&1; then
@@ -127,34 +214,70 @@ akconnect_apache_fallback() {
         }
     fi
 
+    # On a layout whose configuration directory is not read automatically, say
+    # so explicitly. Without this the file is installed and ignored, which is
+    # the worst of both: it looks done and does nothing.
+    akconnect_apache_ensure_include "$mainconf" "$confdir/akconnect-fallback.conf"
+
     # Tested before it is reloaded, always. A broken configuration here would
     # take the panel down with it, and the panel is how anybody would find out.
-    if ! akconnect_apache_test "$service"; then
+    if ! akconnect_apache_test "$ctl"; then
         rm -f "$confdir/akconnect-fallback.conf"
         command -v a2disconf >/dev/null 2>&1 && a2disconf akconnect-fallback >/dev/null 2>&1
-        $report "Apache refused the configuration, so it has been removed again"
+        akconnect_apache_restore "$mainconf" "$backup"
+        $report "Apache refused the configuration, so it has been put back as it was"
 
         return 2
     fi
 
-    systemctl reload "$service" >/dev/null 2>&1 || systemctl restart "$service" >/dev/null 2>&1 || {
+    akconnect_apache_reload "$service" "$ctl" || {
         $report "Apache would not reload"
 
         return 2
     }
+
+    [ -n "${backup:-}" ] && rm -f "$backup"
 
     $report "Apache proxies /fallback to the relay on 127.0.0.1:9443"
 
     return 0
 }
 
-# akconnect_apache_test runs the syntax check for whichever Apache this is.
+# akconnect_apache_test runs the syntax check with whichever control program
+# this Apache has — including one that is not on the path at all, which is how
+# aaPanel installs it.
+#
+# One form only, and deliberately. apachectl also understands "configtest", and
+# trying it after "-t" fails looks like tolerance and is not: a wrapper that
+# exits 0 for arguments it does not recognise would turn a refused
+# configuration into an accepted one, and the thing being guarded here is the
+# customer's panel. Every Apache control program since 2.0 passes -t through to
+# httpd, so refusing when it is not understood is both safe and correct.
 akconnect_apache_test() {
-    case "$1" in
-        apache2) apache2ctl configtest >/dev/null 2>&1 ;;
-        httpd)   httpd -t >/dev/null 2>&1 ;;
-        *)       return 1 ;;
-    esac
+    "$1" -t >/dev/null 2>&1
+}
+
+# akconnect_apache_restore puts the main configuration back.
+akconnect_apache_restore() {
+    local conf=$1 backup=${2:-}
+
+    [ "$conf" = "-" ] && return 0
+    [ -n "$backup" ] && [ -f "$backup" ] || return 0
+
+    cp -p "$backup" "$conf" && rm -f "$backup"
+}
+
+# akconnect_apache_reload asks Apache to re-read its configuration.
+#
+# systemd first, because that is how a packaged Apache is run, and the control
+# program second, because aaPanel's is sometimes not a unit at all.
+akconnect_apache_reload() {
+    local service=$1 ctl=$2
+
+    systemctl reload "$service" >/dev/null 2>&1 && return 0
+    systemctl restart "$service" >/dev/null 2>&1 && return 0
+    "$ctl" -k graceful >/dev/null 2>&1 && return 0
+    "$ctl" graceful >/dev/null 2>&1
 }
 
 # akconnect_fallback_reachable checks the path end to end, the way an agent

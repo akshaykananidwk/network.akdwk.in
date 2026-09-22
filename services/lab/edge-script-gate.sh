@@ -921,7 +921,11 @@ fi
 
 # <IfModule> would turn a missing module into a configuration that quietly
 # does nothing — which is the failure nobody finds until a customer travels.
-if grep -q '<IfModule' "$WSTUNNEL_CONF" || grep -q '<IfModule' "$UPGRADE_CONF"; then
+#
+# Directives only. Both files explain in a comment that they are deliberately
+# not wrapped in one, and a check that read the comments would fail on the
+# sentence saying it is right.
+if grep -Ev '^[[:space:]]*#' "$WSTUNNEL_CONF" "$UPGRADE_CONF" | grep -q '<IfModule'; then
     bad "the proxy configuration is wrapped in <IfModule>" \
         "a missing module would then be silent instead of an error"
 else
@@ -992,6 +996,136 @@ if grep -q 'install -m 644 "$unit"' "$REPO/deploy/upgrade-edge.sh"; then
 else
     bad "upgrade-edge.sh does not refresh unit files" \
         "a new flag would never reach an existing installation"
+fi
+
+# ------------------------------------------------ against an aaPanel layout
+#
+# The deployment this product actually has is an aaPanel site: a whole Apache
+# under /www/server that no package manager knows about, where /etc/apache2
+# does not exist, apachectl is not on the path, the configuration directory is
+# not included unless something says so, and the proxy modules are present as
+# files with their LoadModule lines commented out.
+#
+# A script that looked only for the distribution layouts would report "no
+# Apache here" on the one server where the fallback has to work, and print
+# instructions for a person to follow by hand — which is the thing this release
+# exists to stop doing. So it is driven against a stand-in for that layout,
+# here, where it can be.
+
+group "the fallback configuration against an aaPanel layout"
+
+aapanel_fixture() {
+    local root=$1 syntax=${2:-ok}
+
+    rm -rf "$root"
+    mkdir -p "$root/apache/bin" "$root/apache/conf/extra" "$root/apache/modules"
+
+    cat > "$root/apache/conf/httpd.conf" <<'CONF'
+ServerRoot "/www/server/apache"
+#LoadModule proxy_module modules/mod_proxy.so
+#LoadModule proxy_http_module modules/mod_proxy_http.so
+Listen 80
+CONF
+    touch "$root/apache/modules/mod_proxy.so" "$root/apache/modules/mod_proxy_http.so"
+
+    # A stand-in for apachectl: answers -v and -M from the file it is given,
+    # so uncommenting a LoadModule really does change what -M reports.
+    cat > "$root/apache/bin/apachectl" <<CTL
+#!/usr/bin/env bash
+CONF="\$(dirname "\$0")/../conf/httpd.conf"
+case "\${1:-}" in
+    -v) echo "Server version: Apache/2.4.58 (Unix)" ;;
+    -M) grep -E '^[[:space:]]*LoadModule' "\$CONF" | awk '{print "  "\$2}' ;;
+    -t) [ "$syntax" = ok ] && exit 0 || exit 1 ;;
+    *)  exit 0 ;;
+esac
+CTL
+    chmod +x "$root/apache/bin/apachectl"
+}
+
+# run_against drives the library at a fixture and prints its exit status.
+run_against() {
+    local root=$1
+
+    env FAKE_AAPANEL="$root" bash -c '
+        set -uo pipefail
+        . "'"$REPO"'/deploy/lib-edge-apache.sh"
+        AAPANEL_APACHE="$FAKE_AAPANEL/apache"
+        systemctl() { return 1; }
+        akconnect_apache_fallback "'"$REPO"'/deploy/apache" true
+        echo "RESULT=$?"
+    ' 2>/dev/null
+}
+
+AA="$WORK/aapanel"
+
+aapanel_fixture "$AA"
+OUT="$(run_against "$AA")"
+
+if grep -q 'RESULT=0' <<<"$OUT"; then
+    ok "it finds aaPanel's Apache and configures it"
+else
+    bad "it did not configure aaPanel's Apache" "$(tr '\n' ' ' <<<"$OUT" | cut -c1-160)"
+fi
+
+if grep -Eq '^LoadModule proxy_module' "$AA/apache/conf/httpd.conf"; then
+    ok "and uncomments the LoadModule lines the fallback needs"
+else
+    bad "the proxy modules were left commented out" "the fallback would accept nothing"
+fi
+
+if [ -f "$AA/apache/conf/extra/akconnect-fallback.conf" ]; then
+    ok "and installs the proxy configuration"
+else
+    bad "no proxy configuration was installed"
+fi
+
+if grep -q 'IncludeOptional.*akconnect-fallback.conf' "$AA/apache/conf/httpd.conf"; then
+    ok "and makes the main configuration read it"
+else
+    bad "the configuration was installed and never included" \
+        "which looks done and does nothing — the worst of both"
+fi
+
+# Twice, because install-edge.sh is safe to run again and upgrade-edge.sh runs
+# it on every upgrade.
+run_against "$AA" >/dev/null
+if [ "$(grep -c 'IncludeOptional.*akconnect-fallback.conf' "$AA/apache/conf/httpd.conf")" = "1" ]; then
+    ok "running it again changes nothing"
+else
+    bad "a second run duplicated the include" "every upgrade would add another"
+fi
+
+# And the case that matters most: Apache refuses. The panel is served by that
+# same Apache, so a configuration it will not take must leave nothing behind.
+aapanel_fixture "$AA" refuses
+cp "$AA/apache/conf/httpd.conf" "$WORK/httpd.before"
+OUT="$(run_against "$AA")"
+
+if grep -q 'RESULT=2' <<<"$OUT"; then
+    ok "a configuration Apache refuses is reported as a failure"
+else
+    bad "Apache refused the configuration and the script said it worked" \
+        "$(tr '\n' ' ' <<<"$OUT" | cut -c1-160)"
+fi
+
+if cmp -s "$WORK/httpd.before" "$AA/apache/conf/httpd.conf"; then
+    ok "and the main configuration is put back byte for byte"
+else
+    bad "httpd.conf was left edited after a refused configuration" \
+        "the panel is served by this Apache"
+fi
+
+if [ ! -f "$AA/apache/conf/extra/akconnect-fallback.conf" ]; then
+    ok "and the refused configuration is removed"
+else
+    bad "a configuration Apache refused was left in place"
+fi
+
+if [ -z "$(find "$AA/apache/conf" -maxdepth 1 -name 'httpd.conf.akconnect-*' -print -quit)" ]; then
+    ok "and no backup file is left lying in the configuration directory"
+else
+    bad "a backup was left behind in Apache's configuration directory"
 fi
 
 # ---------------------------------------------------------------- the report
