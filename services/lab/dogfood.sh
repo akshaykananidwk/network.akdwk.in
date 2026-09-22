@@ -289,7 +289,12 @@ if ($t !== "") { fwrite(STDOUT, $t); }
 ' 2>/dev/null | php -r '
 $token = stream_get_contents(STDIN);
 require "'"$SCRATCH_ROOT"'/cli/_bootstrap.php";
-$save = ["current_commit" => ""];
+// The edge channel, deliberately: this drill updates to a BRANCH HEAD, and
+// from 1.9.4 the stable and beta channels install tagged releases only. On
+// stable the scratch panel is correctly told there is nothing to install, and
+// the drill then reports "APPLY wrote 0 files" — a true statement about a
+// panel that was asked the wrong question.
+$save = ["current_commit" => "", "channel" => "edge"];
 if ($token !== "") { $save["token"] = $token; }
 App\Models\UpdateSetting::save($save);
 ' >/dev/null 2>&1

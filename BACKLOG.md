@@ -220,3 +220,28 @@ An entry belongs here only if it is **measured**, **not a correctness bug**, and
 **not blocking**. Anything that fails, corrupts, or misreports gets fixed when
 it is found — that is what the eight defects in `VERIFICATION_REPORT.md` were,
 and none of them was ever a candidate for this list.
+
+## Deferred from 1.9.4 (2026-09-22)
+
+Cut to get 1.9.4 out quickly. None of these block a release; all of them are
+things I would otherwise have done in the same session.
+
+- **B12 — `address family not supported by protocol`.** Seen once, in the run
+  that proved the reconnect drill red against 1.9.3's relay, and in none of the
+  passing runs. The agent's sends failed with EAFNOSUPPORT and a rebind did not
+  clear it. Not diagnosed, not claimed fixed. The socket-recovery code reports
+  it and keeps trying rather than pretending.
+
+- **B13 — relay offers are logged on one side only.** `offerToPeer()` sends the
+  matching offer to the other end and says nothing, so a coordinator log shows
+  one "offered" line for a pair and reads as though only one side was told.
+  That cost real time during defect 24. One log line.
+
+- **B14 — the coordinator re-verifies on a one-minute TTL, per device.** A
+  deliberate load choice that has never been measured at a thousand devices.
+  Single-flight and "only push when the set changed" should keep it well under
+  the worst case; should is not a measurement.
+
+- **B15 — `upgrade-edge.sh` is past 700 lines.** Over the ~400-line guideline
+  and now carrying the hand-over, the skew fallback and the summary logic. Worth
+  splitting once it stops changing every day.
