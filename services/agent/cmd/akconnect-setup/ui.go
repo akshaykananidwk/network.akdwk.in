@@ -108,6 +108,18 @@ func runAgentOutput(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// runTrayOutput runs the notification-area program and returns what it
+// printed. Used for one thing: asking it to write a diagnostics bundle.
+func runTrayOutput(dir string, args ...string) (string, error) {
+	cmd := exec.Command(filepath.Join(dir, "akconnect-tray.exe"), args...)
+	cmd.Dir = dir
+	hideWindow(cmd)
+
+	out, err := cmd.CombinedOutput()
+
+	return strings.TrimSpace(string(out)), err
+}
+
 // trimForDialog keeps a command's output to something a dialog can show.
 func trimForDialog(out string, err error) string {
 	out = strings.TrimSpace(out)

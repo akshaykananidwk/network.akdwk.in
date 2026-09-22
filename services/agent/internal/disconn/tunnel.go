@@ -3,6 +3,7 @@ package disconn
 import (
 	"net"
 	"net/netip"
+	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
 
@@ -173,6 +174,19 @@ func (b *Bind) ForgetPeer(at netip.AddrPort) {
 	next := b.current().clone(b.current().tunnel)
 	delete(next.peers, at)
 	b.route.Store(next)
+}
+
+// UDPAlive reports whether a discovery packet has arrived on the real socket
+// within the given time.
+//
+// The one honest answer to "has UDP started working again". A device on the
+// fallback is being answered by the coordinator the whole time, so every other
+// measure of health says yes while the underlying network still carries
+// nothing.
+func (b *Bind) UDPAlive(within time.Duration) bool {
+	last := b.lastUDP.Load()
+
+	return last != 0 && time.Since(time.Unix(last, 0)) <= within
 }
 
 // TunnelActive reports whether the fallback is currently attached.

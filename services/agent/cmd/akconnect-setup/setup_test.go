@@ -179,3 +179,167 @@ func TestTheUninstallRemovesOnlyOurAdapter(t *testing.T) {
 		t.Error("a duplicate of our own adapter would be left behind")
 	}
 }
+
+// What the last dialog says, for each thing the installer can find.
+//
+// Every one of these is a real state a customer's computer is in a minute
+// after the install finishes, and they used to produce one sentence: "is
+// installed and running". That sentence is true in all of them and answers
+// the question in none — a machine waiting to be approved, a machine that is
+// the only one on its network, and a machine that genuinely cannot reach us
+// all read the same and all get sent away.
+func TestTheFinalDialogSaysWhichSituationThisIs(t *testing.T) {
+	cases := []struct {
+		name    string
+		found   outcome
+		ok      bool
+		wants   []string
+		refuses []string
+	}{
+		{
+			name:  "the service did not start",
+			found: outcome{Running: false},
+			ok:    false,
+			wants: []string{"not running", "Desktop"},
+		},
+		{
+			name:  "running but not yet configured",
+			found: outcome{Running: true},
+			ok:    true,
+			wants: []string{"has not finished starting"},
+			// It will sort itself out, so it must not send anybody anywhere.
+			refuses: []string{"supplier"},
+		},
+		{
+			name:  "running, configured, nothing answering",
+			found: outcome{Running: true, Published: true},
+			ok:    true,
+			wants: []string{"waiting to be approved", "nothing to do here"},
+		},
+		{
+			name:  "the only computer on the network",
+			found: outcome{Running: true, Published: true, CoordinatorUp: true, Address: "10.80.0.4"},
+			ok:    true,
+			wants: []string{"10.80.0.4", "nothing else on it yet"},
+			// Nothing is wrong, so nothing may suggest anything is.
+			refuses: []string{"Desktop", "supplier"},
+		},
+		{
+			name: "a peer it has not reached yet",
+			found: outcome{
+				Running: true, Published: true, CoordinatorUp: true,
+				Address: "10.80.0.4", Peers: 1,
+			},
+			ok:    true,
+			wants: []string{"1 other computer", "not reached it yet"},
+		},
+		{
+			name: "connected to both",
+			found: outcome{
+				Running: true, Published: true, CoordinatorUp: true,
+				Address: "10.80.0.4", Peers: 2, Reachable: 2,
+			},
+			ok:      true,
+			wants:   []string{"10.80.0.4", "2 of 2 other computers"},
+			refuses: []string{"Desktop", "browser"},
+		},
+		{
+			name: "connected, but only over the HTTPS path",
+			found: outcome{
+				Running: true, Published: true, CoordinatorUp: true, OverHTTPS: true,
+				Address: "10.80.0.4", Peers: 1, Reachable: 1,
+			},
+			ok: true,
+			// Said plainly, and closed off: this is not something the customer
+			// is being asked to fix.
+			wants:   []string{"web browser uses", "nothing needs changing"},
+			refuses: []string{"firewall"},
+		},
+	}
+
+	for _, c := range cases {
+		text, ok := c.found.message()
+
+		if ok != c.ok {
+			t.Errorf("%s: success was %v, wanted %v", c.name, ok, c.ok)
+		}
+		for _, want := range c.wants {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s: the dialog does not mention %q:\n%s", c.name, want, text)
+			}
+		}
+		for _, refuse := range c.refuses {
+			if strings.Contains(text, refuse) {
+				t.Errorf("%s: the dialog mentions %q and should not:\n%s", c.name, refuse, text)
+			}
+		}
+	}
+}
+
+// settled decides when the installer stops waiting. Waiting longer than there
+// is any point costs a customer a minute at the end of every install; not
+// waiting long enough reports "no peers" on a machine that was seconds away.
+func TestTheInstallerWaitsForTheRightThings(t *testing.T) {
+	keepWaiting := []outcome{
+		{Running: true},
+		{Running: true, Published: true},
+		{Running: true, Published: true, CoordinatorUp: true, Peers: 1},
+	}
+	for _, found := range keepWaiting {
+		if found.settled() {
+			t.Errorf("the installer stopped waiting at %+v", found)
+		}
+	}
+
+	done := []outcome{
+		{Running: true, Published: true, CoordinatorUp: true},
+		{Running: true, Published: true, CoordinatorUp: true, Peers: 2, Reachable: 1},
+	}
+	for _, found := range done {
+		if !found.settled() {
+			t.Errorf("the installer kept waiting at %+v", found)
+		}
+	}
+}
+
+// Which previous installation counts as one to clear away.
+//
+// The rule has to be narrow. A service pointing at a program that is not there
+// is wreckage and makes the next install fail in the middle; a service
+// pointing at a program that IS there is somebody's working installation, and
+// removing it is not this installer's business.
+func TestOnlyWreckageIsClearedAway(t *testing.T) {
+	missing := func(string) bool { return false }
+	present := func(string) bool { return true }
+
+	if !staleService(`"C:\Program Files\AKConnect\akconnect-agent.exe" service run`, missing) {
+		t.Error("a service whose program is gone was not recognised as stale")
+	}
+	if staleService(`"C:\Program Files\AKConnect\akconnect-agent.exe" service run`, present) {
+		t.Error("a working installation was treated as wreckage")
+	}
+	if staleService("", missing) {
+		t.Error("no service at all was treated as a stale one")
+	}
+}
+
+// The registration is a command line, not a path, and the path is quoted
+// because it always contains a space — it lives under Program Files. Taking
+// the whole line would test a file name that cannot exist and remove a
+// service that was working.
+func TestTheServiceProgramIsReadOutOfItsCommandLine(t *testing.T) {
+	cases := map[string]string{
+		`"C:\Program Files\AKConnect\akconnect-agent.exe" service run`: `C:\Program Files\AKConnect\akconnect-agent.exe`,
+		`"C:\Program Files\AKConnect\akconnect-agent.exe"`:             `C:\Program Files\AKConnect\akconnect-agent.exe`,
+		`C:\akconnect\agent.exe service run`:                           `C:\akconnect\agent.exe`,
+		`C:\akconnect\agent.exe`:                                       `C:\akconnect\agent.exe`,
+		``:                                                             ``,
+		`   `:                                                          ``,
+	}
+
+	for line, want := range cases {
+		if got := programOf(line); got != want {
+			t.Errorf("programOf(%q) = %q, wanted %q", line, got, want)
+		}
+	}
+}

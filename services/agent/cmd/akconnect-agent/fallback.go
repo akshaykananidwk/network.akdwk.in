@@ -39,6 +39,17 @@ const (
 	fallbackUnusedFor = 5 * time.Minute
 )
 
+// udpProvenWithin is how recently a discovery packet must have arrived on the
+// real socket for UDP to count as working.
+//
+// Measured at the socket, not from the coordinator answering: a device on the
+// fallback is answered continuously, over the fallback, so every other measure
+// of health reads fine while the network underneath carries nothing.
+//
+// Comfortably longer than the keepalive that produces those packets, so one
+// lost datagram does not read as the network failing.
+const udpProvenWithin = 45 * time.Second
+
 // startFallback prepares the HTTPS path and watches for the moment it is
 // needed. It does not connect: a device on an ordinary network never opens
 // this connection at all.
@@ -96,6 +107,13 @@ func (s *session) watchFallback(ctx context.Context) {
 			s.discovery.HoldPort(s.fallback != nil && s.fallback.Up())
 		}
 
+		// And the other half of the same question: once the socket is
+		// carrying discovery traffic again, the fallback stops answering
+		// binds so the peers go back to UDP by themselves.
+		if s.fallback != nil {
+			s.fallback.PreferUDP(s.udpIsWorking())
+		}
+
 		switch {
 		case stop == nil && s.udpIsHopeless():
 			s.logf("fallback: UDP is not being answered on this network; trying HTTPS instead")
@@ -134,13 +152,26 @@ func (s *session) udpIsHopeless() bool {
 	return refused >= fallbackAfterUnanswered && failing >= fallbackAfterSilence
 }
 
-// fallbackNoLongerNeeded reports whether the HTTPS path can be let go.
-func (s *session) fallbackNoLongerNeeded() bool {
-	if s.discovery == nil || s.fallback == nil {
+// udpIsWorking reports whether the socket itself has carried discovery traffic
+// recently.
+func (s *session) udpIsWorking() bool {
+	if s.tun == nil {
 		return false
 	}
 
-	return s.discovery.Answered(fallbackSettled) && s.fallback.Idle() > fallbackUnusedFor
+	return s.tun.Transport().UDPAlive(udpProvenWithin)
+}
+
+// fallbackNoLongerNeeded reports whether the HTTPS path can be let go.
+//
+// Both conditions, and both measured at the socket. "The coordinator is
+// answering" is not one of them: on the fallback it always is.
+func (s *session) fallbackNoLongerNeeded() bool {
+	if s.fallback == nil {
+		return false
+	}
+
+	return s.udpIsWorking() && s.fallback.Idle() > fallbackUnusedFor
 }
 
 // fallbackState is what the status file says about the HTTPS path.

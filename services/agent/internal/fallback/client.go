@@ -35,6 +35,7 @@ type Router interface {
 	UseTunnel(disconn.Tunnel)
 	DivertControl(netip.AddrPort)
 	RoutePeer(at netip.AddrPort, peer [32]byte)
+	ForgetPeer(at netip.AddrPort)
 	Inject(pkt []byte, from netip.AddrPort)
 	InjectTunnel(pkt []byte, from netip.AddrPort)
 }
@@ -66,6 +67,9 @@ type Client struct {
 	observed atomic.Pointer[string]
 	lastData atomic.Int64
 	since    atomic.Int64
+	// preferUDP is set while the socket is demonstrably carrying discovery
+	// traffic again. See PreferUDP.
+	preferUDP atomic.Bool
 
 	mu sync.Mutex
 	// relayFor is the control address of the relay each peer was offered, kept
@@ -110,6 +114,48 @@ func New(opts Options) (*Client, error) {
 
 // Up reports whether the fallback is currently connected.
 func (c *Client) Up() bool { return c.up.Load() }
+
+// PreferUDP tells the fallback that the ordinary path is working again.
+//
+// While it is set the fallback stops answering relay binds, which is what
+// hands the peers back to UDP. Nothing is torn down: the connection stays
+// open, control still goes over both paths, and the moment UDP stops working
+// the next bind is answered here again.
+//
+// Two answers to the same bind is the situation this avoids. Discovery asks
+// the relay to bind a pair and is answered twice — once by the relay over UDP
+// naming a real port, once by this client naming a tunnelled one — and
+// whichever arrives last decides where WireGuard sends. That is not a race to
+// win on timing: while the traffic goes through the tunnel the relay never
+// sees a packet on the device's own socket, so it keeps forwarding through
+// the tunnel, and the pair stays on the expensive path for ever with
+// everything apparently healthy.
+func (c *Client) PreferUDP(prefer bool) {
+	if !c.preferUDP.Swap(prefer) && prefer {
+		c.releasePeers()
+	}
+}
+
+// releasePeers withdraws the endpoints this client handed out, so nothing is
+// diverted through the tunnel while UDP is carrying the traffic.
+func (c *Client) releasePeers() {
+	c.mu.Lock()
+	released := make([]netip.AddrPort, 0, len(c.pseudo))
+	for _, at := range c.pseudo {
+		released = append(released, at)
+	}
+	c.pseudo = make(map[[32]byte]netip.AddrPort)
+	c.mu.Unlock()
+
+	for _, at := range released {
+		c.opts.Router.ForgetPeer(at)
+	}
+
+	if len(released) > 0 {
+		c.opts.Logf("fallback: UDP is carrying traffic again; handing %d peer(s) back to it",
+			len(released))
+	}
+}
 
 // Observed is how the relay sees this device's address, empty until connected.
 func (c *Client) Observed() string {

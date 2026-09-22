@@ -320,6 +320,13 @@ func (c *Client) bound(payload []byte) {
 		return
 	}
 
+	// UDP is working, so the relay's own acknowledgement is the one discovery
+	// should act on. Answering as well would take the peer back off the path
+	// it has just returned to. See PreferUDP.
+	if c.preferUDP.Load() {
+		return
+	}
+
 	relay, ok := c.relayOf(peer)
 	if !ok {
 		return

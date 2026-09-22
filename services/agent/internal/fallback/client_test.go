@@ -152,6 +152,13 @@ func (r *fakeRouter) RoutePeer(at netip.AddrPort, peer [32]byte) {
 	r.routes[at] = peer
 }
 
+func (r *fakeRouter) ForgetPeer(at netip.AddrPort) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	delete(r.routes, at)
+}
+
 func (r *fakeRouter) Inject(pkt []byte, from netip.AddrPort) {
 	owned := make([]byte, len(pkt))
 	copy(owned, pkt)
@@ -483,4 +490,63 @@ func TestADroppedConnectionStopsDiverting(t *testing.T) {
 
 	waitFor(t, func() bool { return !router.attached() },
 		"the tunnel was still attached after the connection went away")
+}
+
+// Once the socket is carrying discovery traffic again, the fallback stops
+// answering binds — which is what hands the peers back to UDP.
+//
+// Both ends answering the same bind is the failure this prevents, and it is a
+// stable one rather than a race: while the traffic goes through the tunnel the
+// relay never sees a packet on the device's own socket, so it keeps forwarding
+// through the tunnel and the pair stays on the expensive path indefinitely
+// with everything apparently healthy.
+func TestUDPComingBackTakesThePeersOffTheFallback(t *testing.T) {
+	client, conn, router, _ := fixture(t)
+
+	relay := netip.MustParseAddrPort("198.51.100.7:9000")
+	peer := testKey(2)
+
+	client.mu.Lock()
+	client.relayFor[peer] = relay
+	client.mu.Unlock()
+
+	ack, err := wire.EncodeBindAck(peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.deliver(t, ack)
+
+	waitFor(t, func() bool {
+		_, ok := router.routeFor(peer)
+
+		return ok
+	}, "the peer was never routed through the fallback")
+
+	client.PreferUDP(true)
+
+	if _, ok := router.routeFor(peer); ok {
+		t.Fatal("the peer is still diverted through the tunnel after UDP came back")
+	}
+	if _, ok := client.Endpoint(peer); ok {
+		t.Fatal("the client still reports a fallback endpoint for the peer")
+	}
+
+	// And a further acknowledgement must not put it back, or the two paths
+	// take turns for as long as both are up.
+	conn.deliver(t, ack)
+	time.Sleep(200 * time.Millisecond)
+
+	if _, ok := router.routeFor(peer); ok {
+		t.Fatal("a later acknowledgement diverted the peer again while UDP was working")
+	}
+
+	// When UDP stops working the fallback takes the peer back.
+	client.PreferUDP(false)
+	conn.deliver(t, ack)
+
+	waitFor(t, func() bool {
+		_, ok := router.routeFor(peer)
+
+		return ok
+	}, "the fallback did not take the peer back when UDP failed again")
 }

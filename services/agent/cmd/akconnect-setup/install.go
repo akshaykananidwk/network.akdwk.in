@@ -32,6 +32,14 @@ func dataDir() string {
 func runInstall(ui *console, code, panelURL, name string, managed bool) error {
 	dir := installDir()
 
+	ui.step("Checking what is already here")
+
+	// Anything a previous installation left behind is cleared first. Doing it
+	// afterwards is too late: a service registered against a program that is
+	// gone makes every stop, start and repoint fail, and the install then
+	// breaks in the middle having half-replaced things.
+	heal(ui, dir)
+
 	ui.step("Installing to " + dir)
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -186,16 +194,49 @@ func runInstall(ui *console, code, panelURL, name string, managed bool) error {
 	// And the icon appears now rather than at the next sign-in.
 	startTray(dir)
 
+	ui.step("Checking that it works")
+
+	// Read back what actually happened rather than announcing success because
+	// the calls returned. "The service is running" and "this computer is on
+	// the network" are different facts, and only the second is what anybody
+	// asked for.
+	found := verifyInstall(true, verifyWithin)
+	text, ok := found.message()
+
+	if !ok || !found.CoordinatorUp {
+		// Nobody is going to find a menu after being told something did not
+		// work. The file is already on the Desktop by the time they read the
+		// sentence that mentions it.
+		if path, err := collectDiagnostics(dir); err == nil {
+			text += "\n\nThe file is called " + path + "."
+		}
+	}
+
 	status, _ := runAgentOutput(dir, "status")
 
-	ui.done(fmt.Sprintf(
-		"%s is installed and running.\n\n"+
-			"This computer has been added to your network. If your supplier has not approved it "+
-			"yet, it will connect by itself as soon as they do — you can close this and leave it "+
-			"alone.\n\n%s",
-		productName, firstLines(status, 6)))
+	ui.done(fmt.Sprintf("%s is installed.\n\n%s\n\n%s", productName, text, firstLines(status, 6)))
 
 	return nil
+}
+
+// collectDiagnostics asks the tray to write a bundle to the Desktop and
+// returns the file name.
+//
+// The tray rather than this installer, because the collector lives there with
+// the redaction that goes with it — a file that is about to be emailed must
+// not carry a device token, and there is one place that rule is enforced.
+func collectDiagnostics(dir string) (string, error) {
+	out, err := runTrayOutput(dir, "-collect")
+	if err != nil {
+		return "", err
+	}
+
+	path := strings.TrimSpace(out)
+	if path == "" {
+		return "", fmt.Errorf("the tray wrote no file")
+	}
+
+	return filepath.Base(path), nil
 }
 
 // awaitRunning waits for the service to report that it is running.

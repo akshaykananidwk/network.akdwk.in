@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
 
@@ -49,6 +50,17 @@ type Bind struct {
 	// Replaced on each Open, because wireguard-go opens and closes a bind
 	// repeatedly over one device's life.
 	closed chan struct{}
+
+	// lastUDP is when a discovery packet last arrived on the real socket, as
+	// a unix time.
+	//
+	// It exists because nothing above this file can tell the difference. A
+	// coordinator answer that arrived over the HTTPS fallback is handed to
+	// discovery exactly as a UDP one is — that is the point of the fallback —
+	// so "the coordinator is answering" stops meaning "UDP works" the moment
+	// the fallback is up. Only the socket itself knows, and this is where it
+	// says so.
+	lastUDP atomic.Int64
 }
 
 // New wraps the platform's default bind.
@@ -121,7 +133,12 @@ func (b *Bind) intercept(fn conn.ReceiveFunc) conn.ReceiveFunc {
 			pkt := packets[i][:sizes[i]]
 
 			if disco.IsDisco(pkt) {
+				// On the real socket, so this is proof that UDP is carrying
+				// traffic in both directions right now — something nothing
+				// downstream can establish for itself.
+				b.lastUDP.Store(time.Now().Unix())
 				b.dispatch(pkt, endpointAddrPort(eps[i]))
+
 				continue
 			}
 
