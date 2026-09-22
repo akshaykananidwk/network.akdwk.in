@@ -36,7 +36,9 @@ soon as its own sends start being refused, and keeps sending on UDP the whole
 time it is up — which is how it finds out UDP has started working again. In the
 lab, a pair with all UDP dropped at the router connects in 21 seconds against a
 30-second budget, and returns to UDP ten seconds after the block is lifted with
-nothing restarted.
+nothing restarted. A machine carried from a network that works onto one that
+does not — which is what the laptop this release is for actually did — switches
+inside the same budget.
 
 **Every device reports what it did about the last release.** An all-in-one
 stayed on 1.9.3 for days after 1.9.4 was published and nobody found out:

@@ -309,8 +309,10 @@ web browser works on, with nothing configured, like Tailscale and ZeroTier.
   scenario, only the replies in the other, which is the office case exactly —
   and the pair connects in **21 seconds against a 30-second budget**,
   reporting `relay-https` rather than any UDP path, with the relay's own log
-  showing the binds. A third scenario lifts the block: back to `relay-udp`
-  **ten seconds later, with nothing restarted**.
+  showing the binds. A third lifts the block: back to `relay-udp` **ten
+  seconds later, with nothing restarted**. A fourth is the laptop's own story
+  — a pair connected and settled on a working network, and then the router
+  starts dropping UDP under it.
 * **Apache configured automatically**, by version — `mod_proxy_wstunnel`
   below 2.4.47, `upgrade=websocket` on `mod_proxy_http` from it — with the
   module checked as loaded rather than assumed, because `<IfModule>` would

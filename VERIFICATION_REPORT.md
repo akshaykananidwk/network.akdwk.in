@@ -338,6 +338,24 @@ the other shape — Windows Firewall blocking our program outbound — because
 there no count of unanswered announcements ever grows: nothing left the
 machine for anything to answer.
 
+**A fourth scenario is the laptop's own story, and it was missing.** The three
+above block UDP before the agent starts, so the agent has never seen a working
+socket and the switch is a cold start. The laptop had a working socket all
+morning on a phone hotspot and was then carried into an office where it did
+not — and that transition fails on its own. The agent decides UDP is hopeless
+after four seconds of unanswered announcements, but the proof that UDP works
+is allowed to be forty-five seconds old, because the keepalive producing those
+packets is twenty seconds and one lost datagram must not read as the network
+failing. In between, a device that had just moved would open the fallback and
+then refuse to use it, on the strength of a stamp from the network it had
+left. Up to forty seconds of a thirty-second budget, on exactly the machine
+this release is for.
+
+So unanswered announcements, while the fallback is not yet carrying them, now
+stop the agent preferring UDP on their own. `https-switch` is the drill: a
+pair connects, settles for twenty seconds, and then the router starts dropping
+UDP under it.
+
 ### L.2 — The defects the gate found in its own release
 
 Three, all in code written the same day, none visible by reading it.
