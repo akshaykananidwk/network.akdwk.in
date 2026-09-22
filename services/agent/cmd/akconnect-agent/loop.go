@@ -66,6 +66,11 @@ func (s *session) loop(ctx context.Context, priv wgPrivate, pollAfter int) error
 		}
 
 		interval = pollInterval(next)
+
+		// Last, and only after a healthy pass: an agent that cannot reach its
+		// panel or apply its configuration has no business replacing its own
+		// binary.
+		s.maybeUpdate(ctx)
 	}
 }
 

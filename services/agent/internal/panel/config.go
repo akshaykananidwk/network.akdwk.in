@@ -64,6 +64,13 @@ type Config struct {
 		PublicKey string `json:"public_key"`
 	} `json:"coordinator"`
 
+	// Controller is the panel's own signing identity. A release is only
+	// installed if its digest carries a signature from this key, so a panel
+	// that publishes no key can offer no updates.
+	Controller struct {
+		PublicKey string `json:"public_key"`
+	} `json:"controller"`
+
 	Policy struct {
 		SplitTunnelOnly   bool   `json:"split_tunnel_only"`
 		AllowDefaultRoute bool   `json:"allow_default_route"`

@@ -65,6 +65,12 @@ fixture() {
     # product that cannot connect — and the scenario will blame the product.
     "$LAB_DIR/topology.sh" "${topology[@]}" >/dev/null \
         || die "could not build the ${topology[*]} topology"
+
+    # The relay's name has to resolve inside the namespaces the topology just
+    # created, and teardown removes the files with them — so this goes after
+    # the build, every time.
+    lab::relay_hostname
+
     rm -rf "$RUN/state"
 
     # Enrolment is throttled per address, and the drill enrols two devices per
@@ -99,6 +105,73 @@ fixture() {
     UID_BETA="$uid_beta"
 
     lab::up alpha
+    lab::up beta
+}
+
+# fixture_solo brings up ONE approved device, with a second enrolled and left
+# waiting.
+#
+# That is the state every customer site is in between installing the first
+# machine and the second, and it is the state nothing here used to test: the
+# ordinary fixture approves both devices before either agent starts, so the
+# coordinator learned a complete peer set on the very first hello and the
+# question of what happens to an already-running device never arose.
+#
+# It arose in the field. The laptop announced while it was alone, held an empty
+# allowed set for the life of the process, and could not reach the machine
+# approved nine minutes later until somebody restarted its service.
+fixture_solo() {
+    local topology=("$@")
+    [ ${#topology[@]} -eq 0 ] && topology=(nat)
+
+    lab::stop_servers
+    lab::down_agents
+    "$LAB_DIR/topology.sh" "${topology[@]}" >/dev/null \
+        || die "could not build the ${topology[*]} topology"
+    lab::relay_hostname
+    rm -rf "$RUN/state"
+
+    php "$LAB_DIR/lab-setup.php" unthrottle >/dev/null 2>&1
+
+    local seed
+    seed="$(php "$LAB_DIR/lab-setup.php" seed)" || die "could not seed a tenant"
+    TENANT="$(awk -F= '/^TENANT=/ {print $2}' <<<"$seed")"
+    NETWORK="$(awk -F= '/^NETWORK=/ {print $2}' <<<"$seed")"
+    JOIN_CODE="$(awk -F= '/^JOIN_CODE=/ {print $2}' <<<"$seed")"
+
+    # Alpha first, alone, approved, running.
+    local uid_alpha approved
+    lab::enrol_start alpha "$JOIN_CODE"
+    uid_alpha="$(lab::enrol_uid alpha)" || die "alpha never registered"
+
+    approved="$(php "$LAB_DIR/lab-setup.php" approve "$uid_alpha")" \
+        || die "could not approve alpha"
+
+    lab::enrol_finish alpha || die "alpha never claimed its token"
+    ALPHA_IP="$(awk -F= -v k="$uid_alpha" '$1 == k {print $2}' <<<"$approved")"
+    [ -n "$ALPHA_IP" ] || die "the panel did not allocate alpha an address"
+    UID_ALPHA="$uid_alpha"
+
+    lab::up alpha
+
+    # Beta enrols but is NOT approved. It sits in the waiting room, which is
+    # where R4 says it belongs.
+    lab::enrol_start beta "$JOIN_CODE"
+    UID_BETA="$(lab::enrol_uid beta)" || die "beta never registered"
+    BETA_IP=""
+}
+
+# join_late approves the waiting device and starts it, touching nothing about
+# the one already running.
+join_late() {
+    local approved
+    approved="$(php "$LAB_DIR/lab-setup.php" approve "$UID_BETA")" \
+        || die "could not approve beta"
+
+    lab::enrol_finish beta || die "beta never claimed its token"
+    BETA_IP="$(awk -F= -v k="$UID_BETA" '$1 == k {print $2}' <<<"$approved")"
+    [ -n "$BETA_IP" ] || die "the panel did not allocate beta an address"
+
     lab::up beta
 }
 
@@ -179,11 +252,14 @@ declare -A SCENARIOS=(
     [overlay-clash]=scenario_overlay_clash
     [gateway-tamper]=scenario_gateway_tamper
     [subnet-mapping]=scenario_subnet_mapping
+    [cgnat]=scenario_cgnat
+    [cgnat-direct]=scenario_cgnat_direct
+    [late-joiner]=scenario_late_joiner
     [dns]=scenario_dns
     [resolved]=scenario_resolved
     [revocation]=scenario_revocation
 )
-ORDER=(cone relay cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash overlay-clash gateway-tamper subnet-mapping dns resolved revocation)
+ORDER=(cone relay cgnat cgnat-direct late-joiner cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash overlay-clash gateway-tamper subnet-mapping dns resolved revocation)
 
 if [ "${1:-}" = "--list" ]; then
     printf '%s\n' "${ORDER[@]}"

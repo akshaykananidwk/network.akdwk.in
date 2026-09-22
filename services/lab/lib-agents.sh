@@ -427,3 +427,31 @@ lab::wait_reachable() {
     done
     return 1
 }
+
+# wait_up blocks until the agent has brought its interface up.
+#
+# Distinct from wait_tunnel, which needs a peer. A device that is the only one
+# on its network has no peer to ping and is still perfectly healthy — and
+# asserting that is the point of the late-joiner scenario, because the field
+# failure looked like a broken device when it was a device with nobody to
+# talk to.
+lab::wait_up() {
+    local ns=$1 timeout=${2:-60} deadline
+    deadline=$(( $(date +%s) + timeout ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        grep -q 'interface .* is up' "$LOGS/$ns-up.log" 2>/dev/null && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# tail_log prints the end of one log, indented, for a failing check.
+#
+# A failure that does not show the evidence makes the next person reproduce it
+# before they can even start reading it.
+lab::tail_log() {
+    local name=$1 lines=${2:-12}
+    [ -f "$LOGS/$name.log" ] || return 0
+    printf '      ── %s.log (last %d lines)\n' "$name" "$lines"
+    tail -n "$lines" "$LOGS/$name.log" | sed 's/^/      /'
+}

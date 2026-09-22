@@ -60,6 +60,8 @@ func main() {
 		err = runService(ctx, os.Args[2:])
 	case "selftest":
 		err = runSelftest(ctx, os.Args[2:])
+	case "update":
+		err = runUpdate(ctx, os.Args[2:])
 	case "reset":
 		err = runReset(os.Args[2:])
 	case "version", "--version", "-v":
@@ -101,6 +103,13 @@ func usage() {
            privileges, the tunnel driver, the key store round trip, and
            creating a real adapter. Reports each as pass or fail with the
            actual error, and never destroys an existing identity.
+
+  update   Install the release this panel offers to this device, if any.
+           The download is refused unless its sha256 is signed by the
+           controller key the panel publishes.
+
+    --check            say what is available and change nothing
+    --no-restart       install, but leave the restart to somebody else
 
   reset    Forget this enrolment.
 

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests;
 
+use App\Core\Config;
 use App\Core\Crypto;
 use App\Core\DB;
 use App\Core\Rbac;
@@ -60,6 +61,7 @@ final class HttpTests
             self::rateLimiting();
             // 1.9.2: the edge's own upgrade path, end to end over HTTP.
             self::edgeUpgrade();
+            self::selfUpdate();
         } finally {
             self::removeFixtures();
         }
@@ -668,6 +670,121 @@ final class HttpTests
             hash('sha256', $client->body()),
             'and the refusal did not replace what was already published'
         );
+    }
+
+    /**
+     * §14 over HTTP: a published agent binary is offered to a device, signed.
+     *
+     * This is the half of self-update the panel is responsible for. The other
+     * half — verifying the signature and swapping the binary — is in Go, in
+     * services/agent/internal/selfupdate. They meet at exactly two things: the
+     * signature is ed25519 over the lowercase hex digest, and the download is
+     * device-authenticated. Both are asserted here.
+     */
+    private static function selfUpdate(): void
+    {
+        TestCase::group('HTTP — a device is offered a signed agent (§14)');
+
+        $secret = (string) CoordinatorSettings::current()['shared_secret'];
+        $controllerKey = (string) Config::get('security.controller_public_key', '');
+
+        if ($secret === '' || $controllerKey === '') {
+            TestCase::skip('self-update', 'this panel has no coordinator secret or controller key');
+
+            return;
+        }
+
+        $before = [];
+        foreach (['file', 'version', 'sha256', 'size', 'published_at'] as $key) {
+            $before[$key] = Setting::get('edge.windows-agent.' . $key, null);
+        }
+
+        try {
+            self::selfUpdateChecks($secret, $controllerKey);
+        } finally {
+            foreach ($before as $key => $value) {
+                Setting::set('edge.windows-agent.' . $key, $value === null ? null : (string) $value);
+            }
+            Setting::flushCache();
+
+            DB::execute(
+                'DELETE FROM ' . DB::table('agent_releases') . ' WHERE version = :v',
+                ['v' => '9.9.9-test']
+            );
+
+            foreach (glob(APP_ROOT . '/storage/downloads/akconnect-agent-9.9.9-test.exe') ?: [] as $leftover) {
+                @unlink($leftover);
+            }
+        }
+    }
+
+    /** @see self::selfUpdate() — the body, so the restore above is a finally. */
+    private static function selfUpdateChecks(string $secret, string $controllerKey): void
+    {
+        $client = self::client();
+        $token = self::$fixtures['alpha']['device_token'];
+
+        $payload = random_bytes(4096);
+        $digest = hash('sha256', $payload);
+
+        self::signedRequest($client, 'POST', '/api/v1/edge/artifact', (string) json_encode([
+            'kind'    => 'windows-agent',
+            'version' => '9.9.9-test',
+            'sha256'  => $digest,
+            'offset'  => 0,
+            'total'   => strlen($payload),
+            'data'    => base64_encode($payload),
+        ]), $secret);
+        TestCase::assertSame(200, $client->status(), 'an agent binary is accepted from the edge');
+
+        // The device asks what it should be running.
+        $client->get('/api/v1/agent/version?platform=windows&arch=amd64', [
+            'Authorization' => 'Bearer ' . $token,
+            'Accept'        => 'application/json',
+        ]);
+        TestCase::assertSame(200, $client->status(), 'a device may ask for its release');
+
+        $offer = $client->json()['data'] ?? [];
+        TestCase::assert(($offer['update_available'] ?? false) === true, 'and is offered the new one');
+        TestCase::assertSame('9.9.9-test', (string) ($offer['version'] ?? ''), 'by version');
+        TestCase::assertSame($digest, (string) ($offer['sha256'] ?? ''), 'with the digest it was published under');
+
+        // The signature is the security boundary: an agent installs nothing
+        // without it, so a release published unsigned is a silent dead end.
+        $signature = (string) ($offer['signature'] ?? '');
+        TestCase::assert($signature !== '', 'and a signature');
+
+        $raw = @hex2bin(substr($signature, strlen('ed25519:')));
+        TestCase::assert(
+            str_starts_with($signature, 'ed25519:')
+                && $raw !== false
+                && sodium_crypto_sign_verify_detached($raw, $digest, (string) hex2bin($controllerKey)),
+            'that verifies against the controller public key the agent is given'
+        );
+
+        // The agent refuses a download that is not on the panel it enrolled
+        // with, so the panel must publish an address on itself.
+        $url = (string) ($offer['url'] ?? '');
+        TestCase::assertContains(
+            (string) parse_url((string) Config::get('app.url', ''), PHP_URL_HOST),
+            $url,
+            'and a download address on this panel'
+        );
+
+        // The test client speaks to the dev server, not to the public host
+        // name in the configuration, so only the path travels.
+        $path = (string) parse_url($url, PHP_URL_PATH);
+
+        // Serving code is the one thing that must never be anonymous.
+        $client->get($path, ['Accept' => 'application/octet-stream']);
+        TestCase::assertSame(401, $client->status(), 'the binary is not served without a device token');
+
+        $client->get($path, [
+            'Authorization' => 'Bearer ' . $token,
+            'Accept'        => 'application/octet-stream',
+        ]);
+        TestCase::assertSame(200, $client->status(), 'and is served to the device it is offered to');
+        TestCase::assertSame($digest, hash('sha256', $client->body()), 'byte-identical to what was published');
     }
 
     /**

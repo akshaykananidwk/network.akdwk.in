@@ -17,6 +17,8 @@ PANEL_PORT=8099
 COORD_PORT=8443
 RELAY_PORT=9000
 RELAY_B_PORT=9001
+# A name rather than an address, deliberately. See lab::relay_hostname.
+RELAY_HOST=relay.lab.internal
 PANEL_URL="http://$HOST_IP:$PANEL_PORT"
 
 # This box reaches the internet through a proxy. The lab talks to addresses
@@ -170,10 +172,37 @@ return [
     ],
 ];
 PHP
-    php "$LAB_DIR/lab-setup.php" relays "$HOST_IP" "$RELAY_PORT" "$RELAY_B_PORT" >/dev/null \
+    # Registered by NAME, not by address.
+    #
+    # This one word is the whole of defect 16. DEPLOY tells an operator to
+    # configure the relay by the VPS's hostname, the production deployment did,
+    # and the agent's offer handler parsed the endpoint with a function that
+    # only accepts literal IP addresses — so every relay offer was silently
+    # discarded and no agent ever contacted the relay. Every relay drill in
+    # this lab passed, because this line used to pass "$HOST_IP".
+    php "$LAB_DIR/lab-setup.php" relays "$RELAY_HOST" "$RELAY_PORT" "$RELAY_B_PORT" >/dev/null \
         || die "could not register the lab relays with the panel"
 
     say "coordinator key generated; panel pointed at $HOST_IP:$COORD_PORT"
+    say "relays registered as $RELAY_HOST (a name, not an address — see defect 16)"
+}
+
+# lab::relay_hostname makes $RELAY_HOST resolve inside the agent namespaces.
+#
+# /etc/netns/<ns>/hosts, which ip-netns bind-mounts over /etc/hosts for that
+# namespace only — so nothing global is touched and teardown removes it with
+# the rest. The coordinator and the relays run on the host and never resolve
+# this name; they only pass the string through, which is exactly the path that
+# was broken.
+lab::relay_hostname() {
+    local ns
+    for ns in alpha beta; do
+        mkdir -p "/etc/netns/$ns"
+        {
+            printf '127.0.0.1 localhost\n'
+            printf '%s %s\n' "$HOST_IP" "$RELAY_HOST"
+        } > "/etc/netns/$ns/hosts"
+    done
 }
 
 lab::secrets_clear() {
@@ -207,7 +236,7 @@ lab::coord_start() {
         "$BIN/akconnect-coordinator" serve \
             --listen ":$COORD_PORT" \
             --panel "$PANEL_URL" \
-            --relays "lab-a::$HOST_IP:$RELAY_PORT,lab-b::$HOST_IP:$RELAY_B_PORT" \
+            --relays "lab-a::$RELAY_HOST:$RELAY_PORT,lab-b::$RELAY_HOST:$RELAY_B_PORT" \
         >"$LOGS/coordinator.log" 2>&1 &
     COORD_PID=$!
     sleep 1

@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Core\Config;
+use App\Core\Crypto;
 use App\Core\Logger;
 use App\Core\UpdateException;
+use App\Models\AgentRelease;
 use App\Models\Setting;
 use App\Models\UpdateSetting;
 use App\Updater\UpdateEnv;
@@ -43,7 +45,7 @@ final class EdgeRelease
     private const DIR = 'storage/downloads';
 
     /** Artefacts this panel will accept and serve. */
-    public const KINDS = ['windows-pack', 'windows-setup'];
+    public const KINDS = ['windows-pack', 'windows-setup', 'windows-agent'];
 
     /**
      * What the edge should build.
@@ -236,6 +238,14 @@ final class EdgeRelease
 
         self::prune($dir, self::filename($kind, $version), $kind);
 
+        // A bare agent binary is also a release devices can update themselves
+        // to (§14) — which is the point of publishing it. Registered here
+        // rather than by hand, because an agent release nobody remembered to
+        // register means every fix is a manual reinstall on every PC.
+        if ($kind === 'windows-agent') {
+            self::registerAgentRelease($version, $sha256, $total, self::filename($kind, $version));
+        }
+
         Logger::notice('update', 'Edge artefact published', [
             'kind'    => $kind,
             'version' => $version,
@@ -294,8 +304,78 @@ final class EdgeRelease
     {
         return match ($kind) {
             'windows-setup' => 'akconnect-setup-' . $version . '.exe',
+            'windows-agent' => 'akconnect-agent-' . $version . '.exe',
             default         => 'akconnect-windows-pack-' . $version . '.zip',
         };
+    }
+
+    /**
+     * Make a published binary an update devices will take.
+     *
+     * The signature is over the sha256 digest, with the controller's ed25519
+     * key — the same identity that signs agent configuration. That is the
+     * boundary that matters: an agent replaces its own binary only for a
+     * digest this panel's private key has signed, so a panel that is merely
+     * reachable cannot push code, and a stolen database cannot either.
+     *
+     * Without a signing key configured the release is recorded unsigned, and
+     * an agent will refuse it. That is the correct direction to fail: no
+     * update is better than an unverified one.
+     */
+    private static function registerAgentRelease(
+        string $version,
+        string $sha256,
+        int $size,
+        string $filename
+    ): void {
+        $signature = '';
+        $secret = (string) CoordinatorSettings::current()['signing_key'];
+
+        if ($secret !== '') {
+            try {
+                $signature = Crypto::sign($sha256, $secret);
+            } catch (\Throwable $e) {
+                Logger::error('update', 'Could not sign the agent release', ['error' => $e->getMessage()]);
+            }
+        }
+
+        if ($signature === '') {
+            Logger::warning('update', 'Agent release published unsigned; devices will refuse it', [
+                'version' => $version,
+            ]);
+        }
+
+        $existing = AgentRelease::findBy([
+            'version'  => $version,
+            'platform' => 'windows',
+            'arch'     => 'amd64',
+            'channel'  => 'stable',
+        ]);
+
+        $attributes = [
+            'version'         => $version,
+            'channel'         => 'stable',
+            'platform'        => 'windows',
+            'arch'            => 'amd64',
+            'file_path'       => self::DIR . '/' . $filename,
+            'file_size'       => $size,
+            'sha256'          => $sha256,
+            'signature'       => $signature,
+            'release_notes'   => 'Published by deploy/upgrade-edge.sh from the release this panel runs.',
+            'rollout_percent' => 100,
+            'published_at'    => gmdate('Y-m-d H:i:s'),
+        ];
+
+        if ($existing !== null) {
+            AgentRelease::update((int) $existing['id'], $attributes);
+        } else {
+            AgentRelease::create($attributes);
+        }
+
+        Logger::notice('update', 'Agent release registered', [
+            'version' => $version,
+            'signed'  => $signature !== '',
+        ]);
     }
 
     /** Keep the current artefact and the one before it; delete the rest. */

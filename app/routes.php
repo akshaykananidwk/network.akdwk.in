@@ -190,6 +190,9 @@ $router->group('/api/v1', ['maintenance'], static function (Router $router): voi
     $router->post('/agent/heartbeat', 'Api\AgentController@heartbeat', ['device']);
     $router->post('/agent/endpoint', 'Api\AgentController@endpoint', ['device']);
     $router->get('/agent/version', 'Api\AgentController@version', ['device']);
+    // The binary itself. Device-authenticated, and checked against what this
+    // device is actually offered — see the method for why that matters.
+    $router->get('/agent/download/{id:int}', 'Api\AgentController@download', ['device']);
 
     // Tenant API: bearer API key, or a dashboard session.
     $router->group('', ['api'], static function (Router $router): void {

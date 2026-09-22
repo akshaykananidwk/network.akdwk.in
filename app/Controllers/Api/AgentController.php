@@ -356,7 +356,7 @@ final class AgentController
         return Response::api([
             'update_available' => $available,
             'version'          => $release['version'],
-            'url'              => $available ? url('agent/download/' . $release['id']) : null,
+            'url'              => $available ? url('api/v1/agent/download/' . $release['id']) : null,
             // The agent verifies BOTH before swapping its binary. An unsigned
             // or mismatched download is refused and reported.
             'sha256'           => $release['sha256'],
@@ -364,6 +364,70 @@ final class AgentController
             'size'             => (int) $release['file_size'],
             'notes'            => $release['release_notes'],
         ]);
+    }
+
+    /**
+     * Serve an agent binary to a device that is due it.
+     *
+     * Device-authenticated, because this is the one endpoint that hands out
+     * code — and the id is checked against what that device is actually
+     * offered rather than taken on trust, so a device cannot fetch a release
+     * it is not in the rollout cohort for.
+     *
+     * The agent verifies the sha256 and the ed25519 signature before it
+     * replaces its own binary. This endpoint is not the security boundary;
+     * the signature is.
+     *
+     * @param array<string,string> $params
+     */
+    public function download(Request $request, array $params): Response
+    {
+        $device = $request->deviceContext();
+        if ($device === null) {
+            return Response::apiError('Device context missing.', 401);
+        }
+
+        $release = AgentRelease::find((int) $params['id']);
+        if ($release === null || $release['published_at'] === null) {
+            return Response::apiError('No such release.', 404);
+        }
+
+        // The same decision the version endpoint made. Without this a device
+        // could name any id and take itself out of a staged rollout.
+        $offered = AgentRelease::latestFor(
+            (string) $release['channel'],
+            (string) $release['platform'],
+            (string) $release['arch'],
+            (string) $device['device_uid']
+        );
+
+        if ($offered === null || (int) $offered['id'] !== (int) $release['id']) {
+            Logger::warning('agent', 'Device asked for a release it is not offered', [
+                'device_uid' => $device['device_uid'],
+                'release_id' => $release['id'],
+            ]);
+
+            return Response::apiError('That release is not offered to this device.', 403);
+        }
+
+        $path = APP_ROOT . '/' . ltrim((string) $release['file_path'], '/');
+        if (basename((string) $release['file_path']) !== (string) $release['file_path']
+            && !str_starts_with((string) $release['file_path'], 'storage/downloads/')) {
+            // The column is written by us, not by a caller, and it stays that
+            // way: anything outside the one directory releases live in is a
+            // bug worth refusing rather than serving.
+            Logger::error('agent', 'Agent release path is outside storage/downloads', [
+                'release_id' => $release['id'],
+            ]);
+
+            return Response::apiError('That release is not available.', 500);
+        }
+
+        if (!is_file($path)) {
+            return Response::apiError('That release is no longer on disk.', 410);
+        }
+
+        return Response::file($path, 'akconnect-agent-' . $release['version'] . '.bin', 'application/octet-stream');
     }
 
     /**

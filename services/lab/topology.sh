@@ -26,7 +26,10 @@ die() { echo "  ✗ $*" >&2; exit 1; }
 note() { echo "  $*"; }
 
 teardown() {
-    for ns in alpha beta natgw-a natgw-b nvr office; do
+    # natgw-alpha and cgnat-alpha are the two layers the CGNAT topology adds.
+    # A namespace left behind makes the next "ip netns add" fail, and the
+    # scenario then blames the product for a lab that did not clean up.
+    for ns in alpha beta natgw-a natgw-b natgw-alpha cgnat-alpha nvr office; do
         ip netns del "$ns" 2>/dev/null || true
     done
     ip link del "$BRIDGE" 2>/dev/null || true
@@ -203,6 +206,123 @@ build_symmetric() {
     note "a tunnel here proves the relay works"
 }
 
+# Carrier-grade NAT, two layers deep, which is what a Jio hotspot is.
+#
+# The lab's "symmetric" is one NAT that remaps ports. A real mobile connection
+# is two: the phone NATs the laptop onto a private range, and the carrier NATs
+# the phone onto a shared public address out of 100.64.0.0/10. The laptop's
+# public port bears no relation to the port it is listening on, there is no
+# inbound path to it at all, and the address it appears from is shared with
+# thousands of other subscribers.
+#
+# It matters as a separate case because the field failure was not that punching
+# failed — punching is supposed to fail here — it was that the *relay* was
+# never contacted, and the lab could not have shown that: the lab configured
+# its relays by IP address, and the agent's offer handler only parsed IP
+# addresses. Everything passed. So this scenario exists alongside a relay
+# configured by hostname, which is how DEPLOY tells an operator to configure
+# one and how the production deployment did.
+#
+#   alpha  192.168.10.2  →  CPE at 100.64.0.10  →  carrier at 10.0.0.10
+#   beta   192.168.20.2  →  cone NAT at 10.0.0.11
+#
+# Beta on a decent line is deliberate: the acceptance test is one PC behind
+# CGNAT and one not, because that is the shop-and-laptop case this product is
+# sold for.
+build_cgnat() {
+    local betaMode=${1:-symmetric}
+    teardown
+
+    ip link add "$BRIDGE" type bridge
+    ip address add "$HOST_IP/24" dev "$BRIDGE"
+    ip link set "$BRIDGE" up
+
+    build_cgnat_side alpha 10 192.168.10 100.64.0
+    build_nat_side beta natgw-b 11 192.168.20 "$betaMode"
+
+    sysctl -qw net.ipv4.ip_forward=1
+    note "alpha is behind TWO layers of NAT (CPE then carrier); no inbound path exists"
+    note "beta is behind a $betaMode NAT"
+
+    if [ "$betaMode" = "cone" ]; then
+        # Worth having as its own case: a customer behind CGNAT is not
+        # automatically condemned to a relay. If the *other* end is reachable
+        # inbound — a shop with a port forward, or a well-behaved router —
+        # alpha can open the path from its side and the pair goes direct. The
+        # first run of this scenario with a cone peer went direct, which was
+        # the product being right and the scenario being wrong.
+        note "beta is reachable inbound, so a direct path is possible even from behind CGNAT"
+    else
+        note "neither end is reachable inbound, so a tunnel here can only be relayed"
+    fi
+}
+
+# build_cgnat_side wires one host behind a CPE and then a carrier.
+build_cgnat_side() {
+    local host=$1 publicLast=$2 private=$3 carrier=$4
+    local cpe="natgw-$host" cg="cgnat-$host"
+
+    ip netns add "$cg"
+    ip netns add "$cpe"
+    ip netns add "$host"
+
+    # The carrier's own uplink to the shared segment, where the coordinator
+    # and the relays live.
+    ip link add "wan-$cg" type veth peer name "br-$cg"
+    ip link set "br-$cg" master "$BRIDGE"
+    ip link set "br-$cg" up
+    ip link set "wan-$cg" netns "$cg"
+
+    ip netns exec "$cg" ip link set lo up
+    ip netns exec "$cg" ip address add "10.0.0.$publicLast/24" dev "wan-$cg"
+    ip netns exec "$cg" ip link set "wan-$cg" up
+    ip netns exec "$cg" ip route add default via "$HOST_IP"
+    ip netns exec "$cg" sysctl -qw net.ipv4.ip_forward=1
+
+    # Carrier to CPE, on 100.64/10 — the range reserved for exactly this.
+    ip link add "lan-$cg" type veth peer name "wan-$cpe"
+    ip link set "lan-$cg" netns "$cg"
+    ip link set "wan-$cpe" netns "$cpe"
+
+    ip netns exec "$cg" ip address add "$carrier.1/24" dev "lan-$cg"
+    ip netns exec "$cg" ip link set "lan-$cg" up
+
+    ip netns exec "$cpe" ip link set lo up
+    ip netns exec "$cpe" ip address add "$carrier.10/24" dev "wan-$cpe"
+    ip netns exec "$cpe" ip link set "wan-$cpe" up
+    ip netns exec "$cpe" ip route add default via "$carrier.1"
+    ip netns exec "$cpe" sysctl -qw net.ipv4.ip_forward=1
+
+    # CPE to the laptop.
+    ip link add "lan-$cpe" type veth peer name "veth-$host"
+    ip link set "lan-$cpe" netns "$cpe"
+    ip link set "veth-$host" netns "$host"
+
+    ip netns exec "$cpe" ip address add "$private.1/24" dev "lan-$cpe"
+    ip netns exec "$cpe" ip link set "lan-$cpe" up
+
+    ip netns exec "$host" ip link set lo up
+    ip netns exec "$host" ip address add "$private.2/24" dev "veth-$host"
+    ip netns exec "$host" ip link set "veth-$host" up
+    ip netns exec "$host" ip route add default via "$private.1"
+
+    # Both layers remap the port, and neither accepts anything inbound that it
+    # did not see going out. --random-fully is what makes the mapping
+    # per-destination rather than per-socket, which is the property that
+    # defeats punching.
+    ip netns exec "$cpe" iptables -t nat -A POSTROUTING -s "$private.0/24" \
+        -o "wan-$cpe" -p udp -j MASQUERADE --random-fully
+    ip netns exec "$cpe" iptables -t nat -A POSTROUTING -s "$private.0/24" \
+        -o "wan-$cpe" -j MASQUERADE
+
+    ip netns exec "$cg" iptables -t nat -A POSTROUTING -s "$carrier.0/24" \
+        -o "wan-$cg" -p udp -j MASQUERADE --random-fully
+    ip netns exec "$cg" iptables -t nat -A POSTROUTING -s "$carrier.0/24" \
+        -o "wan-$cg" -j MASQUERADE
+
+    note "$host is $private.2 behind a CPE at $carrier.10 behind a carrier at 10.0.0.$publicLast"
+}
+
 # One host behind a cone NAT, the other behind a symmetric one.
 #
 # This is the common real case, not a corner: a shop on a decent fibre line
@@ -336,9 +456,10 @@ case "${1:-up}" in
     up)        build_flat ;;
     nat)       build_nat ;;
     symmetric) build_symmetric ;;
+    cgnat)     build_cgnat "${2:-symmetric}" ;;
     mixed)     build_mixed "${2:-cone}" "${3:-symmetric}" ;;
     gateway)   build_gateway ;;
     collision) build_collision ;;
     down)      teardown ;;
-    *)         die "unknown command: $1 (use up, nat, symmetric, mixed, gateway, collision or down)" ;;
+    *)         die "unknown command: $1 (use up, nat, symmetric, cgnat, mixed, gateway, collision or down)" ;;
 esac

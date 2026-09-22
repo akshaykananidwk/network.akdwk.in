@@ -313,3 +313,193 @@ source "$LAB/scenarios-enrol.sh"
 source "$LAB/scenarios-gateway.sh"
 source "$LAB/scenarios-dns.sh"
 source "$LAB/scenarios-resolved.sh"
+
+# ---------------------------------------------------------------- CGNAT
+
+# Two layers of carrier NAT, and a relay named the way DEPLOY says to name one.
+#
+# This is the Jio-hotspot case and the scenario that would have caught defect
+# 16. The field failure was not that hole punching failed — behind a
+# carrier-grade NAT it is supposed to fail — it was that the relay was never
+# contacted at all. The coordinator logged that it had offered the relay to
+# both devices; a twenty-second capture on the relay's own ports saw nothing.
+#
+# The lab could not have shown it, because the lab configured its relays by IP
+# address and the agent's offer handler parsed only IP addresses. So the
+# assertion that matters here is not "a tunnel formed" — the older relay
+# scenarios already claim that — it is that the relay was *used*: its own log
+# has to show a bind from both ends.
+scenario_cgnat() {
+    step "CGNAT — two layers of carrier NAT, relay named by hostname"
+    # Beta symmetric too: with a cone peer the pair punches through from
+    # alpha's side and never needs the relay, which is the product being right
+    # and is a different scenario — see scenario_cgnat_direct.
+    fixture cgnat symmetric
+
+    if lab::wait_tunnel alpha "$BETA_IP" 120; then
+        record "cgnat/tunnel" PASS "alpha pinged $BETA_IP from behind two layers of NAT"
+    else
+        record "cgnat/tunnel" FAIL "no tunnel formed within 120s"
+        lab::tail_log relay-a 12
+        return
+    fi
+
+    check "cgnat/path" "the path is a relay, as it must be" \
+        lab::wait_path alpha relay 40
+
+    # The assertion defect 16 needed. A relay that was offered and never
+    # contacted looks identical from the coordinator's side.
+    # grep -c prints 0 and exits 1 when it finds nothing, so "|| echo 0"
+    # appends a second line and the comparison below then fails with "integer
+    # expression expected" — which is what the first run of this did.
+    local binds
+    binds="$(grep -c 'bound ' "$LOGS/relay-a.log" 2>/dev/null)" || binds=0
+    if [ "${binds:-0}" -ge 2 ]; then
+        record "cgnat/relay-used" PASS "the relay bound $binds session(s); both ends reached it"
+    else
+        record "cgnat/relay-used" FAIL "the relay logged $binds bind(s) — it was offered and not contacted"
+        lab::tail_log alpha-up 12
+    fi
+
+    # And the reason it works: the offer carried a name, and the agent resolved
+    # it. A regression that reverts to IP-only parsing fails here loudly.
+    if grep -qE "relay .* (resolved to|offered)" "$LOGS/alpha-up.log" 2>/dev/null \
+        || ! grep -q 'is unusable' "$LOGS/alpha-up.log" 2>/dev/null; then
+        record "cgnat/relay-name" PASS "the agent accepted a relay named $RELAY_HOST"
+    else
+        record "cgnat/relay-name" FAIL "the agent refused the relay endpoint as unusable"
+        grep 'unusable' "$LOGS/alpha-up.log" | head -3 | sed 's/^/      /'
+    fi
+
+    assert_split_tunnel alpha "cgnat/R1"
+}
+
+# ----------------------------------------------------------- late joiner
+
+# A device approved after another is already connected.
+#
+# Every scenario before this one approved both devices before either agent
+# started, so the coordinator learned a complete peer set on the first hello
+# and an already-running agent never had to learn about a newcomer. That is
+# not how a customer site grows: the first machine is installed, and the
+# second is installed later — sometimes minutes later, sometimes a week.
+#
+# In the field the already-running device never found out. It held the empty
+# allowed set it was given when it announced alone, and logged
+#
+#   Failed to send handshake initiation: no known endpoint for peer
+#
+# every five seconds until somebody restarted its service. The fix has to work
+# without touching the running agent, so this scenario never touches it.
+scenario_late_joiner() {
+    step "a device approved after another is already connected"
+
+    # Behind CGNAT deliberately, and this took a wrong turn first.
+    #
+    # On an ordinary NAT this scenario passes even with every one of the fixes
+    # reverted, because there are two independent ways for an agent to learn a
+    # peer's address: the coordinator introduces it, and the panel publishes
+    # `last_endpoint` in the configuration. On a plain NAT the second is enough
+    # — the agent punches straight to it and never needs the first.
+    #
+    # Behind carrier-grade NAT it is not enough: punching to that address
+    # cannot work, so the pair needs a relay, and the coordinator only grants a
+    # relay to a pair it believes is allowed to talk. With a stale peer set it
+    # refuses — "that peer is not permitted" — and the two machines are stuck
+    # exactly as they were in the field.
+    #
+    # So this is the topology where the defect actually lives, and a scenario
+    # that passes on the old code is a scenario that proves nothing.
+    fixture_solo cgnat symmetric
+
+    # Alpha is up, alone, and has been told about nobody. It must be healthy:
+    # a device with no peers is not a broken device.
+    if lab::wait_up alpha 60; then
+        record "late/alone" PASS "alpha is up and running with no peers at all"
+    else
+        record "late/alone" FAIL "alpha never came up on its own"
+        lab::tail_log alpha-up 12
+        return
+    fi
+
+    # Long enough that alpha has settled into pinging rather than saying
+    # hello. This is the state the defect lived in: a hello carries a token and
+    # makes the coordinator re-ask the panel, and a ping does not.
+    sleep 25
+
+    local joined_at
+    joined_at="$(date +%s)"
+
+    join_late
+
+    # Generous: the punch deadline, then a relay request, then a bind, then a
+    # handshake. In the field this never completed at all.
+    if lab::wait_tunnel alpha "$BETA_IP" 150; then
+        local took=$(( $(date +%s) - joined_at ))
+        record "late/reached" PASS "alpha reached the newcomer ${took}s after approval, without a restart"
+    else
+        record "late/reached" FAIL "alpha never reached the device approved after it"
+        # The coordinator's own words are the diagnosis: "refused a relay
+        # request … that peer is not permitted" means its stored peer set for
+        # alpha is stale, which is the whole of defect 15.
+        lab::tail_log alpha-up 15
+        lab::tail_log coordinator 15
+        return
+    fi
+
+    # The other direction too. The introduction is mutual, and the deadlock in
+    # the field was that neither end could be told about the other.
+    if lab::wait_tunnel beta "$ALPHA_IP" 90; then
+        record "late/mutual" PASS "and the newcomer reached alpha"
+    else
+        record "late/mutual" FAIL "the newcomer could not reach alpha"
+    fi
+
+    # Nothing restarted alpha. If the agent had exited and been restarted by
+    # anything, its log would start again — so the log still carrying its
+    # first line is the proof that this was a live recovery.
+    local ups
+    ups="$(grep -c 'interface .* is up' "$LOGS/alpha-up.log" 2>/dev/null)" || ups=0
+    if [ "${ups:-0}" -eq 1 ]; then
+        record "late/no-restart" PASS "alpha brought its interface up exactly once"
+    else
+        record "late/no-restart" FAIL "alpha's interface came up $ups time(s); it was restarted"
+    fi
+
+    assert_split_tunnel alpha "late/R1"
+}
+
+# The other half of the CGNAT question, and the cheerful one.
+#
+# A customer behind carrier-grade NAT is not automatically condemned to a
+# relay: if the machine at the other end is reachable inbound — a shop with a
+# decent router — the CGNAT side can open the path from its own side and the
+# pair goes direct, with no traffic through our servers and nothing on the
+# bandwidth bill. The first run of the scenario above proved this by accident,
+# which is a good enough reason to assert it on purpose.
+scenario_cgnat_direct() {
+    step "CGNAT to a reachable peer — a direct path is still possible"
+    fixture cgnat cone
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 120; then
+        record "cgnat-direct/tunnel" FAIL "no tunnel formed within 120s"
+        lab::tail_log alpha-up 12
+        return
+    fi
+
+    local path
+    path="$(lab::settled_path alpha 40)"
+
+    if [ "$path" = "direct" ]; then
+        record "cgnat-direct/path" PASS "direct from behind two layers of NAT; no relay needed"
+    elif [ "$path" = "relay" ]; then
+        # Not a failure — a relayed path is a working path — but it is a
+        # regression in quality and worth seeing, because it is the difference
+        # between a customer costing nothing to serve and costing bandwidth.
+        record "cgnat-direct/path" FAIL "fell back to a relay although the peer was reachable inbound"
+    else
+        record "cgnat-direct/path" FAIL "traffic flows but the agent never reported a path"
+    fi
+
+    assert_split_tunnel alpha "cgnat-direct/R1"
+}

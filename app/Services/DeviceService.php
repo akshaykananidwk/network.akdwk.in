@@ -424,6 +424,17 @@ final class DeviceService
                 // falling back to sending one in the clear.
                 'public_key' => (string) CoordinatorSettings::current()['public_key'],
             ],
+            // The controller's ed25519 public half.
+            //
+            // Published so an agent can verify what it is given: the signature
+            // on this configuration, and — the reason it is here now — the
+            // signature on an agent binary before it replaces its own. Pushing
+            // code to every customer PC on the strength of a panel being
+            // reachable is not something to do; a panel compromise must not
+            // also be a code-signing key.
+            'controller'  => [
+                'public_key' => (string) Config::get('security.controller_public_key', ''),
+            ],
             'policy'      => [
                 // Stated explicitly in the config the agent consumes so the
                 // rule is auditable on the wire, not just in agent source.

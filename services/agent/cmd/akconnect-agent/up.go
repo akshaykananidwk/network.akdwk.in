@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/keystore"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/netcfg"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/selfupdate"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/state"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/tunnel"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/wgkey"
@@ -57,6 +59,15 @@ func runUp(ctx context.Context, args []string) error {
 
 	logger := log.New(out, "", log.LstdFlags)
 	logf := func(format string, a ...any) { logger.Printf(format, a...) }
+
+	// An update renames the old binary aside rather than deleting it, because
+	// on Windows a running executable cannot be deleted. This is the first
+	// moment it is no longer running, so this is where it goes.
+	if removed, err := selfupdate.CleanPrevious(); err != nil {
+		logf("could not remove the previous binary: %v", err)
+	} else if removed != "" {
+		logf("removed the previous binary left by an update: %s", filepath.Base(removed))
+	}
 
 	session, err := newSession(*iface, *port, *verbose, logf)
 	if err != nil {
@@ -117,6 +128,12 @@ type session struct {
 	lastRX    int64
 	lastTX    int64
 	startedAt time.Time
+	// controllerKey is the panel's signing identity, taken from the last
+	// configuration it published. A release whose digest is not signed by it
+	// is not installed — see internal/selfupdate.
+	controllerKey string
+	// lastUpdateCheck throttles the automatic update check in the poll loop.
+	lastUpdateCheck time.Time
 }
 
 func newSession(iface string, port int, verbose bool, logf func(string, ...any)) (*session, error) {
@@ -221,6 +238,10 @@ func (s *session) run(ctx context.Context) error {
 // applyConfig vets a configuration and installs it. R1 is enforced by
 // netcfg.Build before anything touches the operating system.
 func (s *session) applyConfig(ctx context.Context, priv wgPrivate, cfg *panel.Config) error {
+	// Kept from every configuration, not just the first: rotating the
+	// controller key must not leave running agents unable to verify a release.
+	s.controllerKey = cfg.Controller.PublicKey
+
 	plan, err := netcfg.Build(cfg)
 	if err != nil {
 		// A refused configuration is not a transient error. Failing loudly and

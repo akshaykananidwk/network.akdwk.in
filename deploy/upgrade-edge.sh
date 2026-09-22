@@ -577,6 +577,20 @@ else
             else
                 fail "published" "the panel would not accept the upload"
             fi
+
+            # The bare agent as well, as the windows-agent kind. That upload is
+            # what the panel signs and offers to already-installed devices
+            # (§14), so publishing it is the difference between fixing a defect
+            # once and visiting every PC to fix it.
+            AGENT_EXE="$SRC_DIR/services/kit/pack/akconnect-agent.exe"
+
+            if [ ! -f "$AGENT_EXE" ]; then
+                fail "self-update" "the pack build left no akconnect-agent.exe to publish"
+            elif publish_artifact "windows-agent" "$AGENT_EXE" >/dev/null; then
+                pass "self-update" "installed devices will be offered $TARGET_VERSION"
+            else
+                fail "self-update" "the panel would not accept the agent binary"
+            fi
         fi
     fi
 fi
