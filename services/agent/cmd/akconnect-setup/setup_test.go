@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -128,5 +130,52 @@ func TestTheDefaultPanelIsAStampableVariable(t *testing.T) {
 	defaultPanel = "https://net.example.com"
 	if err := checkPanelURL(defaultPanel); err != nil {
 		t.Fatalf("a stamped address is not usable: %v", err)
+	}
+}
+
+// The uninstaller removes a network adapter by name, and the name it uses is
+// spelled out in the installer rather than imported — the installer does not
+// link the agent's packages. If the agent ever renames its interface, the
+// uninstall stops removing it and a customer is left with an adapter named
+// after software they no longer have.
+//
+// It used to match '*Wintun*' as well. That is not our name: it is the name of
+// the driver, which WireGuard's own client and Tailscale also create adapters
+// on. On a machine running either, uninstalling this would have taken their
+// adapter with it.
+func TestTheAdapterNameMatchesTheAgents(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", "internal", "tunnel", "name_windows.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := `defaultInterfaceName = "` + adapterName + `"`
+	if !strings.Contains(string(source), want) {
+		t.Fatalf("the agent's Windows interface name is not %q; the uninstall would miss the adapter", adapterName)
+	}
+}
+
+// And nothing in the uninstall matches by driver.
+//
+// It used to match '*Wintun*'. That is not our name: it is the name of the
+// driver, which WireGuard's own client and Tailscale also create adapters on.
+// On a machine running either, uninstalling this would have taken their
+// adapter with it, from software the customer still uses.
+func TestTheUninstallRemovesOnlyOurAdapter(t *testing.T) {
+	query := adapterQuery(adapterName)
+
+	if !strings.Contains(query, `-eq '`+adapterName+`'`) {
+		t.Error("the uninstall does not match our adapter by its exact name")
+	}
+
+	for _, theirs := range []string{"Wintun", "WireGuard Tunnel", "Tailscale", "OpenVPN TAP"} {
+		if strings.Contains(query, theirs) {
+			t.Errorf("the uninstall statement mentions %q, which is not ours to remove", theirs)
+		}
+	}
+
+	// A second copy of OUR adapter, left by a crash, is ours.
+	if !strings.Contains(query, adapterName+` #*`) {
+		t.Error("a duplicate of our own adapter would be left behind")
 	}
 }

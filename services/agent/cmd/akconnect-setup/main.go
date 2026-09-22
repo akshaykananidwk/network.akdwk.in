@@ -52,6 +52,15 @@ var defaultPanel = ""
 const (
 	productName = "AKConnect"
 	serviceName = "AKConnectAgent"
+	// adapterName is what the agent calls its network interface — tunnel's
+	// defaultInterfaceName on Windows. Spelled out here because this binary is
+	// the installer and does not otherwise link the agent's packages; a test
+	// asserts the two are the same string, because if they drift the uninstall
+	// stops removing the adapter.
+	//
+	// Not in the Windows-only file: a name is not a platform, and a constant
+	// that only exists on Windows is a constant no test here can check.
+	adapterName = "AKConnect"
 )
 
 // What Apps & features, the Start menu and the tray call this. Stamped at

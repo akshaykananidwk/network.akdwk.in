@@ -197,17 +197,23 @@ func removeNrptRules() error {
 			`ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Force -ErrorAction SilentlyContinue }`)
 }
 
-// removeWintunAdapter removes the network adapter the driver created.
+// removeWintunAdapter removes the network adapter this agent created.
 //
 // This is the step people forget. The adapter normally disappears when the
 // agent exits, but a hard kill leaves it, and after an uninstall there is
 // nothing left to clean it up — so a customer is left with a network adapter
 // named after software they no longer have.
+//
+// OURS, and only ours. This matched '*Wintun*' as well, which is not our name:
+// it is the name of the driver, and WireGuard's own client, Tailscale and
+// several others create adapters on the same driver. On a machine running any
+// of them, uninstalling AKConnect would have taken their network adapter away
+// with it — from software the customer still uses, without mentioning it.
+//
+// The adapter is ours when it is called what we call ours. Nothing else is
+// safe to infer: the driver is shared by design.
 func removeWintunAdapter() error {
-	return powershell(
-		`$found = Get-PnpDevice -Class Net -ErrorAction SilentlyContinue | ` +
-			`Where-Object { $_.FriendlyName -like '*Wintun*' -or $_.FriendlyName -like '*AKConnect*' }; ` +
-			`foreach ($d in $found) { & pnputil /remove-device $d.InstanceId 2>&1 | Out-Null }`)
+	return powershell(adapterQuery(adapterName))
 }
 
 func powershell(statement string) error {
