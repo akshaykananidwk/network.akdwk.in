@@ -43,15 +43,27 @@ type Server struct {
 
 // Candidate addresses, in order.
 //
-// 127.0.0.53 is where systemd-resolved lives on most Linux systems, so it is
-// tried second rather than first: taking it would break the machine's own name
-// resolution, which is the one thing this feature promises not to do.
+// 127.0.0.53 and 127.0.0.54 are systemd-resolved's own — the stub listener and
+// the extra stub — and neither is ever offered here, even when they are free.
+// Two reasons, and the second is the one that bit:
+//
+//  1. Taking 127.0.0.53 would break the machine's own name resolution, which
+//     is the one thing this feature promises not to do.
+//  2. systemd-resolved refuses to be pointed at either of them:
+//     "resolvectl dns <link> 127.0.0.54" answers "Invalid DNS server address",
+//     because a link whose server is resolved's own address is a loop. They are
+//     free to bind whenever the stub listener is turned off (DNSStubListener=no,
+//     which is what everyone running dnsmasq or Pi-hole alongside it has), and
+//     the agent would then take one, get refused by resolvectl, and fall back
+//     to the hosts file without ever saying why.
+//
+// So the list starts above them. There is nothing to be gained from either.
 var candidates = []string{
-	"127.0.0.54",
-	"127.0.0.53",
 	"127.0.0.55",
 	"127.0.0.56",
 	"127.0.0.57",
+	"127.0.0.58",
+	"127.0.0.59",
 }
 
 // Port 53, always. A resolver on another port is one nothing can be pointed

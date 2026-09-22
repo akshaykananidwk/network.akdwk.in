@@ -64,11 +64,17 @@ thing that can be pointed at, misconfigured into the path of their ordinary
 browsing, or blamed when their bank's website is slow. This cannot be any of
 those.
 
-It listens on loopback — `127.0.0.54` first, because `127.0.0.53` is where
-systemd-resolved lives and taking it would break the machine's own name
-resolution. Loopback rather than the overlay address, because a resolver
-reachable from the tunnel would be one every peer could query, and the names it
-holds are the map of a customer's site.
+It listens on loopback — `127.0.0.55` first, then upward. `127.0.0.53` and
+`127.0.0.54` are systemd-resolved's own and are never taken, even when they are
+free: the first would break the machine's own name resolution, and resolved
+refuses to be *pointed* at either (`resolvectl dns <link> 127.0.0.54` answers
+"Invalid DNS server address", because a link whose server is resolved's own
+address is a loop). They become bindable whenever its stub listener is off,
+which is how every machine running dnsmasq or Pi-hole beside it is configured
+— so "it was free" is exactly the wrong reason to take one. Loopback rather
+than the overlay address, because a resolver reachable from the tunnel would be
+one every peer could query, and the names it holds are the map of a customer's
+site.
 
 The wire format is implemented directly rather than taken from a library. It is
 about a hundred lines for the one question type that matters, the project has

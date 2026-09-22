@@ -270,3 +270,23 @@ func TestTheQuestionIsEchoed(t *testing.T) {
 		t.Fatal("the transaction id was not echoed")
 	}
 }
+
+// systemd-resolved owns 127.0.0.53 and 127.0.0.54, and refuses to be pointed
+// at either: `resolvectl dns <link> 127.0.0.54` answers "Invalid DNS server
+// address". They are bindable whenever its stub listener is off, which is the
+// configuration of every machine running dnsmasq or Pi-hole beside it — so
+// "it was free" is not a reason to take one. The agent would bind it, be
+// refused by resolvectl, and silently fall back to the hosts file.
+func TestResolvedsOwnAddressesAreNeverOffered(t *testing.T) {
+	for _, reserved := range []string{"127.0.0.53", "127.0.0.54"} {
+		for _, candidate := range candidates {
+			if candidate == reserved {
+				t.Fatalf("%s is systemd-resolved's own address and must not be a candidate", reserved)
+			}
+		}
+	}
+
+	if len(candidates) < 2 {
+		t.Fatalf("one candidate is not a fallback; got %v", candidates)
+	}
+}
