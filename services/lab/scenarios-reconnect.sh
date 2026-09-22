@@ -110,13 +110,18 @@ scenario_reconnect() {
     # (d) The panel has to follow. An endpoint that still reads the old
     # address is what an administrator is looking at while they are told
     # everything is fine.
+    # Waited for, not sampled once. The endpoint reaches the panel on a
+    # heartbeat, which is slower than the data path recovering — the first
+    # version of this check read it seconds after traffic resumed and called a
+    # timing difference a defect. It is given the same budget as everything
+    # else here: a page that is still wrong 30 seconds later is wrong.
     local endpoint
-    endpoint="$(php "$LAB_DIR/lab-setup.php" endpoint "$UID_BETA" 2>/dev/null)"
+    endpoint="$(lab::wait_endpoint "$UID_BETA" 10.0.0.21 "$RECONNECT_BUDGET")"
     if [ "${endpoint%%:*}" = "10.0.0.21" ]; then
         record "reconnect/endpoint" PASS "the panel shows beta at its current address ($endpoint)"
     else
         record "reconnect/endpoint" FAIL \
-            "the panel still shows beta at $endpoint, not 10.0.0.21"
+            "the panel still shows beta at ${endpoint:-nothing}, not 10.0.0.21"
     fi
 
     assert_split_tunnel alpha "reconnect/R1"

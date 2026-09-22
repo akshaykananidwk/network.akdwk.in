@@ -352,3 +352,104 @@ func TestRefusesABindWhoseSenderDoesNotMatchTheTicket(t *testing.T) {
 		t.Fatal("the relay accepted a ticket presented by a different key")
 	}
 }
+
+// moveTo gives an agent new sockets on a different host address, which is what
+// a reboot onto another network looks like from the relay's side: the same
+// device, the same ticket, a different place.
+func (a *agent) moveTo(t *testing.T, host string) {
+	t.Helper()
+
+	_ = a.bindSock.Close()
+	_ = a.dataSock.Close()
+
+	addr := &net.UDPAddr{IP: net.ParseIP(host)}
+
+	bindSock, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		t.Skipf("cannot open a socket on %s: %v", host, err)
+	}
+	t.Cleanup(func() { _ = bindSock.Close() })
+
+	dataSock, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		t.Skipf("cannot open a second socket on %s: %v", host, err)
+	}
+	t.Cleanup(func() { _ = dataSock.Close() })
+
+	a.bindSock = bindSock
+	a.dataSock = dataSock
+}
+
+// Defect 24: two machines connected through a relay, both were rebooted, and
+// they never got back — for four minutes, until somebody gave up.
+//
+// The relay was the reason. A side's address was pinned the moment its data
+// socket taught the relay where it was, and pump() drops any packet arriving
+// from a different host. So a device that came back on a new address had
+// everything it sent silently discarded, while the other end's traffic kept
+// being forwarded to an address that was no longer anybody's. Both ends were
+// bound, both looked healthy, and not one packet could cross.
+//
+// The bind is authoritative for a move because the ticket carrying it is
+// signed by the coordinator and names both ends of the pair.
+func TestASideThatComesBackOnANewAddressIsFollowed(t *testing.T) {
+	fixture := startRelay(t)
+
+	alice := newAgent(t, [32]byte{5}, [32]byte{6}, fixture.control)
+	bob := newAgent(t, [32]byte{6}, [32]byte{5}, fixture.control)
+
+	alice.bind(t)
+	bob.bind(t)
+
+	openPath(t, alice, bob)
+
+	alice.send(t, "before")
+	bob.expect(t, "before", 2*time.Second)
+
+	// Bob reboots and comes back somewhere else.
+	bob.moveTo(t, "127.0.0.2")
+	bob.bind(t)
+
+	// Bob's own traffic must reach Alice: before the fix it was dropped by
+	// pump()'s host check and never left the relay.
+	bob.send(t, "bob-is-back")
+	alice.expect(t, "bob-is-back", 3*time.Second)
+
+	// And Alice's must reach Bob at the new address, which is the half that
+	// stayed broken: the relay kept the address it had learned.
+	alice.send(t, "welcome-back")
+	bob.expect(t, "welcome-back", 3*time.Second)
+}
+
+// The move must not be a way in. A third party that guessed the data port
+// still has no ticket, so it cannot make the relay follow it.
+func TestAMoveStillNeedsAValidTicket(t *testing.T) {
+	fixture := startRelay(t)
+
+	alice := newAgent(t, [32]byte{7}, [32]byte{8}, fixture.control)
+	bob := newAgent(t, [32]byte{8}, [32]byte{7}, fixture.control)
+
+	alice.bind(t)
+	bob.bind(t)
+	openPath(t, alice, bob)
+
+	// An impostor claiming to be Bob, from Bob's new address, with a ticket
+	// signed by nobody.
+	impostor := newAgent(t, [32]byte{8}, [32]byte{7}, fixture.control)
+	impostor.ticketBlob = append([]byte{}, impostor.ticketBlob...)
+	impostor.ticketBlob[len(impostor.ticketBlob)-1] ^= 0xff
+
+	pkt := make([]byte, disco.HeaderLen, disco.HeaderLen+len(impostor.ticketBlob))
+	disco.WriteHeader(pkt, disco.TypeRelayBind, impostor.key)
+	pkt = append(pkt, impostor.ticketBlob...)
+
+	if _, err := impostor.bindSock.WriteToUDPAddrPort(pkt, impostor.controlTo); err != nil {
+		t.Fatalf("sending the forged bind: %v", err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	// Alice's traffic still goes to the real Bob.
+	alice.send(t, "still-bob")
+	bob.expect(t, "still-bob", 2*time.Second)
+}

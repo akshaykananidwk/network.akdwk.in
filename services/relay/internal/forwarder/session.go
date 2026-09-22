@@ -104,13 +104,42 @@ func (s *Session) bind(self [32]byte, from netip.AddrPort, ports dataPorts, logf
 	}
 
 	if existing, ok := s.sides[self]; ok {
-		// Only before the data socket has taught us better. A re-bind arrives
-		// on the control flow, and under a symmetric NAT that is a different
-		// mapping — storing it here would break forwarding until the next
-		// data packet re-learned it, every single time the agent re-bound.
-		if !existing.learned.Load() {
+		known := existing.addr.Load()
+		moved := known == nil || known.Addr().Unmap() != from.Addr().Unmap()
+
+		switch {
+		case moved:
+			// A different IP is a device that has moved — a laptop rebooted
+			// onto another mobile address, a router that got a new lease. The
+			// bind is authoritative here because the ticket that carried it is
+			// signed by the coordinator and names both ends of this pair, so
+			// nobody who could not already get a ticket can redirect a stream.
+			//
+			// This is defect 24, and it was fatal rather than slow. The stored
+			// address was pinned the moment the data socket learned it, and
+			// pump() drops anything arriving from a different host — so after
+			// a reboot onto a new address the relay silently discarded
+			// everything the returning device sent, and kept forwarding the
+			// other end's traffic to an address that was no longer anybody's.
+			// Both machines looked healthy, both were bound, and no packet
+			// could cross. Nothing in any log said so.
 			existing.addr.Store(&from)
+			existing.learned.Store(false)
+
+			if logf != nil {
+				logf("pair %x… : an end moved to %s; forwarding follows it", s.PairID[:6], from)
+			}
+		case !existing.learned.Load():
+			// Same host, and the data socket has not corrected us yet.
+			existing.addr.Store(&from)
+		default:
+			// Same host, port already learned from a data packet. Left alone:
+			// under a symmetric NAT the control flow is a different mapping
+			// from the data flow, and storing it would break forwarding until
+			// the next data packet re-learned it — every time the agent
+			// re-bound, which is every few seconds.
 		}
+
 		s.touch()
 
 		return existing, nil

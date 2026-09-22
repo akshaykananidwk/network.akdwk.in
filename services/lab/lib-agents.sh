@@ -131,6 +131,25 @@ lab::down_agent() {
     ip netns exec "$ns" ip link del akc0 2>/dev/null || true
 }
 
+# lab::wait_endpoint waits for the panel to show a device at an address, and
+# prints whatever it ended up showing.
+#
+# Printing the final value rather than returning a status is deliberate: a
+# failing check should say what the page actually says, because "the panel is
+# wrong" and "the panel says 10.0.0.11" send a reader to different places.
+lab::wait_endpoint() {
+    local uid=$1 want=$2 timeout=${3:-30} seen="" deadline
+    deadline=$(( $(date +%s) + timeout ))
+
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        seen="$(php "$LAB_DIR/lab-setup.php" endpoint "$uid" 2>/dev/null)"
+        [ "${seen%%:*}" = "$want" ] && break
+        sleep 2
+    done
+
+    printf '%s\n' "$seen"
+}
+
 # lab::renumber gives a namespace a new public address, the way a phone gets
 # one after a reboot.
 #
