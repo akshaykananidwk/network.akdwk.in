@@ -111,11 +111,14 @@ step "a panel with a device enrolled against it"
 php -S "127.0.0.1:$PORT" -t "$REPO" "$REPO/tests/dev-server.php" >"$WORK/panel.log" 2>&1 &
 SERVER_PID=$!
 
+# Quiet while it is starting: "connection refused" on the first try is the
+# expected state, not news, and printing it makes a clean run look broken.
 for _ in $(seq 1 20); do
-    curl -sS -o /dev/null "$PANEL/" && break
+    curl -s -o /dev/null "$PANEL/" 2>/dev/null && break
     sleep 0.5
 done
-curl -sS -o /dev/null "$PANEL/" || die "the panel never answered on $PANEL (see $WORK/panel.log)"
+curl -sS -o /dev/null "$PANEL/" 2>/dev/null \
+    || die "the panel never answered on $PANEL (see $WORK/panel.log)"
 pass "panel answering on $PANEL"
 
 php "$LAB/lab-setup.php" unthrottle >/dev/null 2>&1
