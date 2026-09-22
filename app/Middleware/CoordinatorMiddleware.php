@@ -62,6 +62,14 @@ final class CoordinatorMiddleware
             EdgeRelease::noteCoordinatorVersion($version);
         }
 
+        // Displayed, never obeyed: the key agents are given is the configured
+        // one. This is only so the panel can say the two do not match, which
+        // is otherwise a fault with no symptom but silence.
+        $publicKey = (string) ($request->header('X-Coordinator-Public-Key') ?? '');
+        if ($publicKey !== '') {
+            EdgeRelease::noteCoordinatorPublicKey($publicKey);
+        }
+
         return null;
     }
 

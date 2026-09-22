@@ -146,6 +146,13 @@ func runServe(args []string) error {
 		return err
 	}
 
+	// Tell the panel which key this coordinator actually holds. The panel
+	// hands its stored key to every agent, and an announcement sealed to the
+	// wrong one is unopenable — which a public socket must answer with
+	// silence, so the failure is total and writes nothing anywhere. The panel
+	// holds both halves and can say so, once it is told.
+	panelClient.Announce(srv.PublicKeyBase64())
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

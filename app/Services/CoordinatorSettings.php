@@ -246,6 +246,21 @@ final class CoordinatorSettings
                 . 'other without help.';
         }
 
+        // The key the coordinator says it is running, against the key this
+        // panel hands to agents. When they differ nothing works and nothing
+        // is logged: an agent seals its announcement to the key it is given,
+        // the coordinator cannot open it, and dropping an unopenable packet
+        // in silence is exactly right for a socket on the public internet.
+        // The panel is the only place both halves are visible.
+        $reported = EdgeRelease::coordinatorPublicKey();
+        if ($reported !== '' && (string) $current['public_key'] !== ''
+            && !hash_equals($reported, (string) $current['public_key'])) {
+            $problems[] = 'The public key set here is not the one the coordinator is running. '
+                . 'Agents seal their announcements to the key this panel gives them, so none of '
+                . 'them can be read and nothing will connect — with nothing in any log to say so. '
+                . 'The running key is ' . $reported . '.';
+        }
+
         if ((string) $current['shared_secret'] === '') {
             $problems[] = 'No shared secret is set, so the coordinator cannot authenticate to this panel.';
         }

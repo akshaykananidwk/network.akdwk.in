@@ -22,9 +22,10 @@ import (
 
 // Client calls the panel's coordinator endpoints.
 type Client struct {
-	baseURL string
-	secret  []byte
-	http    *http.Client
+	baseURL   string
+	secret    []byte
+	publicKey string
+	http      *http.Client
 }
 
 // New builds a Client. The secret is the one both halves were installed with.
@@ -42,6 +43,20 @@ func New(baseURL, sharedSecret string) (*Client, error) {
 		secret:  []byte(sharedSecret),
 		http:    &http.Client{Timeout: 15 * time.Second},
 	}, nil
+}
+
+// Announce sets the public key this coordinator is actually running, which is
+// reported to the panel on every call.
+//
+// The panel hands this key to every agent, and an agent seals its
+// announcement to whatever it is given. If the two are not the same key, the
+// coordinator cannot open a single announcement — and answering an unopenable
+// packet is exactly what a socket on the public internet must not do, so the
+// failure is total and completely silent. Nothing in any log on either side
+// says anything at all. The panel can see it, because it has both halves, and
+// only if the coordinator tells it which one it holds.
+func (c *Client) Announce(publicKey string) {
+	c.publicKey = publicKey
 }
 
 // VerifyResult is the panel's answer about one device.
@@ -161,6 +176,12 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 	// Not signed, and it does not need to be: nothing is decided on it, it is
 	// only displayed.
 	req.Header.Set("X-Coordinator-Version", Version)
+	// Likewise displayed rather than trusted — and recorded by the panel only
+	// after the signature above checks out, so it is not something an
+	// unauthenticated caller can write.
+	if c.publicKey != "" {
+		req.Header.Set("X-Coordinator-Public-Key", c.publicKey)
+	}
 	req.Header.Set("X-Coordinator-Timestamp", timestamp)
 	req.Header.Set("X-Coordinator-Signature", signature)
 

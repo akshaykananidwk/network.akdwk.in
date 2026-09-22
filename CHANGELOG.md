@@ -26,10 +26,26 @@ proxied to the coordinator as ordinary UDP from a socket per agent, so the
 coordinator needs no knowledge of it at all; data frames go through the same
 session machinery a UDP-bound pair uses. A bind over the fallback presents the
 same coordinator-signed ticket and is refused on the same grounds — this is a
-way around the customer's firewall, not around authorisation. `install-edge.sh`
-and `upgrade-edge.sh` configure Apache for it automatically, choosing between
-`mod_proxy_wstunnel` and `mod_proxy_http`'s `upgrade=websocket` by the Apache
-version, and verifying the module is loaded rather than assuming it.
+way around the customer's firewall, not around authorisation.
+
+Apache is asked to proxy it, and that is the one part of this release that
+touches a machine somebody else's websites are on. So it is opt-in and it is
+narrow. `upgrade-edge.sh --configure-apache`, run by a person at a terminal,
+is the only thing that will do it: the hourly timer reports "not configured
+yet" and stops, and refuses even when handed the flag. It finds the TLS
+virtual host whose own `ServerName` is the panel's domain — by parsing the
+virtual host blocks, so a commented-out directive is not configuration and a
+neighbouring site parking the domain as a `ServerAlias` is not a match — and
+writes three lines into that block and nothing else. It prints the file, the
+block and the lines and waits for a yes. Every `ServerName` on the machine is
+asked for `/` and for `/fallback/health`, over TLS and over port 80, before
+and after: the panel must answer the fallback over TLS and no one else must,
+nobody's status may change, and any difference rolls the whole edit back from
+timestamped copies and fails. `deploy/remove-apache-fallback.sh` undoes it,
+from any file on the machine that carries the block, with the same probe on
+both sides. The module choice is still made by the Apache version —
+`mod_proxy_wstunnel` or `mod_proxy_http`'s `upgrade=websocket` — and verified
+loaded rather than assumed.
 
 The agent opens it after two unanswered announcements over four seconds, or as
 soon as its own sends start being refused, and keeps sending on UDP the whole

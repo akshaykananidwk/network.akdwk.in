@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace Tests;
 
 use App\Core\Crypto;
+use App\Models\Setting;
 use App\Core\Request;
 use App\Services\CoordinatorSettings;
+use App\Services\EdgeRelease;
 use App\Updater\PathGuard;
 
 /**
@@ -54,6 +56,42 @@ final class ProductionDefectTests
     private static function httpsFallback(): void
     {
         TestCase::group('1.9.6 — the HTTPS fallback is configured and published');
+
+        // Put back whatever this database held, because these rows outrank
+        // config/config.php by design and this suite is not the only thing
+        // that reads them. It used to leave a fixture coordinator behind — a
+        // public key of 32 asterisks — and the networking lab, which points
+        // the panel at a real coordinator through config/config.local.php,
+        // then handed every agent that fixture key. Announcements sealed to a
+        // key nobody holds are dropped in silence, so thirty-two scenarios
+        // failed with nothing in any log to say why.
+        $before = self::storedCoordinatorSettings();
+
+        try {
+            self::httpsFallbackChecks();
+        } finally {
+            foreach ($before as $key => $value) {
+                Setting::set('coordinator.' . $key, $value, null);
+            }
+            Setting::flushCache();
+        }
+    }
+
+    /** The coordinator rows this suite overwrites, exactly as they are stored. */
+    private static function storedCoordinatorSettings(): array
+    {
+        $keys = ['host', 'public_host', 'port', 'public_key', 'fallback_url'];
+
+        $stored = [];
+        foreach ($keys as $key) {
+            $stored[$key] = (string) (Setting::get('coordinator.' . $key, null, '') ?? '');
+        }
+
+        return $stored;
+    }
+
+    private static function httpsFallbackChecks(): void
+    {
 
         // Derived from the panel's own address, because a customer who has to
         // be told a second URL is a customer who will get it wrong.
@@ -194,6 +232,71 @@ final class ProductionDefectTests
         $view = (string) @file_get_contents(APP_ROOT . '/app/Views/partials/connection.php');
         TestCase::assertContains('relay_https', $view, 'the device list can show the HTTPS path');
         TestCase::assertContains('relay-https', $view, 'and names it the way the agent reports it');
+
+        self::coordinatorKeyMismatchIsReported();
+    }
+
+    /**
+     * The one fault in this product with no symptom at all.
+     *
+     * An agent seals its announcement to the public key the panel hands it.
+     * If that is not the key the running coordinator holds, the coordinator
+     * cannot open a single one — and dropping an unopenable packet without a
+     * word is exactly what a socket on the public internet must do, so there
+     * is nothing in any log on either side. Every device is configured,
+     * connected to the panel, reporting healthy, and mute.
+     *
+     * It happened here: the PHP suite left a fixture coordinator in the
+     * settings table, those rows outrank the configuration file by design, and
+     * the next lab run handed thirty-two scenarios' worth of agents a public
+     * key of 32 asterisks. Nothing said so.
+     *
+     * The panel is the only place both halves are visible, so the coordinator
+     * now reports which key it is running on the authenticated call it already
+     * makes, and the settings page says when they differ.
+     */
+    private static function coordinatorKeyMismatchIsReported(): void
+    {
+        $running = base64_encode(str_repeat("\x11", 32));
+        $configured = base64_encode(str_repeat("\x22", 32));
+
+        $storedKey = (string) (Setting::get('coordinator.public_key', null, '') ?? '');
+        $storedReported = EdgeRelease::coordinatorPublicKey();
+
+        try {
+            Setting::set('coordinator.public_key', $configured, null);
+            Setting::set('edge.coordinator_public_key', $running, null);
+            Setting::flushCache();
+
+            TestCase::assertContains(
+                'not the one the coordinator is running',
+                implode(' ', CoordinatorSettings::problems()),
+                'a coordinator running a different key than the panel publishes is reported'
+            );
+
+            // And the same key is not a problem, or the warning would be noise
+            // on every healthy installation.
+            Setting::set('edge.coordinator_public_key', $configured, null);
+            Setting::flushCache();
+
+            TestCase::assertNotContains(
+                'not the one the coordinator is running',
+                implode(' ', CoordinatorSettings::problems()),
+                'and a coordinator running the published key is not'
+            );
+
+            // Only the coordinator writes it, and only 32 bytes of base64.
+            EdgeRelease::noteCoordinatorPublicKey('not a key');
+            TestCase::assertSame(
+                $configured,
+                EdgeRelease::coordinatorPublicKey(),
+                'a reported key that is not 32 bytes of base64 is ignored'
+            );
+        } finally {
+            Setting::set('coordinator.public_key', $storedKey, null);
+            Setting::set('edge.coordinator_public_key', $storedReported, null);
+            Setting::flushCache();
+        }
     }
 
     // ---------------------------------------------------------------- #1, #9

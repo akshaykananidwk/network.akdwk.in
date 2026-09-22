@@ -141,6 +141,40 @@ final class EdgeRelease
         Setting::flushCache();
     }
 
+    /**
+     * The public key the running coordinator says it holds.
+     *
+     * Recorded only after the request's signature has been checked, so this
+     * is the coordinator speaking and not a passer-by. It is never used to
+     * decide anything — agents are given the configured key, not this one —
+     * because a header that could replace the configured key would be a way
+     * to have every agent seal its announcements to somebody else's.
+     */
+    public static function noteCoordinatorPublicKey(string $publicKey): void
+    {
+        $publicKey = trim($publicKey);
+
+        // 32 bytes of base64 and nothing else. A value that is not a key is
+        // not worth storing to be displayed back to an administrator.
+        $raw = base64_decode($publicKey, true);
+        if ($publicKey === '' || $raw === false || strlen($raw) !== 32) {
+            return;
+        }
+
+        if (Setting::get(self::PREFIX . 'coordinator_public_key', null) === $publicKey) {
+            return;
+        }
+
+        Setting::set(self::PREFIX . 'coordinator_public_key', $publicKey);
+        Setting::flushCache();
+    }
+
+    /** What the coordinator last said its key was, or '' if it never has. */
+    public static function coordinatorPublicKey(): string
+    {
+        return (string) (Setting::get(self::PREFIX . 'coordinator_public_key') ?? '');
+    }
+
     /** Seconds since the coordinator last called in, or null if it never has. */
     public static function coordinatorSeenSecondsAgo(): ?int
     {

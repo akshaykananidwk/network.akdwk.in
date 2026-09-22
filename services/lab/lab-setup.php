@@ -17,6 +17,8 @@ declare(strict_types=1);
  *   lab-setup.php revoke <uid>         revoke one device
  *   lab-setup.php reapprove <uid>      put a revoked device back
  *   lab-setup.php relays <host> <port>... register the lab relay fleet
+ *   lab-setup.php coordinator          clear stored coordinator settings
+ *   lab-setup.php coordinator-key      print the key agents would be given
  *   lab-setup.php unthrottle           clear the rate limiter
  *   lab-setup.php acl <net> <action> <src> <dst> [proto] [port]
  *   lab-setup.php joincode <net> <uses>  issue a code with a use limit
@@ -44,6 +46,7 @@ use App\Models\JoinCode;
 use App\Models\Network;
 use App\Models\Plan;
 use App\Models\Relay;
+use App\Models\Setting;
 use App\Models\Tenant;
 use App\Models\UsageCounter;
 use App\Services\AclService;
@@ -60,6 +63,8 @@ exit(match ($command) {
     'revoke'    => labRevoke($args[0] ?? ''),
     'reapprove' => labReapprove($args[0] ?? ''),
     'relays'    => labRelays($args),
+    'coordinator' => labCoordinator(),
+    'coordinator-key' => labCoordinatorKey(),
     'unthrottle' => labUnthrottle(),
     'acl'       => labAcl($args),
     'acl-cidr'  => labAclCidr($args),
@@ -227,6 +232,50 @@ function labRelays(array $args): int
     });
 
     printf("RELAYS=%d\n", count($ports));
+
+    return 0;
+}
+
+/**
+ * Hand the coordinator's identity back to the configuration file.
+ *
+ * CoordinatorSettings reads the settings table first and the configuration
+ * file only when a row is absent or empty — deliberately, so an administrator
+ * can correct a bad file from the panel and keep the correction across
+ * updates. The lab writes config/config.local.php, so a row left behind by
+ * anything else on this database silently outranks it.
+ *
+ * It happened. The PHP suite saves a fixture coordinator — host
+ * coordinator.example.test and a public key of 32 asterisks — and left it
+ * there. Every agent in the next lab run sealed its announcement to that key,
+ * the coordinator could not open a single one, and because an unopenable
+ * packet on a public socket is correctly answered with silence, nothing in any
+ * log said why. Thirty-two scenarios would have failed with no fault in them.
+ *
+ * Blanking the rows rather than deleting them is what CoordinatorSettings
+ * already treats as absent, and it leaves the panel's own behaviour alone.
+ */
+function labCoordinator(): int
+{
+    $keys = ['host', 'public_host', 'port', 'public_key', 'shared_secret', 'signing_key', 'fallback_url'];
+
+    TenantScope::acrossAllTenants('lab harness', static function () use ($keys): void {
+        foreach ($keys as $key) {
+            Setting::set('coordinator.' . $key, '', null);
+        }
+    });
+
+    Setting::flushCache();
+
+    printf("COORDINATOR=config\n");
+
+    return 0;
+}
+
+/** The coordinator public key the panel would hand an agent, and nothing else. */
+function labCoordinatorKey(): int
+{
+    print((string) App\Services\CoordinatorSettings::current()['public_key']);
 
     return 0;
 }

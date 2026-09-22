@@ -193,6 +193,14 @@ return [
     ],
 ];
 PHP
+    # The settings table outranks the configuration file, by design — so the
+    # file above is only authoritative once the rows are cleared. See
+    # labCoordinator() for the run this cost.
+    php "$LAB_DIR/lab-setup.php" coordinator >/dev/null \
+        || die "could not hand the coordinator settings back to the config file"
+
+    lab::assert_coordinator_key
+
     # Registered by NAME, not by address.
     #
     # This one word is the whole of defect 16. DEPLOY tells an operator to
@@ -206,6 +214,22 @@ PHP
 
     say "coordinator key generated; panel pointed at $HOST_IP:$COORD_PORT"
     say "relays registered as $RELAY_HOST (a name, not an address — see defect 16)"
+}
+
+# lab::assert_coordinator_key checks the panel agrees with the coordinator.
+#
+# An agent seals its announcement to whatever key the panel hands it. If that
+# is not the key the running coordinator holds, every announcement is opened
+# by nobody and dropped in silence — which is the correct behaviour for a
+# socket on the public internet and an unreadable fault in a drill. Ask the
+# panel what it would tell an agent, before any agent asks.
+lab::assert_coordinator_key() {
+    local published
+    published="$(php "$LAB_DIR/lab-setup.php" coordinator-key 2>/dev/null)" || true
+
+    [ "$published" = "$COORD_PUBLIC" ] || die \
+        "the panel would hand agents a coordinator key that is not this coordinator's: \
+published '$published', running '$COORD_PUBLIC'"
 }
 
 # lab::relay_hostname makes $RELAY_HOST resolve inside the agent namespaces.
