@@ -93,6 +93,32 @@ SERVICES_INSTALLED=0
 STOPPED_BECAUSE=""
 TEMP_PATHS=()
 
+# UNATTENDED is whether nobody is watching this run.
+#
+# It decides one thing and it is the important one: an unattended run never
+# edits Apache. The server this is deployed on has thirty-odd live websites on
+# the same Apache, and a timer that reaches into their web server once an hour
+# — to repair something, to re-assert something, for any reason at all — is
+# not a thing to have. First-time setup is a decision a person makes, once,
+# with the output in front of them.
+#
+# Detected two ways because both are needed. The timer unit passes
+# --unattended, which is exact; and INVOCATION_ID is set by systemd for every
+# unit it starts, which covers the window between this release landing and the
+# unit being refreshed — an hourly timer installed by 1.9.5 would otherwise
+# get one free pass at somebody's production Apache.
+UNATTENDED=0
+[ -n "${INVOCATION_ID:-}" ] && UNATTENDED=1
+
+# CONFIGURE_APACHE is unset until an option or the line below decides. Empty
+# means "decide from whether anybody is watching".
+CONFIGURE_APACHE=""
+
+# HELD counts steps deliberately not taken, which end the run as PARTIAL
+# rather than as a pass — a run that skipped the thing it was asked about must
+# not read as a run that did it.
+HELD=0
+
 pass() { RESULTS+=("PASS|$1|${2:-}"); }
 fail() { RESULTS+=("FAIL|$1|${2:-}"); FAILED=$((FAILED + 1)); }
 # info records something an operator should see that is neither a success nor
@@ -101,6 +127,10 @@ fail() { RESULTS+=("FAIL|$1|${2:-}"); FAILED=$((FAILED + 1)); }
 # like this would have shown as a failure the count knew nothing about, which
 # is a table that contradicts its own summary line.
 info() { RESULTS+=("INFO|$1|${2:-}"); }
+# hold records a step this run deliberately did not take and which somebody
+# has to take by hand. Amber like info, and unlike info it makes the verdict
+# PARTIAL, because "not done" and "not applicable" are different answers.
+hold() { RESULTS+=("INFO|$1|${2:-}"); HELD=$((HELD + 1)); }
 step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
 say()  { printf '  %s\n' "$*"; }
 
@@ -163,6 +193,22 @@ summary() {
         return 1
     fi
 
+    if [ "$HELD" -gt 0 ]; then
+        # Everything that ran, ran cleanly — and something was deliberately not
+        # run and is waiting for a person. Calling that a pass would be the
+        # false-pass class this whole script is built against, and calling it a
+        # failure would have an hourly timer reporting one for a decision
+        # nobody asked it to make.
+        #
+        # Exit 0, because nothing is broken and nothing needs undoing. The
+        # verdict line and the amber row are what carry it.
+        printf '\n  \033[33mPARTIAL\033[0m — %d step(s) clean, %d waiting for you.' \
+            "$(( ${#RESULTS[@]} - HELD ))" "$HELD"
+        printf '\n  The table above says which, and what to run.\n\n'
+
+        return 0
+    fi
+
     printf '\n  \033[32mPASS\033[0m — %d step(s), all clean.\n\n' "${#RESULTS[@]}"
 
     return 0
@@ -220,10 +266,15 @@ while [ $# -gt 0 ]; do
         --install-timer) INSTALL_TIMER=1; shift ;;
         --no-timer)      INSTALL_TIMER=0; shift ;;
         --check)         CHECK_ONLY=1; shift ;;
+        --configure-apache)    CONFIGURE_APACHE=1; shift ;;
+        --no-configure-apache) CONFIGURE_APACHE=0; shift ;;
+        # Set by the timer unit. See UNATTENDED below.
+        --unattended)    UNATTENDED=1; shift ;;
         --skip-pack)     SKIP_PACK=1; shift ;;
         --src)           SRC_DIR="${2:-}"; shift 2 ;;
         *) die "unknown option: $1
-    Valid options are --check, --skip-pack, --no-timer, --install-timer
+    Valid options are --check, --skip-pack, --no-timer, --install-timer,
+    --configure-apache, --no-configure-apache, --unattended
     and --src <path>." ;;
     esac
 done
@@ -480,7 +531,10 @@ User=root
 # not find the toolchain would fail quietly once an hour.
 Environment=PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HOME=/root
-ExecStart=$self
+# --unattended is what stops the timer editing Apache. First-time setup of the
+# proxy is a decision a person makes once, with the output in front of them:
+# this machine's web server is serving other people's websites.
+ExecStart=$self --unattended
 # A build is slow on a small VPS, and a timer unit that gives up halfway
 # through one leaves a half-installed edge.
 TimeoutStartSec=1800
@@ -807,6 +861,8 @@ step "the HTTPS fallback"
 
 # shellcheck source=lib-edge-apache.sh
 . "$SRC_DIR/deploy/lib-edge-apache.sh"
+# shellcheck source=lib-edge-vhost.sh
+. "$SRC_DIR/deploy/lib-edge-vhost.sh"
 
 if ss -ltn 2>/dev/null | grep -q '127.0.0.1:9443 '; then
     pass "relay fallback listener" "127.0.0.1:9443"
@@ -814,17 +870,42 @@ else
     fail "relay fallback listener" "nothing is bound to 127.0.0.1:9443"
 fi
 
-akconnect_apache_fallback "$SRC_DIR/deploy/apache" say
-case "$?" in
-    0) pass "Apache proxy" "/fallback → 127.0.0.1:9443" ;;
-    1) say "no Apache here; the fallback must be proxied wherever the panel is served" ;;
-    *) fail "Apache proxy" "Apache would not take the fallback configuration" ;;
-esac
+# Whether this run may edit Apache. See akconnect_may_configure_apache.
+CONFIGURE_APACHE="$(akconnect_may_configure_apache "$CONFIGURE_APACHE" "$UNATTENDED")"
 
+if akconnect_apache_configured "$PANEL"; then
+    # Already in place. Verified, never re-applied: re-asserting a
+    # configuration is still editing it, and there is nothing to repair.
+    pass "Apache proxy" "already configured for $(akconnect_panel_host "$PANEL")"
+elif [ "$CONFIGURE_APACHE" -eq 1 ]; then
+    akconnect_apache_fallback "$SRC_DIR/deploy/apache" "$PANEL" say
+    case "$?" in
+        0) pass "Apache proxy" "/fallback → 127.0.0.1:9443, on that site only" ;;
+        1) info "Apache proxy" "no Apache here; proxy it wherever the panel is served" ;;
+        3) fail "Apache proxy" "this Apache does not serve $(akconnect_panel_host "$PANEL") over TLS" ;;
+        *) fail "Apache proxy" "Apache would not take the fallback configuration" ;;
+    esac
+else
+    hold "Apache proxy" "not configured yet — run this by hand with --configure-apache"
+    say "Apache fallback not configured yet."
+    say "This run is unattended and will not edit a web server that is serving other"
+    say "sites. Run it once by hand, with the output in front of you:"
+    say ""
+    say "    sudo $SRC_DIR/deploy/upgrade-edge.sh --configure-apache"
+    say ""
+    say "Until then, devices on networks that carry no UDP cannot connect."
+fi
+
+# Reachability is only a failure when the proxy is supposed to be there. A run
+# that deliberately did not configure it has already said so once, and saying
+# it again in red would make an hourly timer report a failure for something
+# nobody asked it to do.
 if akconnect_fallback_reachable "$PANEL"; then
     pass "fallback reachable" "$PANEL/fallback/health"
-else
+elif akconnect_apache_configured "$PANEL"; then
     fail "fallback reachable" "$PANEL/fallback/health did not answer"
+else
+    info "fallback reachable" "not proxied yet, so nothing answers it"
 fi
 
 # What the running processes say about themselves, which is the only version

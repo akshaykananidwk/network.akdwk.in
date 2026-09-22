@@ -19,7 +19,7 @@ return [
         'version'         => '1.0.0',
         'env'             => 'production',   // production | staging | local
         'debug'           => false,          // NEVER true in production
-        'url'             => 'https://net.akdwk.in',
+        'url'             => 'https://network.akdwk.in',
         'domain'          => 'net.akdwk.in',
         'base_path'       => '',             // '' at the domain root, '/panel' in a subfolder
         'timezone'        => 'Asia/Kolkata',

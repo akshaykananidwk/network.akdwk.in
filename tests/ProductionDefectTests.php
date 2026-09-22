@@ -94,17 +94,96 @@ final class ProductionDefectTests
             );
         }
 
+        // The address is derived from the panel's own, and it has to BE the
+        // panel's own. The configuration this shipped with named a domain
+        // that had never existed, so the derived default was a hostname no
+        // device could reach — and a wrong host here is silent and total:
+        // every agent that needs the fallback dials a name that does not
+        // resolve, and nothing anywhere says why.
+        $panelHost = CoordinatorSettings::panelHost();
+        TestCase::assert($panelHost !== '', 'the panel knows its own hostname');
+        TestCase::assertSame(
+            'wss://' . $panelHost . CoordinatorSettings::FALLBACK_PATH,
+            CoordinatorSettings::defaultFallbackUrl(),
+            'the fallback address defaults to this panel\'s own host and the proxied path'
+        );
+
+        // And a host that is not the panel's is reported. A separate edge host
+        // is legitimate, so this is a warning rather than a refusal — but
+        // "deliberate" and "a hostname that has never existed" must not look
+        // the same from the settings page.
+        CoordinatorSettings::save([
+            'host'         => 'coordinator.example.test',
+            'port'         => 8443,
+            'public_key'   => base64_encode(str_repeat("\x2a", 32)),
+            'fallback_url' => 'wss://somewhere-else.example/fallback',
+        ]);
+
+        $problems = implode(' ', CoordinatorSettings::problems());
+        TestCase::assertContains(
+            'not on this panel',
+            $problems,
+            'a fallback address on another domain is reported'
+        );
+
+        // Put it back, so the rest of the suite sees a panel that is right.
+        CoordinatorSettings::save([
+            'host'         => 'coordinator.example.test',
+            'port'         => 8443,
+            'public_key'   => base64_encode(str_repeat("\x2a", 32)),
+            'fallback_url' => CoordinatorSettings::defaultFallbackUrl(),
+        ]);
+        TestCase::assertNotContains(
+            'not on this panel',
+            implode(' ', CoordinatorSettings::problems()),
+            'and the derived default is not reported as one'
+        );
+
         // Apache is the half of this that lives outside PHP, and both forms of
         // the configuration have to be in the release for install-edge.sh to
         // find one. See services/lab/edge-script-gate.sh for what is in them.
         foreach (
             ['akconnect-fallback.conf', 'akconnect-fallback-upgrade.conf'] as $conf
         ) {
-            TestCase::assert(
-                is_file(APP_ROOT . '/deploy/apache/' . $conf),
-                'deploy/apache/' . $conf . ' ships with the release'
+            $path = APP_ROOT . '/deploy/apache/' . $conf;
+
+            TestCase::assert(is_file($path), 'deploy/apache/' . $conf . ' ships with the release');
+
+            // No <VirtualHost> of its own. The file is included INSIDE the
+            // panel's virtual host, and a server with thirty other sites on
+            // it is the reason: a virtual host here, or a ProxyPass at server
+            // level, would publish /fallback on all of them.
+            $body = (string) @file_get_contents($path);
+            TestCase::assertNotContains(
+                '<VirtualHost',
+                $body,
+                $conf . ' declares no virtual host of its own'
+            );
+            TestCase::assertNotContains(
+                '<IfModule',
+                preg_replace('/^\s*#.*$/m', '', $body) ?? '',
+                $conf . ' does not hide a missing module behind <IfModule>'
             );
         }
+
+        // The scripts that install it must not put it anywhere an Apache
+        // reads by itself, and must not add a server-level include.
+        $lib = (string) @file_get_contents(APP_ROOT . '/deploy/lib-edge-apache.sh');
+
+        // Directives only. The file explains in a comment why a2enconf is not
+        // used — enabling a configuration that way is server-wide — and a
+        // check that read the comments would fail on the sentence saying so.
+        $code = (string) preg_replace('/^\s*#.*$/m', '', $lib);
+        TestCase::assertNotContains(
+            'a2enconf',
+            $code,
+            'nothing enables the configuration server-wide'
+        );
+        TestCase::assertContains(
+            '/etc/akconnect/apache/',
+            $lib,
+            'the configuration lives outside every directory Apache includes automatically'
+        );
 
         // And the panel has to be able to store what a device reports about
         // it, or a device on the HTTPS path shows as an ordinary relay and

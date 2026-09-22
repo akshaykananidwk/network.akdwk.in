@@ -998,38 +998,76 @@ else
         "a new flag would never reach an existing installation"
 fi
 
-# ------------------------------------------------ against an aaPanel layout
+# --------------------------------- against a production aaPanel layout
 #
-# The deployment this product actually has is an aaPanel site: a whole Apache
-# under /www/server that no package manager knows about, where /etc/apache2
-# does not exist, apachectl is not on the path, the configuration directory is
-# not included unless something says so, and the proxy modules are present as
-# files with their LoadModule lines commented out.
+# The machine this is deployed on is an aaPanel VPS with thirty-odd other live
+# websites on the same Apache. That is not a detail: the first version of this
+# dropped its configuration into the server-level directory and added an
+# include to httpd.conf, which works, and which also publishes /fallback on
+# every site on the box — because a ProxyPass at server level is inherited by
+# every virtual host that does not override it.
 #
-# A script that looked only for the distribution layouts would report "no
-# Apache here" on the one server where the fallback has to work, and print
-# instructions for a person to follow by hand — which is the thing this release
-# exists to stop doing. So it is driven against a stand-in for that layout,
-# here, where it can be.
+# So the fixture here is that machine: thirty other sites, each with an HTTP
+# and a TLS virtual host, plus the panel's. Every check below is about what
+# happens to the other thirty.
 
-group "the fallback configuration against an aaPanel layout"
+group "the fallback against a production aaPanel server"
 
+AA="$WORK/aapanel"
+
+# aapanel_fixture builds a stand-in for the real machine.
+#
+#   $1  where to build it
+#   $2  "ok" or "refuses" — whether apachectl -t accepts the result
 aapanel_fixture() {
-    local root=$1 syntax=${2:-ok}
+    local root=$1 syntax=${2:-ok} i
 
     rm -rf "$root"
-    mkdir -p "$root/apache/bin" "$root/apache/conf/extra" "$root/apache/modules"
+    mkdir -p "$root/apache/bin" "$root/apache/conf" "$root/apache/modules" "$root/vhost/apache"
 
     cat > "$root/apache/conf/httpd.conf" <<'CONF'
 ServerRoot "/www/server/apache"
 #LoadModule proxy_module modules/mod_proxy.so
 #LoadModule proxy_http_module modules/mod_proxy_http.so
 Listen 80
+Listen 443
+IncludeOptional /www/server/panel/vhost/apache/*.conf
 CONF
     touch "$root/apache/modules/mod_proxy.so" "$root/apache/modules/mod_proxy_http.so"
 
-    # A stand-in for apachectl: answers -v and -M from the file it is given,
-    # so uncommenting a LoadModule really does change what -M reports.
+    for i in $(seq 1 30); do
+        cat > "$root/vhost/apache/site$i.conf" <<VH
+<VirtualHost *:80>
+    ServerName site$i.example.com
+    ServerAlias www.site$i.example.com
+    DocumentRoot /www/wwwroot/site$i
+</VirtualHost>
+<VirtualHost *:443>
+    ServerName site$i.example.com
+    SSLEngine on
+    SSLCertificateFile /etc/ssl/site$i.crt
+    DocumentRoot /www/wwwroot/site$i
+</VirtualHost>
+VH
+    done
+
+    # The panel's own site, with the TLS block second — so a script that
+    # assumed the first virtual host in a file is the TLS one gets it wrong.
+    cat > "$root/vhost/apache/network.akdwk.in.conf" <<'VH'
+<VirtualHost *:80>
+    ServerName network.akdwk.in
+    DocumentRoot /www/wwwroot/network.akdwk.in
+    RewriteEngine on
+    RewriteRule ^(.*)$ https://network.akdwk.in$1 [R=301,L]
+</VirtualHost>
+<VirtualHost *:443>
+    ServerName network.akdwk.in
+    SSLEngine on
+    SSLCertificateFile /etc/ssl/network.akdwk.in.crt
+    DocumentRoot /www/wwwroot/network.akdwk.in
+</VirtualHost>
+VH
+
     cat > "$root/apache/bin/apachectl" <<CTL
 #!/usr/bin/env bash
 CONF="\$(dirname "\$0")/../conf/httpd.conf"
@@ -1043,89 +1081,261 @@ CTL
     chmod +x "$root/apache/bin/apachectl"
 }
 
-# run_against drives the library at a fixture and prints its exit status.
+# run_against drives the library at a fixture.
+#
+#   $1  the fixture root
+#   $2  the panel URL to configure for
+#   $3  a site to break AFTER the reload, or empty for none
 run_against() {
-    local root=$1
+    local root=$1 panel=$2 breaks=${3:-}
 
-    env FAKE_AAPANEL="$root" bash -c '
+    env FIXTURE="$root" PANEL_URL="$panel" BREAK_AFTER="$breaks" REPO="$REPO" bash -c '
         set -uo pipefail
-        . "'"$REPO"'/deploy/lib-edge-apache.sh"
-        AAPANEL_APACHE="$FAKE_AAPANEL/apache"
+        . "$REPO/deploy/lib-edge-apache.sh"
+        . "$REPO/deploy/lib-edge-vhost.sh"
+
+        AAPANEL_APACHE="$FIXTURE/apache"
+        AKCONNECT_APACHE_CONF="$FIXTURE/etc/akconnect/apache/akconnect-fallback.conf"
+        AKCONNECT_APACHE_BACKUPS="$FIXTURE/backups"
+
+        akconnect_vhost_dirs() { printf "%s\n" "$FIXTURE/vhost/apache"; }
+
+        # Stands in for curl against a real Apache. A named site starts
+        # answering 500 from the second probe onwards, which is the shape of a
+        # regression this change caused: fine before the reload, broken after.
+        probes="$FIXTURE/probe-count"
+        : > "$probes"
+        akconnect_site_probe() {
+            local out=${1:-/dev/stdout} name n
+            echo x >> "$probes"
+            n="$(wc -l < "$probes")"
+            while read -r name; do
+                if [ -n "$BREAK_AFTER" ] && [ "$n" -ge 2 ] && [ "$name" = "$BREAK_AFTER" ]; then
+                    printf "%s 500\n" "$name"
+                else
+                    printf "%s 200\n" "$name"
+                fi
+            done < <(akconnect_site_names) > "$out"
+        }
+
         systemctl() { return 1; }
-        akconnect_apache_fallback "'"$REPO"'/deploy/apache" true
+        akconnect_apache_fallback "$REPO/deploy/apache" "$PANEL_URL" true
         echo "RESULT=$?"
     ' 2>/dev/null
 }
 
-AA="$WORK/aapanel"
+PANEL_VHOST_REL="vhost/apache/network.akdwk.in.conf"
 
 aapanel_fixture "$AA"
-OUT="$(run_against "$AA")"
+cp -r "$AA/vhost/apache" "$WORK/vhost.pristine"
+cp "$AA/apache/conf/httpd.conf" "$WORK/httpd.pristine"
+OUT="$(run_against "$AA" https://network.akdwk.in)"
 
 if grep -q 'RESULT=0' <<<"$OUT"; then
-    ok "it finds aaPanel's Apache and configures it"
+    ok "it configures the panel's site on a server with 30 others"
 else
-    bad "it did not configure aaPanel's Apache" "$(tr '\n' ' ' <<<"$OUT" | cut -c1-160)"
+    bad "it did not configure the panel's site" "$(tr '\n' ' ' <<<"$OUT" | cut -c1-200)"
 fi
 
-if grep -Eq '^LoadModule proxy_module' "$AA/apache/conf/httpd.conf"; then
-    ok "and uncomments the LoadModule lines the fallback needs"
+# The requirement, stated as a check: exactly one virtual host file changed.
+CHANGED="$(diff -rq "$WORK/vhost.pristine" "$AA/vhost/apache" 2>/dev/null | wc -l)"
+if [ "$CHANGED" = "1" ] && grep -q 'AK Connect' "$AA/$PANEL_VHOST_REL"; then
+    ok "and exactly one virtual host file changed — the panel's"
 else
-    bad "the proxy modules were left commented out" "the fallback would accept nothing"
+    bad "$CHANGED virtual host file(s) changed" "only the panel's site may be touched"
 fi
 
-if [ -f "$AA/apache/conf/extra/akconnect-fallback.conf" ]; then
-    ok "and installs the proxy configuration"
+# Inside the TLS block, which in this fixture is the SECOND one in the file.
+if awk '/<VirtualHost/ { n++ } /AK Connect HTTPS fallback/ && n == 2 { found = 1 } END { exit !found }' \
+        "$AA/$PANEL_VHOST_REL"; then
+    ok "and inside the TLS virtual host, not the first one in the file"
 else
-    bad "no proxy configuration was installed"
+    bad "the fallback went into the wrong virtual host" "a wss:// path needs the TLS one"
 fi
 
-if grep -q 'IncludeOptional.*akconnect-fallback.conf' "$AA/apache/conf/httpd.conf"; then
-    ok "and makes the main configuration read it"
+# httpd.conf may gain LoadModule lines and nothing else. A ProxyPass there
+# would reach every site on the machine.
+if diff "$WORK/httpd.pristine" "$AA/apache/conf/httpd.conf" \
+        | grep -E '^[<>]' | grep -qvE '^[<>][[:space:]]*#?[[:space:]]*LoadModule'; then
+    bad "httpd.conf was changed by more than a LoadModule" \
+        "anything else there applies to every site on the server"
 else
-    bad "the configuration was installed and never included" \
-        "which looks done and does nothing — the worst of both"
+    ok "httpd.conf gained LoadModule lines and nothing else"
 fi
 
-# Twice, because install-edge.sh is safe to run again and upgrade-edge.sh runs
-# it on every upgrade.
-run_against "$AA" >/dev/null
-if [ "$(grep -c 'IncludeOptional.*akconnect-fallback.conf' "$AA/apache/conf/httpd.conf")" = "1" ]; then
-    ok "running it again changes nothing"
+# And no ProxyPass anywhere at server level.
+if grep -rqE '^[[:space:]]*ProxyPass' "$AA/apache/conf/httpd.conf"; then
+    bad "a ProxyPass was written into httpd.conf" "it would be inherited by all 30 sites"
 else
-    bad "a second run duplicated the include" "every upgrade would add another"
+    ok "no proxy directive is at server level"
 fi
 
-# And the case that matters most: Apache refuses. The panel is served by that
-# same Apache, so a configuration it will not take must leave nothing behind.
+# Our own configuration file must not live anywhere an Apache reads by itself.
+CONF_PATH="$(grep -oE '/[^[:space:]]*akconnect-fallback\.conf' "$AA/$PANEL_VHOST_REL" | head -1)"
+case "$CONF_PATH" in
+    */etc/httpd/conf.d/*|*/conf-enabled/*|*/conf.d/*)
+        bad "the configuration lives in an automatically included directory" "$CONF_PATH" ;;
+    "")
+        bad "the virtual host does not name a configuration file" ;;
+    *)
+        ok "the configuration lives where nothing includes it automatically" ;;
+esac
+
+# Twice, because install-edge.sh is safe to run again.
+run_against "$AA" https://network.akdwk.in >/dev/null
+if [ "$(grep -c 'BEGIN AK Connect' "$AA/$PANEL_VHOST_REL")" = "1" ]; then
+    ok "running it again leaves one block, not two"
+else
+    bad "a second run duplicated the block" "every run would add another"
+fi
+
+# Apache refuses. Everything goes back, byte for byte.
 aapanel_fixture "$AA" refuses
+cp "$AA/$PANEL_VHOST_REL" "$WORK/panel.before"
 cp "$AA/apache/conf/httpd.conf" "$WORK/httpd.before"
-OUT="$(run_against "$AA")"
+OUT="$(run_against "$AA" https://network.akdwk.in)"
 
 if grep -q 'RESULT=2' <<<"$OUT"; then
     ok "a configuration Apache refuses is reported as a failure"
 else
-    bad "Apache refused the configuration and the script said it worked" \
+    bad "Apache refused and the script said it worked" "$(tr '\n' ' ' <<<"$OUT" | cut -c1-160)"
+fi
+
+if cmp -s "$WORK/panel.before" "$AA/$PANEL_VHOST_REL" \
+        && cmp -s "$WORK/httpd.before" "$AA/apache/conf/httpd.conf"; then
+    ok "and every file it touched is put back byte for byte"
+else
+    bad "a refused configuration left edits behind" "30 other sites are served by this Apache"
+fi
+
+# The check this whole mechanism exists for: another site's answer changes
+# after the reload, and everything goes back even though Apache was happy.
+aapanel_fixture "$AA"
+cp "$AA/$PANEL_VHOST_REL" "$WORK/panel.before"
+OUT="$(run_against "$AA" https://network.akdwk.in site7.example.com)"
+
+if grep -q 'RESULT=2' <<<"$OUT"; then
+    ok "another site answering differently afterwards fails the run"
+else
+    bad "a site broke after the reload and the run passed" \
         "$(tr '\n' ' ' <<<"$OUT" | cut -c1-160)"
 fi
 
-if cmp -s "$WORK/httpd.before" "$AA/apache/conf/httpd.conf"; then
-    ok "and the main configuration is put back byte for byte"
+if cmp -s "$WORK/panel.before" "$AA/$PANEL_VHOST_REL"; then
+    ok "and the change is rolled back although Apache accepted it"
 else
-    bad "httpd.conf was left edited after a refused configuration" \
-        "the panel is served by this Apache"
+    bad "a site broke and the change was left in place"
 fi
 
-if [ ! -f "$AA/apache/conf/extra/akconnect-fallback.conf" ]; then
-    ok "and the refused configuration is removed"
+# A site that was already broken before the change is not this change's fault,
+# and rolling back somebody's server over it would be its own kind of harm.
+aapanel_fixture "$AA"
+env FIXTURE="$AA" REPO="$REPO" bash -c '
+    set -uo pipefail
+    . "$REPO/deploy/lib-edge-apache.sh"
+    . "$REPO/deploy/lib-edge-vhost.sh"
+    AAPANEL_APACHE="$FIXTURE/apache"
+    AKCONNECT_APACHE_CONF="$FIXTURE/etc/akconnect/apache/akconnect-fallback.conf"
+    AKCONNECT_APACHE_BACKUPS="$FIXTURE/backups"
+    akconnect_vhost_dirs() { printf "%s\n" "$FIXTURE/vhost/apache"; }
+    akconnect_site_probe() {
+        local out=${1:-/dev/stdout} name
+        while read -r name; do
+            if [ "$name" = "site3.example.com" ]; then printf "%s 500\n" "$name"
+            else printf "%s 200\n" "$name"; fi
+        done < <(akconnect_site_names) > "$out"
+    }
+    systemctl() { return 1; }
+    akconnect_apache_fallback "$REPO/deploy/apache" "https://network.akdwk.in" true
+    echo "RESULT=$?"
+' 2>/dev/null | grep -q 'RESULT=0' \
+    && ok "a site that was already broken does not block the change" \
+    || bad "a site broken before the change was treated as caused by it"
+
+# Timestamped copies, kept.
+if [ -n "$(find "$AA/backups" -name '*network.akdwk.in.conf' -print -quit 2>/dev/null)" ]; then
+    ok "a timestamped copy of every edited file is kept"
 else
-    bad "a configuration Apache refused was left in place"
+    bad "no backup of the edited files was kept"
 fi
 
-if [ -z "$(find "$AA/apache/conf" -maxdepth 1 -name 'httpd.conf.akconnect-*' -print -quit)" ]; then
-    ok "and no backup file is left lying in the configuration directory"
+# The site it cannot serve, and the site it does not have.
+aapanel_fixture "$AA"
+sed -i '/SSLEngine\|SSLCertificateFile/d' "$AA/$PANEL_VHOST_REL"
+run_against "$AA" https://network.akdwk.in | grep -q 'RESULT=3' \
+    && ok "a site with no TLS virtual host is refused, not guessed at" \
+    || bad "it tried to configure a site that has no TLS virtual host"
+
+aapanel_fixture "$AA"
+run_against "$AA" https://notonthisserver.example | grep -q 'RESULT=3' \
+    && ok "a domain this Apache does not serve is refused" \
+    || bad "it edited something for a domain this server does not serve"
+
+# --------------------------------------- the timer never touches Apache
+#
+# Requirement two, and the one with the worst failure: an hourly job reaching
+# into a web server that is serving thirty other people's websites.
+
+group "the unattended timer leaves Apache alone"
+
+# shellcheck source=../../deploy/lib-edge-apache.sh
+. "$REPO/deploy/lib-edge-apache.sh"
+
+decision_is() {
+    local asked=$1 unattended=$2 want=$3 got
+    got="$(akconnect_may_configure_apache "$asked" "$unattended")"
+    [ "$got" = "$want" ]
+}
+
+if decision_is "" 1 0; then
+    ok "an unattended run with no option does NOT configure Apache"
 else
-    bad "a backup was left behind in Apache's configuration directory"
+    bad "an unattended run would configure Apache" "the hourly timer is unattended"
+fi
+
+if decision_is "" 0 1; then
+    ok "a run by hand with no option does"
+else
+    bad "a run by hand would not configure Apache" "then it could never be set up"
+fi
+
+if decision_is 1 1 1 && decision_is 1 0 1; then
+    ok "--configure-apache configures it either way, because somebody asked"
+else
+    bad "--configure-apache did not configure Apache"
+fi
+
+if decision_is 0 0 0 && decision_is 0 1 0; then
+    ok "--no-configure-apache never configures it, either way"
+else
+    bad "--no-configure-apache configured Apache anyway"
+fi
+
+# The unit has to pass the flag, and the script has to notice systemd even
+# when it does not — an hourly timer installed by an older release would
+# otherwise get one free run at somebody's production Apache.
+if grep -q 'ExecStart=.*--unattended' "$REPO/deploy/upgrade-edge.sh"; then
+    ok "the timer unit passes --unattended"
+else
+    bad "the timer unit does not pass --unattended"
+fi
+
+if grep -q 'INVOCATION_ID' "$REPO/deploy/upgrade-edge.sh"; then
+    ok "and a unit from an older release is caught by INVOCATION_ID"
+else
+    bad "an older timer unit would run as though somebody were watching"
+fi
+
+if grep -q 'hold "Apache proxy"' "$REPO/deploy/upgrade-edge.sh"; then
+    ok "an unattended run records it as waiting for a person, not as a pass"
+else
+    bad "an unattended run does not record the step it skipped"
+fi
+
+if grep -q 'PARTIAL.*step(s) clean' "$REPO/deploy/upgrade-edge.sh"; then
+    ok "and the run ends PARTIAL rather than PASS"
+else
+    bad "a run that skipped a step would report a clean pass"
 fi
 
 # ---------------------------------------------------------------- the report

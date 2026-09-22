@@ -92,6 +92,28 @@ final class CoordinatorSettings
     /** The path Apache proxies to the relay. install-edge.sh writes the same. */
     public const FALLBACK_PATH = '/fallback';
 
+    /** This panel's own hostname, from the address it is served on. */
+    public static function panelHost(): string
+    {
+        return (string) parse_url((string) Config::get('app.url', ''), PHP_URL_HOST);
+    }
+
+    /**
+     * Is this fallback address on the panel's own domain?
+     *
+     * A separate edge host is a legitimate arrangement, so this is a warning
+     * rather than a refusal — but it is the difference between a deliberate
+     * choice and a hostname that has never existed, and only one of those is
+     * worth being told about.
+     */
+    private static function fallbackMatchesPanel(string $url): bool
+    {
+        $host = (string) parse_url($url, PHP_URL_HOST);
+        $panel = self::panelHost();
+
+        return $host !== '' && $panel !== '' && strcasecmp($host, $panel) === 0;
+    }
+
     /** The address agents are told to talk to, which may differ from ours. */
     public static function agentHost(): string
     {
@@ -227,6 +249,16 @@ final class CoordinatorSettings
             $problems[] = 'No HTTPS fallback address is set. Devices on networks that pass nothing but '
                 . 'port 443 — hotel wifi, guest networks, offices that drop UDP replies — will not '
                 . 'connect at all.';
+        } elseif (!self::fallbackMatchesPanel((string) $current['fallback_url'])) {
+            // A wrong host here is silent and total: the address is published
+            // to every agent, every agent that needs it dials a name that does
+            // not resolve, and nothing anywhere says why. It happened — the
+            // shipped configuration named a domain that had never existed, so
+            // the derived default was a hostname nobody could reach.
+            $problems[] = 'The HTTPS fallback address is ' . $current['fallback_url'] . ', which is '
+                . 'not on this panel\'s own domain (' . self::panelHost() . '). That is right only '
+                . 'if a separate edge host serves it. If it is not deliberate, devices on networks '
+                . 'that block UDP will dial a name that does not answer.';
         }
 
         return $problems;

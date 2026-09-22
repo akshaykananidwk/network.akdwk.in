@@ -143,14 +143,26 @@ step "the HTTPS fallback"
 # to change their firewall.
 # shellcheck source=lib-edge-apache.sh
 . "$(dirname "$0")/lib-edge-apache.sh"
+# shellcheck source=lib-edge-vhost.sh
+. "$(dirname "$0")/lib-edge-vhost.sh"
 
-akconnect_apache_fallback "$(dirname "$0")/apache" say
+# This script is run by hand, once, by somebody installing the edge — so it
+# configures Apache. The hourly upgrade timer does not; see UNATTENDED in
+# upgrade-edge.sh. The proxy goes into the panel's own virtual host and
+# nowhere else, and every other site on the machine is asked for a status code
+# before and after.
+akconnect_apache_fallback "$(dirname "$0")/apache" "$PANEL" say
 apache_state=$?
 
 case "$apache_state" in
     0)
         if akconnect_fallback_reachable "$PANEL"; then
             say "and $PANEL/fallback/health answers, so the path works end to end"
+            say ""
+            say "In the panel, Settings → Coordinator, the HTTPS fallback address must read"
+            say "exactly:  wss://$(akconnect_panel_host "$PANEL")/fallback"
+            say "It is filled in from the panel's own address, so it should already. A"
+            say "hostname that does not resolve fails silently on every device that needs it."
         else
             say "note: $PANEL/fallback/health did not answer. If the panel is on another"
             say "      server, install this configuration there instead — the fallback has"
@@ -159,11 +171,17 @@ case "$apache_state" in
         ;;
     1)
         say "install deploy/apache/akconnect-fallback.conf on whichever machine serves"
-        say "$PANEL on 443, and point it at this server's 127.0.0.1:9443."
+        say "$PANEL on 443, inside that site's own virtual host, and point it at this"
+        say "server's 127.0.0.1:9443."
+        ;;
+    3)
+        say "this Apache does not serve $PANEL over TLS, so there is no virtual host to"
+        say "add the fallback to. Issue a certificate for the site and run this again."
         ;;
     *)
-        die "Apache is here but would not take the fallback configuration. Devices on
-    networks that block UDP will not be able to connect until it does."
+        die "Apache is here but would not take the fallback configuration, and everything
+    it touched has been put back. Devices on networks that block UDP will not be
+    able to connect until it does."
         ;;
 esac
 
@@ -185,6 +203,8 @@ cat <<NEXT
     Shared secret   $(cat "$ETC_DIR/coordinator.secret.for-panel" 2>/dev/null)
     Host            $PUBLIC_HOST
     Port            8443
+
+    HTTPS fallback  wss://$(akconnect_panel_host "$PANEL")/fallback
 
   And register the relay, under Settings → Relays:
 
