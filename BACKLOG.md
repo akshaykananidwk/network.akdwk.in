@@ -281,3 +281,50 @@ Still to do, in order:
     like the dead-socket case, but rebinding on a NEW local port.
  4. (a) Prefer a same-subnet candidate when one exists, so two machines on one
     LAN take the LAN path rather than hairpinning through the router.
+
+## Defect 30 — the service is not running after a Windows restart (1.9.5)
+
+Reported: StartType is Automatic, the service is not running after a reboot,
+and there is **no SCM event** about it. Part of the acceptance test —
+"survives a reboot" — so it ranks with defect 23.
+
+The configuration is not the fault. `winsvc_windows.go` sets
+`StartType: mgr.StartAutomatic` on both create and re-install, and the field
+report confirms Automatic. What is missing is everything around it, and the
+absence of an SCM event is the clue that says which:
+
+**1. A clean exit is never retried, and is never reported.** `Execute` returns
+`false, 0` whenever the agent's run function returns nil, and SCM reads exit
+code 0 as a graceful stop. `SetRecoveryActions` only applies to *failures*
+unless `SERVICE_CONFIG_FAILURE_ACTIONS_FLAG` is set — and it is set nowhere in
+this tree. So any path where the agent returns nil leaves the service stopped
+for good with nothing logged, which on a reboot is indistinguishable from "it
+never started". `loop()` alone has five `return nil` paths, one of them
+revocation.
+
+**2. Recovery gives up after about ninety-five seconds.** Three restart actions
+at 5s, 30s and 60s, and nothing after. An Automatic service starts very early
+in boot; if the network stack, DNS or the Wintun driver is not ready for longer
+than that, the agent fails three times and stays dead until somebody starts it
+by hand. There is no `Dependencies` on Tcpip or Dnscache and no
+`DelayedAutoStart`.
+
+**3. The agent exits on conditions it should sit through.** A networking agent
+that gives up because the panel was unreachable at boot is the wrong shape.
+This is the same lesson as the dead-socket defect: keep trying, say so, and let
+the panel show the problem.
+
+Fix, in order:
+ 1. `SetRecoveryActionsOnNonCrashFailures(true)`, so a clean stop is retried
+    like any other, and add a final restart action so recovery never runs out.
+ 2. `DelayedAutoStart` plus a dependency on the network, so the first attempt
+    is not made before there is a network to use.
+ 3. Make the run loop sit through transient failures rather than returning nil,
+    and return a non-zero exit code whenever it stops for a reason that is not
+    a requested stop — so SCM has something to log and act on.
+ 4. Log to the Event Log on start AND on every exit path, with the reason. The
+    reported symptom is the absence of any event; a service that cannot say why
+    it stopped is one nobody can support remotely.
+
+Not reproducible in this lab — there is no Windows host. Stage 16 of the field
+runbook now includes the reboot, so the acceptance test covers it.

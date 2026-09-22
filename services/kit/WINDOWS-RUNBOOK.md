@@ -835,6 +835,30 @@ reverse from PC B.
 **Expect:** replies, both ways. Direct or relayed does not matter here; the
 panel's device page says which, and either is a pass.
 
+4. **Reboot both PCs. Do nothing else.**
+
+Wait two minutes, then look at the panel and ping again, both ways.
+
+**Expect:** both back to Online, and pinging, with nothing typed on either
+machine. This is part of the acceptance test, not an extra: a device that needs
+a person to start it after every restart is not installed, it is being
+supervised.
+
+**If a machine does not come back**, this is what to collect before anything
+else — the service's own state and whether Windows recorded a reason:
+
+```powershell
+Get-Service AKConnectAgent | Format-List Name, Status, StartType
+Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'} -MaxEvents 20 |
+    Where-Object { $_.Message -like '*AKConnect*' } | Format-List TimeCreated, Id, Message
+Get-Content "$env:ProgramData\AKConnect\service.log" -Tail 40
+.\collect.ps1 -Stage 16b-reboot
+```
+
+"StartType Automatic, Status Stopped, and no Service Control Manager event at
+all" is a specific and useful answer — it is defect 30, and it means the agent
+stopped in a way Windows read as a normal shutdown.
+
 **If it fails**, this is the one thing worth collecting before anything else:
 
 ```powershell
@@ -915,5 +939,5 @@ to include them, and I check for that.
 | 13g | Two LANs both on 192.168.1.0/24, both still reachable | (in 13) |
 | 14 | Names resolve, and the machine's own DNS is untouched | 15 |
 | 15 | **The installer: one file, one code, and a clean uninstall** | 20 |
-| 16 | **Two PCs, two ISPs, double-click only — the acceptance test** | 10 |
+| 16 | **Two PCs, two ISPs, double-click only, and a reboot — the acceptance test** | 15 |
 | 17 | Self-update, and that an unsigned release is refused | 10 |
