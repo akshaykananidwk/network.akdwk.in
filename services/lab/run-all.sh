@@ -350,6 +350,11 @@ lab::coord_start
 lab::relay_start
 lab::relay_b_start
 
+# Apache's stand-in, in front of the relay's fallback listener. Started here
+# rather than with the relay, because a scenario that restarts the relay must
+# not restart this: on a real server it is Apache, and Apache stays up.
+lab::ws_proxy_start
+
 for wanted in "${WANTED[@]}"; do
     handler="${SCENARIOS[$wanted]:-}"
     [ -n "$handler" ] || die "unknown scenario: $wanted (try --list)"

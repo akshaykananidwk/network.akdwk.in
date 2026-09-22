@@ -275,8 +275,6 @@ lab::relay_start() {
     sleep 1
     kill -0 "$RELAY_PID" 2>/dev/null || die "relay lab-a exited (see $LOGS/relay-a.log)"
     say "relay lab-a on :$RELAY_PORT, reachable as $HOST_IP (pid $RELAY_PID)"
-
-    lab::ws_proxy_start
 }
 
 # lab::ws_proxy_start stands in for Apache.
@@ -288,6 +286,15 @@ lab::relay_start() {
 # That is the part worth reproducing — an agent that only worked when it could
 # see the relay directly would fail on every real deployment.
 lab::ws_proxy_start() {
+    # Started once, and not from lab::relay_start.
+    #
+    # It stands in for Apache, and Apache does not restart when the relay does
+    # — which the relay-down scenario proved by restarting the relay and
+    # finding the port already held by the proxy that was still running
+    # perfectly well. Stopping any previous one first keeps it safe to call
+    # twice anyway.
+    lab::stop_pid "${WS_PROXY_PID:-}"
+
     # The wildcard address, for the same reason the coordinator uses it: each
     # scenario deletes and rebuilds the bridge that carries 10.0.0.1, and a
     # socket bound to that address would go with it.
