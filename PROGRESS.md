@@ -3,7 +3,7 @@
 What is built, what is stubbed, what is next. Kept honest — a plan that
 overstates itself is worse than no plan.
 
-Last updated: 2026-09-22 · version 1.9.5
+Last updated: 2026-09-22 · version 1.9.6
 
 ---
 
@@ -287,6 +287,56 @@ Listed so nobody discovers them the hard way.
 | SSO / SAML | Not started (Phase 6) |
 | Custom domains | Column and lookup exist; no routing or certificate automation |
 | Relay heartbeat endpoint | Model and staleness sweep exist; the relay-facing endpoint arrives with Phase 3 |
+
+---
+
+## 1.9.6 — any network a browser works on
+
+The standard for this one came from a customer laptop and was stated plainly:
+stop asking anybody to change a firewall. It has to work on every network a
+web browser works on, with nothing configured, like Tailscale and ZeroTier.
+
+**Done and proved in the lab**
+
+* **A path on TCP 443.** The relay serves a websocket endpoint behind Apache,
+  carrying both the agent's control messages and its relayed tunnel traffic.
+  The coordinator is not modified and does not know it exists: control frames
+  are proxied to it as ordinary UDP from a socket per agent. A bind over that
+  path presents the same coordinator-signed ticket and is refused on the same
+  grounds — it is a way around the customer's firewall, not around
+  authorisation.
+* **The gate that had to pass.** Alpha's router drops UDP — all of it in one
+  scenario, only the replies in the other, which is the office case exactly —
+  and the pair connects in **21 seconds against a 30-second budget**,
+  reporting `relay-https` rather than any UDP path, with the relay's own log
+  showing the binds. A third scenario lifts the block: back to `relay-udp`
+  **ten seconds later, with nothing restarted**.
+* **Apache configured automatically**, by version — `mod_proxy_wstunnel`
+  below 2.4.47, `upgrade=websocket` on `mod_proxy_http` from it — with the
+  module checked as loaded rather than assumed, because `<IfModule>` would
+  have made a missing one silent.
+* **The automatic self-update path**, which is the one that failed in the
+  field and the one nothing tested: everything before this ran `agent
+  update`, which is a person typing a command, and nobody typed a command on
+  the machine that stayed on 1.9.3. The gate now publishes a release, presses
+  the panel's own button, and waits for the binary on disk to change.
+* **What each device did about the last release**, reported on the heartbeat
+  and shown on the device page. A machine that never checked and one that
+  refused a badly signed release used to look identical from the panel.
+
+**Known gaps in this release**
+
+* The lab proves the fallback over `ws://` through a plain TCP proxy, which is
+  the production shape minus the TLS. The TLS hop is Apache's, and
+  `edge-script-gate.sh` checks the configuration rather than a handshake.
+* A relay's fallback URL is a single panel-wide setting. With more than one
+  relay in a fleet, a device on the HTTPS path connects to the one the panel
+  names, not necessarily the one its peer was offered. One relay is the
+  deployment; more than one needs the coordinator to prefer the relay a
+  fallback device is already connected to.
+* `RelayProbe` latency measurement is not diverted over the fallback, so a
+  device on it reports relays as unreachable and the coordinator picks from
+  the other end's measurements. Honest, and it costs a better choice of relay.
 
 ---
 

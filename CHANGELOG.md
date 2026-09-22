@@ -6,6 +6,77 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.6] — 2026-09-22
+
+Any network a browser works on.
+
+### Added
+
+**A path on TCP 443, for networks that carry no UDP at all.** A customer's
+laptop on an office Wi-Fi announced itself to the coordinator every five to ten
+seconds for an entire afternoon and was never once answered: the network let
+the packets out and dropped the replies. Nothing in the product could work
+around that, because everything — including asking the coordinator for help —
+needed UDP to come back, and the only honest answers were "change your
+firewall", which no customer will do, or a path on the port a browser already
+uses.
+
+The relay now serves a websocket endpoint behind Apache. Control frames are
+proxied to the coordinator as ordinary UDP from a socket per agent, so the
+coordinator needs no knowledge of it at all; data frames go through the same
+session machinery a UDP-bound pair uses. A bind over the fallback presents the
+same coordinator-signed ticket and is refused on the same grounds — this is a
+way around the customer's firewall, not around authorisation. `install-edge.sh`
+and `upgrade-edge.sh` configure Apache for it automatically, choosing between
+`mod_proxy_wstunnel` and `mod_proxy_http`'s `upgrade=websocket` by the Apache
+version, and verifying the module is loaded rather than assuming it.
+
+The agent opens it after two unanswered announcements over four seconds, or as
+soon as its own sends start being refused, and keeps sending on UDP the whole
+time it is up — which is how it finds out UDP has started working again. In the
+lab, a pair with all UDP dropped at the router connects in 21 seconds against a
+30-second budget, and returns to UDP ten seconds after the block is lifted with
+nothing restarted.
+
+**Every device reports what it did about the last release.** An all-in-one
+stayed on 1.9.3 for days after 1.9.4 was published and nobody found out:
+everything the agent does about an update it does silently, and from the panel
+a device that had never checked looked exactly like one that had refused a
+badly signed release. Both were a version number that had not moved. The device
+page now says which it is, in the agent's own words.
+
+### Fixed
+
+**The diagnostics bundle a customer sends could not see the fault.** The
+keystore strips the state directory's inherited permissions and grants only
+SYSTEM and Administrators — right for a device key, and it took the status file
+and the service log with it. The tray runs as the person at the machine, so a
+real customer's bundle arrived containing two files that said "Access is
+denied". Those two files now carry an explicit read grant for the local Users
+group; the key and the token stay administrators-only.
+
+**Firewall rules named a port.** Since 1.9.5 each device picks its own and
+moves off one a router will not carry, so a rule naming a number is one step
+from the defect that made every Windows device unreachable. The rules now name
+the program, on every profile, both protocols, both directions — which also
+covers the TCP the fallback needs and the outbound direction a managed fleet
+filters. The rule earlier versions created is removed on upgrade.
+
+**`upgrade-edge.sh` never refreshed the systemd units it ships.** A release
+whose service needs a new flag would have installed the binary and left the old
+unit behind — which 1.9.6 is exactly: the fallback is switched on by
+`--ws-listen`.
+
+**The installer announced success because its calls returned.** It now reads
+back what happened and says which situation this is — waiting for approval, the
+only machine on the network, connected only over HTTPS — and writes a
+diagnostics bundle to the Desktop, before mentioning it, on the branches where
+something is actually wrong. It also clears what a previous installation left
+behind before it starts, rather than failing in the middle on a service
+registered against a program that is gone.
+
+---
+
 ## [1.9.5] — 2026-09-22
 
 Two PCs behind one router, and a Windows program that behaves like one.

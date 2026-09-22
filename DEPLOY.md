@@ -68,11 +68,27 @@ Exactly these, and nothing else:
 | 8443 | **UDP** | The coordinator. Agents seal their announcements to it |
 | 9000 | **UDP** | The relay's control port, where agents ask for a session |
 | 51900–52400 | **UDP** | The relay's data sockets |
+| 443 | TCP | The panel — and, on `/fallback`, the path for networks that carry no UDP |
 | 22 | TCP | ssh, if it is not open already |
 
-**No TCP is needed for either service.** If your provider's firewall defaults
-to allowing outbound and blocking inbound, those four lines are the whole
-configuration.
+443 is already open, because it serves the panel. Since 1.9.6 it carries one
+more thing: `install-edge.sh` configures Apache to proxy `/fallback` to the
+relay, which listens for it on loopback. That is what makes the product work on
+a hotel network, a guest VLAN, or an office that lets UDP out and drops the
+replies — on those, everything above this line is unavailable, the coordinator
+included, so a device there cannot even ask for help. It opens an ordinary TLS
+connection to 443 instead and carries both its control messages and its relayed
+traffic over it.
+
+Check it from any machine, including a customer's:
+
+```bash
+curl https://network.akdwk.in/fallback/health
+```
+
+**Expect:** `ok` and a count of sessions. Anything else — a login page, a 404,
+a timeout — means the fallback is not reachable and devices on strict networks
+will not connect. `upgrade-edge.sh` checks the same thing on every upgrade.
 
 The data range is pinned deliberately. Left alone, the relay takes whatever
 port the kernel hands out, which on Linux means 32768–60999 — most of the
@@ -386,12 +402,17 @@ Whatever your provider gives you — a web console, `ufw`, `firewalld`. With
 ufw allow 8443/udp comment 'AKConnect coordinator'
 ufw allow 9000/udp comment 'AKConnect relay control'
 ufw allow 51900:52400/udp comment 'AKConnect relay data'
+ufw allow 443/tcp comment 'AKConnect panel and HTTPS fallback'
 ufw status numbered
 ```
 
-**Expect:** the three rules, all UDP. **If your provider also has a firewall in
-their control panel, the same three go there** — that one is in front of the
-machine and `ufw` cannot see it. This catches people out.
+**Expect:** four rules — three UDP and 443. **If your provider also has a
+firewall in their control panel, the same four go there** — that one is in
+front of the machine and `ufw` cannot see it. This catches people out.
+
+The relay's own fallback listener is on `127.0.0.1:9443` and must **not** be
+opened: Apache reaches it over loopback and terminates the TLS. Opening it
+would serve the fallback unencrypted.
 
 *I could not verify this. It is your provider's firewall.*
 

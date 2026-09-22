@@ -78,6 +78,7 @@ constraint should be visible before the code exists rather than after.
 | `github.com/vishvananda/netlink` | Linux interface and route control | **Apache 2.0** | Fine |
 | `github.com/pion/stun` | STUN for reflexive address discovery | **MIT** | Fine |
 | `github.com/redis/go-redis` | Coordinator presence store | **BSD 2-Clause** | Fine |
+| `github.com/coder/websocket` | The HTTPS fallback on TCP 443 — agent and relay | **ISC** | Fine |
 
 ### What is deliberately excluded
 
@@ -91,6 +92,16 @@ constraint should be visible before the code exists rather than after.
 * **Tailscale's client.** Likewise: a fine product, and not ours to reuse.
 
 WireGuard is a registered trademark of Jason A. Donenfeld. This project uses
+`github.com/coder/websocket` is ISC, which is the two-clause permissive form —
+"permission to use, copy, modify, and distribute this software for any purpose
+with or without fee", with no copyleft and no attribution requirement beyond
+keeping the notice. Some references describe it as MIT; the licence file in the
+module says otherwise, and this table follows the file. It was chosen over the
+alternatives on that basis and on one other: the fallback carries one datagram
+per websocket message, so the library's guarantee that every method except
+`Read` is safe to call concurrently is what lets one connection carry every
+session a device has without a lock of our own around it.
+
 the WireGuard protocol via the MIT-licensed `wireguard-go`; it is not
 endorsed by or affiliated with the WireGuard project, and the trademark is not
 used in branding.

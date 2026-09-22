@@ -364,11 +364,22 @@ lab::wait_tunnel() {
 }
 
 # wait_path blocks until ns reports the wanted path for its peer.
+#
+# "relay" matches either kind of relayed path — relay-udp and relay-https —
+# because a scenario that asks for it is asking whether the pair had to go
+# through our servers, not which transport carried it there. A scenario that
+# cares about the transport names it exactly, and the fallback drills do.
 lab::wait_path() {
-    local ns=$1 want=$2 timeout=${3:-45} deadline
+    local ns=$1 want=$2 timeout=${3:-45} deadline now
     deadline=$(( $(date +%s) + timeout ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        [ "$(lab::path "$ns")" = "$want" ] && return 0
+        now="$(lab::path "$ns")"
+        if [ "$now" = "$want" ]; then
+            return 0
+        fi
+        if [ "$want" = "relay" ] && [ "${now#relay}" != "$now" ]; then
+            return 0
+        fi
         sleep 1
     done
     return 1
