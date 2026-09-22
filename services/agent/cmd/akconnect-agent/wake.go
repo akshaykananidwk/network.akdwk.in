@@ -67,21 +67,28 @@ func (s *session) wake(reason string) {
 
 	s.logf("%s; re-establishing the connection", reason)
 
-	if s.tun != nil {
-		if err := s.tun.Rebind(); err != nil {
-			// Worth saying and not worth stopping for: the announcement below
-			// may still get out, and if it does not, noteSendFailure owns the
-			// socket from there.
-			s.logf("reopening the socket after %s failed: %v", reason, err)
-		}
-	}
-
 	if s.discovery == nil {
 		return
 	}
 
-	// A hello, not a ping. A ping refreshes an entry the coordinator already
-	// has, and what has just changed is the address that entry holds.
+	// A hello, not a ping, and NOT a rebind.
+	//
+	// A ping refreshes an entry the coordinator already has, and what has just
+	// changed is the address that entry holds — so it has to be a hello.
+	//
+	// The socket is deliberately left alone. Reopening it throws away the NAT
+	// mapping the router is holding for this device, which every peer is
+	// currently sending to, and costs a fresh hole punch with every one of
+	// them. The lab showed exactly that: a scenario that adds an unrelated
+	// network interface — which is what docking a laptop, starting a virtual
+	// machine or another VPN client looks like from here — made the agent
+	// rebind, and the pair that had been talking went quiet until they had
+	// punched again.
+	//
+	// If the socket really is dead, which is the ordinary case after a
+	// resume, this announcement fails to send and noteSendFailure owns it
+	// from there: three failures, five seconds apart, then a rebind for the
+	// reason a rebind is for.
 	s.discovery.Rehello()
 }
 

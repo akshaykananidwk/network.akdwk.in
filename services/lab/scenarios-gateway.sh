@@ -177,13 +177,16 @@ scenario_gateway_clash() {
     # The overlay itself must still work. Refusing one route is not a reason to
     # lose the network.
     #
-    # Given a window rather than three pings. Refusing a route makes the agent
-    # re-apply its configuration, which briefly takes the interface down and
-    # back up, and whether that overlaps a six-second ping is a coin toss — it
-    # came up tails once in a full gate run and passed on its own immediately
-    # afterwards. The claim being tested is that the overlay survives the
-    # refusal, not that the first packet after it gets through; fifteen seconds
-    # is still far inside what a customer would notice.
+    # Given a window rather than three pings, because the claim being tested is
+    # that the overlay survives a refused route, not that the first packet
+    # after it gets through.
+    #
+    # The window was not what fixed this. The scenario adds an interface to
+    # alpha to create the clash, the agent's address watcher saw a network
+    # change and reopened its socket, and reopening it threw away the NAT
+    # mapping every peer was sending to. Fifteen seconds was not enough for
+    # the re-punch; the fix was for the agent to stop rebinding when the only
+    # news is a new adapter. See cmd/akconnect-agent/wake.go.
     if lab::wait_tunnel alpha "$BETA_IP" 15; then
         record "clash/overlay" PASS "the overlay still carries traffic after the refusal"
     else
