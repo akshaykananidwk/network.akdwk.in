@@ -96,6 +96,11 @@ final class EdgeRelease
             return;
         }
 
+        // Always, whether or not the version moved: this is the only evidence
+        // the panel has that the coordinator is alive, and it is throttled so
+        // a busy coordinator does not rewrite the row on every call.
+        self::noteCoordinatorSeen();
+
         if (Setting::get(self::PREFIX . 'coordinator_version', null) === $version) {
             // Every verify call carries this header; only a change is worth a
             // write, or a busy coordinator would rewrite the same row forever.
@@ -105,6 +110,46 @@ final class EdgeRelease
         Setting::set(self::PREFIX . 'coordinator_version', $version);
         Setting::set(self::PREFIX . 'reported_at', gmdate('Y-m-d H:i:s'));
         Setting::flushCache();
+    }
+
+    /**
+     * When the coordinator last called in.
+     *
+     * Defect 31: the update health check probed the coordinator with
+     * fsockopen(), which is TCP, and the coordinator listens on UDP only — one
+     * net.ListenUDP and no TCP anywhere. So it answered "Connection refused"
+     * on every update against a perfectly healthy edge, and taught an operator
+     * to skim past a warning line.
+     *
+     * It was also the wrong question. The panel deliberately has no way to
+     * reach into the edge — that is why deploy/upgrade-edge.sh exists instead
+     * of the panel restarting services. What the panel does have is the
+     * coordinator calling it, signed, several times a minute. That is the
+     * signal, so that is what is recorded here and checked there.
+     */
+    public static function noteCoordinatorSeen(): void
+    {
+        $last = (string) (Setting::get(self::PREFIX . 'coordinator_seen_at', '') ?? '');
+
+        // A minute's resolution is plenty to answer "is it alive" and keeps
+        // this to one write a minute however busy the edge is.
+        if ($last !== '' && (time() - (int) strtotime($last . ' UTC')) < 60) {
+            return;
+        }
+
+        Setting::set(self::PREFIX . 'coordinator_seen_at', gmdate('Y-m-d H:i:s'));
+        Setting::flushCache();
+    }
+
+    /** Seconds since the coordinator last called in, or null if it never has. */
+    public static function coordinatorSeenSecondsAgo(): ?int
+    {
+        $last = (string) (Setting::get(self::PREFIX . 'coordinator_seen_at', '') ?? '');
+        if ($last === '') {
+            return null;
+        }
+
+        return max(0, time() - (int) strtotime($last . ' UTC'));
     }
 
     /**

@@ -29,7 +29,7 @@ teardown() {
     # natgw-alpha and cgnat-alpha are the two layers the CGNAT topology adds.
     # A namespace left behind makes the next "ip netns add" fail, and the
     # scenario then blames the product for a lab that did not clean up.
-    for ns in alpha beta natgw-a natgw-b natgw-alpha cgnat-alpha natgw-s nvr office; do
+    for ns in alpha beta gamma natgw-a natgw-b natgw-alpha cgnat-alpha natgw-s nvr office; do
         ip netns del "$ns" 2>/dev/null || true
     done
     ip link del "$BRIDGE" 2>/dev/null || true
@@ -45,7 +45,8 @@ teardown() {
                 veth-alpha veth-beta wan-natgw-a wan-natgw-b \
                 lan-natgw-a lan-natgw-b lan-beta veth-nvr lan-alpha veth-office \
                 lan-local lan-local-far lan-office lan-office-far \
-                wan-natgw-s br-natgw-s lan-natgw-s lan-shared; do
+                wan-natgw-s br-natgw-s lan-natgw-s lan-shared \
+                veth-gamma lan-gamma; do
         ip link del "$link" 2>/dev/null || true
     done
 
@@ -527,13 +528,37 @@ build_shared() {
         -o wan-natgw-s -j MASQUERADE
 
     if [ "$stale" = "forward" ]; then
-        # A forward of :51820 to the FIRST machine, of the kind a router keeps
-        # from an old UPnP request or a hand-made rule. Inbound replies meant
-        # for the other machine are delivered here instead.
+        # A STATIC map of :51820, which is what the field router did and what a
+        # plain DNAT cannot model.
+        #
+        # The first version of this used an ordinary DNAT and the scenario
+        # passed on the defective code: Linux answers an established flow from
+        # conntrack, so the forward never applied to the replies and both
+        # devices worked. A drill that passes on the defect is worth nothing.
+        #
+        # NOTRACK makes the translation stateless, which is how a consumer
+        # router's port-forward actually behaves: traffic on :51820 belongs to
+        # whichever machine the router says owns it, whoever sent it. Both LAN
+        # machines are pinned to source port 51820 on the way out, and
+        # everything coming back to :51820 goes to alpha. A device that assumes
+        # it owns a fixed port is then broken exactly as the laptop was.
+        ip netns exec natgw-s iptables -t raw -A PREROUTING -i wan-natgw-s \
+            -p udp --dport 51820 -j CT --notrack
+        ip netns exec natgw-s iptables -t raw -A PREROUTING -i lan-natgw-s \
+            -p udp --sport 51820 -j CT --notrack
+
+        ip netns exec natgw-s iptables -t nat -A POSTROUTING -s 192.168.30.0/24 \
+            -o wan-natgw-s -p udp --sport 51820 -j SNAT --to-source 10.0.0.30:51820
         ip netns exec natgw-s iptables -t nat -A PREROUTING -d 10.0.0.30 \
             -p udp --dport 51820 -i wan-natgw-s -j DNAT --to-destination 192.168.30.2:51820
-        note "a stale forward sends public :51820 to alpha, whoever it was meant for"
+
+        note "public :51820 is statically owned by alpha; anything else sent from :51820 is lost"
     fi
+
+    # And a third machine behind a router of its own, because "two PCs at one
+    # site talk to each other" and "they both talk to the branch office" are
+    # different claims and a fix for the first can break the second.
+    build_nat_side beta natgw-b 11 192.168.20 cone
 
     note "alpha 192.168.30.2 and gamma 192.168.30.3 share one router at 10.0.0.30"
 }

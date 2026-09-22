@@ -140,9 +140,17 @@ func (h *handler) Execute(args []string, r <-chan svc.ChangeRequest, s chan<- sv
 				return false, 1
 			}
 
+			// A stop nobody asked for, with no error to report. It still
+			// gets an event and a non-zero code: exit 0 means "graceful" to
+			// the SCM, and a graceful stop is not retried and not remarked
+			// upon — which is precisely how a device came back from a reboot
+			// disconnected with nothing anywhere to say why (defect 30).
+			h.log(eventlog.Warning, "AKConnect agent stopped on its own, without being asked. "+
+				"This device is now disconnected and Windows will restart the service. "+
+				"\r\nFull output: "+state.ServiceLogPath())
 			s <- svc.Status{State: svc.Stopped}
 
-			return false, 0
+			return false, 2
 		}
 	}
 }
@@ -199,21 +207,20 @@ func Install() error {
 		Description:  Description,
 		StartType:    mgr.StartAutomatic,
 		ErrorControl: mgr.ErrorNormal,
+		// Delayed, and after the network. An Automatic service starts very
+		// early in boot: defect 30 was a machine that came back from a restart
+		// with the service stopped and no Service Control Manager event at
+		// all, and starting before there is a network to use is how that
+		// begins. Tcpip and Dnscache are what the agent actually needs.
+		DelayedAutoStart: true,
+		Dependencies:     []string{"Tcpip", "Dnscache"},
 	}, "service", "run")
 	if err != nil {
 		return fmt.Errorf("creating the service: %w", err)
 	}
 	defer s.Close()
 
-	// Restart on failure rather than leaving a device silently disconnected.
-	if err := s.SetRecoveryActions([]mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 60 * time.Second},
-	}, 86400); err != nil {
-		// Worth reporting, not worth failing the install over.
-		fmt.Fprintf(os.Stderr, "  warning: could not set recovery actions: %v\n", err)
-	}
+	configureRecovery(s)
 
 	if err := eventlog.InstallAsEventCreate(Name, eventlog.Error|eventlog.Warning|eventlog.Info); err != nil {
 		fmt.Fprintf(os.Stderr, "  warning: could not register the event log source: %v\n", err)
@@ -239,18 +246,14 @@ func reinstallOver(s *mgr.Service, exe string) error {
 	cfg.Description = Description
 	cfg.StartType = mgr.StartAutomatic
 	cfg.ErrorControl = mgr.ErrorNormal
+	cfg.DelayedAutoStart = true
+	cfg.Dependencies = []string{"Tcpip", "Dnscache"}
 
 	if err := s.UpdateConfig(cfg); err != nil {
 		return fmt.Errorf("updating the existing service: %w", err)
 	}
 
-	if err := s.SetRecoveryActions([]mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 60 * time.Second},
-	}, 86400); err != nil {
-		fmt.Fprintf(os.Stderr, "  warning: could not set recovery actions: %v\n", err)
-	}
+	configureRecovery(s)
 
 	if err := eventlog.InstallAsEventCreate(Name, eventlog.Error|eventlog.Warning|eventlog.Info); err != nil {
 		// Already registered is the usual reason, and it is not a problem.
@@ -344,6 +347,44 @@ func Stop() error {
 	waitForStop(s)
 
 	return nil
+}
+
+// configureRecovery makes Windows restart the agent, for ever, whatever went
+// wrong — including a stop Windows would otherwise call graceful.
+//
+// Defect 30: a machine came back from a restart with the service stopped,
+// StartType Automatic, and no Service Control Manager event at all. The
+// absence of the event is the diagnosis. Execute() returned exit code 0
+// whenever the agent's run function returned nil, SCM reads 0 as a normal
+// stop, and recovery actions apply only to FAILURES unless
+// SERVICE_CONFIG_FAILURE_ACTIONS_FLAG is set — which it was not. So the
+// service stopped, nothing was logged, nothing retried it, and the device sat
+// there disconnected until somebody noticed.
+//
+// The old actions also ran out: three restarts and then nothing, about
+// ninety-five seconds in total. A laptop whose Wi-Fi takes two minutes to
+// associate was past help before it had a network.
+//
+// So: the flag is set, and the last action repeats for ever. A device that
+// cannot reach its panel is a device that should keep trying, not one that
+// gives up quietly.
+func configureRecovery(s *mgr.Service) {
+	if err := s.SetRecoveryActions([]mgr.RecoveryAction{
+		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
+		// SCM repeats the LAST action for every subsequent failure, so this
+		// one is the "for ever" part. Two minutes is often enough for Wi-Fi.
+		{Type: mgr.ServiceRestart, Delay: 120 * time.Second},
+	}, 86400); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: could not set recovery actions: %v\n", err)
+	}
+
+	// Without this, everything above applies only when the process crashes or
+	// exits non-zero. With it, a clean stop the agent did not ask for is
+	// recovered too — which is the whole of defect 30.
+	if err := s.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: could not enable recovery on non-crash stops: %v\n", err)
+	}
 }
 
 // Status describes the installed service, for the status command.

@@ -161,6 +161,59 @@ fixture_solo() {
     BETA_IP=""
 }
 
+# fixture_shared brings up THREE devices: two behind one router, one behind
+# another.
+#
+# Every other fixture here is a pair, which is why the lab never saw defect 23:
+# two machines at one site is the commonest customer layout and no topology had
+# it. UID_GAMMA and GAMMA_IP are set alongside the usual pair.
+fixture_shared() {
+    local topology=("$@")
+
+    lab::stop_servers
+    lab::down_agents
+    "$LAB_DIR/topology.sh" "${topology[@]}" >/dev/null \
+        || die "could not build the ${topology[*]} topology"
+    lab::relay_hostname
+    rm -rf "$RUN/state"
+
+    php "$LAB_DIR/lab-setup.php" unthrottle >/dev/null 2>&1
+
+    local seed
+    seed="$(php "$LAB_DIR/lab-setup.php" seed)" || die "could not seed a tenant"
+    TENANT="$(awk -F= '/^TENANT=/ {print $2}' <<<"$seed")"
+    NETWORK="$(awk -F= '/^NETWORK=/ {print $2}' <<<"$seed")"
+    local code
+    code="$(awk -F= '/^JOIN_CODE=/ {print $2}' <<<"$seed")"
+
+    local ns
+    for ns in alpha beta gamma; do
+        lab::enrol_start "$ns" "$code"
+    done
+
+    UID_ALPHA="$(lab::enrol_uid alpha)" || die "alpha never registered"
+    UID_BETA="$(lab::enrol_uid beta)"   || die "beta never registered"
+    UID_GAMMA="$(lab::enrol_uid gamma)" || die "gamma never registered"
+
+    local approved
+    approved="$(php "$LAB_DIR/lab-setup.php" approve "$UID_ALPHA" "$UID_BETA" "$UID_GAMMA")" \
+        || die "could not approve the lab devices"
+
+    for ns in alpha beta gamma; do
+        lab::enrol_finish "$ns" || die "$ns never claimed its token"
+    done
+
+    ALPHA_IP="$(awk -F= -v k="$UID_ALPHA" '$1 == k {print $2}' <<<"$approved")"
+    BETA_IP="$(awk -F= -v k="$UID_BETA"  '$1 == k {print $2}' <<<"$approved")"
+    GAMMA_IP="$(awk -F= -v k="$UID_GAMMA" '$1 == k {print $2}' <<<"$approved")"
+    [ -n "$ALPHA_IP" ] && [ -n "$BETA_IP" ] && [ -n "$GAMMA_IP" ] \
+        || die "the panel did not allocate three overlay addresses"
+
+    for ns in alpha beta gamma; do
+        lab::up "$ns"
+    done
+}
+
 # join_late approves the waiting device and starts it, touching nothing about
 # the one already running.
 join_late() {
@@ -257,11 +310,12 @@ declare -A SCENARIOS=(
     [late-joiner]=scenario_late_joiner
     [reconnect]=scenario_reconnect
     [reconnect-both]=scenario_reconnect_both
+    [shared-router]=scenario_shared_router
     [dns]=scenario_dns
     [resolved]=scenario_resolved
     [revocation]=scenario_revocation
 )
-ORDER=(cone relay cgnat cgnat-direct late-joiner reconnect reconnect-both cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash overlay-clash gateway-tamper subnet-mapping dns resolved revocation)
+ORDER=(cone relay cgnat cgnat-direct late-joiner shared-router reconnect reconnect-both cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash overlay-clash gateway-tamper subnet-mapping dns resolved revocation)
 
 if [ "${1:-}" = "--list" ]; then
     printf '%s\n' "${ORDER[@]}"

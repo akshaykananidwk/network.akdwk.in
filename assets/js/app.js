@@ -586,6 +586,22 @@
                 return;
             }
 
+            // Deleting a device asks in a dialog, not a native confirm: see
+            // the comment in views/devices/show.php for why a phone's double
+            // tap used to be enough to lose one.
+            var deleteDevice = event.target.closest('[data-action="confirm-delete-device"]');
+            if (deleteDevice) {
+                var delDialog = $('#delete-device-dialog');
+                var delName = $('#delete-device-name');
+                if (delDialog) {
+                    if (delName) {
+                        delName.textContent = deleteDevice.getAttribute('data-device-name') || 'This device';
+                    }
+                    delDialog.showModal();
+                }
+                return;
+            }
+
             var editUser = event.target.closest('[data-action="edit-user"]');
             if (editUser) {
                 var data;

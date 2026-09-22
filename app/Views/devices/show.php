@@ -185,12 +185,33 @@ declare(strict_types=1);
             <strong>Delete</strong>
             <p class="text-muted">Revokes, then removes the device from the list entirely.</p>
         </div>
-        <form method="post" action="<?= e(url('devices/' . $device['id'] . '/delete')) ?>"
-              data-confirm="Delete <?= e($device['name']) ?>? This cannot be undone.">
+        <!-- A dialog, not window.confirm.
+             A native confirm puts its OK button under the finger that just
+             tapped Delete, so on a phone a double tap deletes a device without
+             anyone reading anything — which is how one of ours went, at 14:08.
+             This puts Cancel under that finger instead, and makes the
+             destructive button the one you have to reach for. -->
+        <button type="button" class="btn btn-danger"
+                data-action="confirm-delete-device"
+                data-device-name="<?= e($device['name']) ?>">Delete</button>
+        <form method="post" id="delete-device-form"
+              action="<?= e(url('devices/' . $device['id'] . '/delete')) ?>" hidden>
             <?= csrf_field() ?>
-            <button type="submit" class="btn btn-danger">Delete</button>
         </form>
     </div>
     <?php endif; ?>
 </section>
 <?php endif; ?>
+
+<dialog id="delete-device-dialog" class="dialog">
+    <h2>Delete this device?</h2>
+    <p>
+        <strong id="delete-device-name"></strong> will be revoked and removed from the list.
+        It loses its address and its access immediately, and it cannot be undone —
+        the machine has to be enrolled again with a join code.
+    </p>
+    <div class="form-actions">
+        <button type="button" class="btn" autofocus data-action="close-dialog">Keep it</button>
+        <button type="submit" form="delete-device-form" class="btn btn-danger">Yes, delete it</button>
+    </div>
+</dialog>

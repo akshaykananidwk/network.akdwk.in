@@ -204,3 +204,79 @@ scenario_reconnect_both() {
 
     assert_split_tunnel alpha "both/R1"
 }
+
+# Two PCs on one router, and a third somewhere else (defect 23).
+#
+# The commonest customer layout there is: a shop or a hotel with several PCs
+# behind one broadband router. It had never been built here — every NAT
+# topology in this lab put exactly one device behind each gateway — so none of
+# what it breaks could be seen.
+#
+# What it breaks, from the field: both agents bind the same fixed UDP 51820, so
+# only one of them can hold the public :51820 mapping. The laptop's hellos
+# reached the coordinator from :51820 every twenty seconds and the replies went
+# to the other PC; the laptop reported "Coordinator: not reachable" while its
+# own log said it was announcing, and the pair sat at "connecting" until one
+# machine was moved to a different ISP.
+#
+# Three assertions, because three things have to be true and the first is the
+# one nobody thinks to check:
+#
+#   shared/acked   — BOTH devices are being answered by the coordinator.
+#   shared/lan     — the two on one router reach each other, over the LAN.
+#   shared/offsite — and both still reach the machine behind another router.
+scenario_shared_router() {
+    step "two PCs behind one router, and a third elsewhere"
+
+    # `forward` adds the stale :51820 forward that made the field case fatal
+    # rather than merely fragile.
+    fixture_shared shared forward
+
+    local ns ready=1
+    for ns in alpha gamma beta; do
+        lab::wait_up "$ns" 60 || { record "shared/up" FAIL "$ns never came up"; ready=0; }
+    done
+    [ "$ready" -eq 1 ] || { lab::tail_log alpha-up 12; return; }
+    record "shared/up" PASS "all three agents are up"
+
+    # Both machines on the shared router must be getting answers. An agent that
+    # is not acked re-announces every twenty seconds for ever, which is exactly
+    # what the field log showed — so the count of hellos is the tell.
+    sleep 45
+
+    local a_hellos g_hellos
+    a_hellos="$(grep -c "hello from $UID_ALPHA" "$LOGS/coordinator.log" 2>/dev/null)" || a_hellos=0
+    g_hellos="$(grep -c "hello from $UID_GAMMA" "$LOGS/coordinator.log" 2>/dev/null)" || g_hellos=0
+
+    if [ "$a_hellos" -le 4 ] && [ "$g_hellos" -le 4 ]; then
+        record "shared/acked" PASS \
+            "both devices on the shared router are being answered (${a_hellos} and ${g_hellos} hellos)"
+    else
+        record "shared/acked" FAIL \
+            "a device is re-announcing unanswered: alpha ${a_hellos}, gamma ${g_hellos} hello(s)"
+    fi
+
+    # The pair on one router. This is the case that must not go out to the
+    # internet and back: they are on the same switch.
+    if lab::wait_tunnel alpha "$GAMMA_IP" 30; then
+        record "shared/lan" PASS "the two PCs on one router reach each other"
+    else
+        record "shared/lan" FAIL "two PCs on the same router cannot reach each other"
+        lab::tail_log alpha-up 12
+        lab::tail_log coordinator 12
+    fi
+
+    # And the branch office still works, in both directions, because a fix for
+    # the LAN case that broke the remote case would be no fix at all.
+    local offsite=0
+    lab::wait_tunnel alpha "$BETA_IP" 30 || offsite=1
+    lab::wait_tunnel gamma "$BETA_IP" 30 || offsite=1
+
+    if [ "$offsite" -eq 0 ]; then
+        record "shared/offsite" PASS "and both reach the device behind another router"
+    else
+        record "shared/offsite" FAIL "a device behind another router is unreachable from the shared site"
+    fi
+
+    assert_split_tunnel alpha "shared/R1"
+}
