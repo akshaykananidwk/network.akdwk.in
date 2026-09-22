@@ -45,5 +45,7 @@ func hideWindow(*exec.Cmd) {}
 
 func removeServiceDirectly() error { return errNotWindows }
 func removeFirewallRule() error    { return errNotWindows }
-func removeNrptRules() error       { return errNotWindows }
-func removeWintunAdapter() error   { return errNotWindows }
+
+func removeOverlayFirewallRule() error { return errNotWindows }
+func removeNrptRules() error           { return errNotWindows }
+func removeWintunAdapter() error       { return errNotWindows }

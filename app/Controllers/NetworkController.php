@@ -166,18 +166,32 @@ final class NetworkController extends Controller
 
         $ttl = (int) $request->input('ttl_minutes', '60');
         $maxUses = (int) $request->input('max_uses', '0');
+        $preApproved = (bool) $request->input('pre_approved', false);
+
+        // Pre-approval is a decision taken now, about a device that does not
+        // exist yet, so it comes with its own limits rather than inheriting
+        // the ordinary ones. An unlimited pre-approved code that lives for a
+        // week is a standing invitation, which is not what anyone means by it.
+        if ($preApproved) {
+            $maxUses = $maxUses > 0 ? min($maxUses, 25) : 1;
+            $ttl = min(max($ttl, 5), 120);
+        }
 
         $code = JoinCode::issue(
             (int) $network['tenant_id'],
             $networkId,
             Auth::id(),
             max(0, $maxUses),
-            max(5, min($ttl, 10080))
+            max(5, min($ttl, 10080)),
+            $preApproved
         );
 
         AuditService::log('network.join_code.issue', 'network', $networkId, null, [
-            'expires_at' => $code['expires_at'],
-            'max_uses'   => $maxUses,
+            'expires_at'   => $code['expires_at'],
+            'max_uses'     => $maxUses,
+            // Recorded because it is the whole of R4 for the devices that use
+            // this code: an administrator decided, here, in advance.
+            'pre_approved' => $preApproved,
         ]);
 
         if ($request->wantsJson()) {
@@ -189,7 +203,17 @@ final class NetworkController extends Controller
             ]);
         }
 
-        return $this->redirect('networks/' . $networkId, 'New join code issued.');
+        return $this->redirect(
+            'networks/' . $networkId,
+            $preApproved
+                ? sprintf(
+                    'Pre-approved join code issued: the next %s to use it joins without waiting for approval. '
+                        . 'It expires at %s and can be revoked before then.',
+                    $maxUses === 1 ? 'device' : $maxUses . ' devices',
+                    local_time($code['expires_at'])
+                )
+                : 'New join code issued.'
+        );
     }
 
     /** @param array<string,string> $params */

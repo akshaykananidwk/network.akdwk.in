@@ -149,8 +149,10 @@ func (s *session) refresh(ctx context.Context, priv wgPrivate) (int, error) {
 // through a relay. A handshake alone proves traffic flows, not how — and the
 // difference is what a customer is billed for.
 //
-// The panel accepts only "direct", "relay" and "offline", so those are the
-// only values produced here.
+// The panel accepts "direct", "relay" and "connecting". It does not accept
+// "offline" from an agent any more, and should not: a heartbeat arriving is
+// proof the device is not offline, and the panel decides that from when it
+// last heard rather than from what it was told.
 func (s *session) connectionType(peers []tunnel.PeerStatus) string {
 	cutoff := time.Now().Add(-3 * time.Minute).Unix()
 	live := false
@@ -171,7 +173,12 @@ func (s *session) connectionType(peers []tunnel.PeerStatus) string {
 
 	switch {
 	case !live:
-		return "offline"
+		// "connecting", not "offline": this process is running and talking to
+		// the panel, so the device is plainly not offline. What has not
+		// happened yet is a path to a peer, and calling that offline is what
+		// made two running machines show as red dots in the panel for an
+		// evening.
+		return "connecting"
 	case relayed:
 		// Amber if any peer is relayed: the operator needs to know some of
 		// this device's traffic is going through our servers, not that all of

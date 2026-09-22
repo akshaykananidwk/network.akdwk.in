@@ -215,9 +215,16 @@ final class AgentController
 
         $input = $request->all();
 
-        $connectionType = (string) ($input['connection_type'] ?? 'offline');
-        if (!in_array($connectionType, ['direct', 'relay', 'offline'], true)) {
-            $connectionType = 'offline';
+        // A heartbeat is proof the device is alive, so nothing it sends can
+        // mark it offline. `offline` is written by the staleness sweep alone.
+        //
+        // Agents up to 1.9.1 send "offline" to mean "no peer reached yet",
+        // which is what this column now calls `connecting` — the two machines
+        // that spent an evening showing as red dots were both running the
+        // whole time.
+        $connectionType = (string) ($input['connection_type'] ?? 'connecting');
+        if ($connectionType === 'offline' || !in_array($connectionType, ['direct', 'relay', 'connecting'], true)) {
+            $connectionType = 'connecting';
         }
 
         $rxDelta = max(0, (int) ($input['rx_delta'] ?? 0));

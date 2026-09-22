@@ -218,6 +218,17 @@ final class Device extends Model
      * Runs in the worker rather than on read so the dashboard never has to
      * compute staleness per row.
      */
+    /**
+     * How long without a heartbeat before a device is offline.
+     *
+     * One number, used by the sweep that writes the column and by the view
+     * that reads it, because two numbers would disagree and the disagreement
+     * would show as a device that is offline in the list and online on its own
+     * page. The agent heartbeats every ten seconds, so ninety is nine missed
+     * in a row.
+     */
+    public const OFFLINE_AFTER_SECONDS = 90;
+
     public static function markStaleOffline(int $staleSeconds): int
     {
         return TenantScope::acrossAllTenants('offline sweep', static fn (): int => DB::execute(
@@ -240,21 +251,29 @@ final class Device extends Model
         }
 
         $row = DB::selectOne(
+            // Online is measured from the heartbeat, not from the path. A
+            // device that is running and has not yet found a peer is online;
+            // counting it as offline is what made a working pair look dead.
             'SELECT COUNT(*) AS total,
-                    SUM(CASE WHEN connection_type <> \'offline\' THEN 1 ELSE 0 END) AS online,
+                    SUM(CASE WHEN last_seen_at IS NOT NULL
+                              AND last_seen_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL '
+                                  . self::OFFLINE_AFTER_SECONDS . ' SECOND)
+                             THEN 1 ELSE 0 END) AS online,
                     SUM(CASE WHEN connection_type = \'direct\' THEN 1 ELSE 0 END) AS direct,
                     SUM(CASE WHEN connection_type = \'relay\' THEN 1 ELSE 0 END) AS relay,
+                    SUM(CASE WHEN connection_type = \'connecting\' THEN 1 ELSE 0 END) AS connecting,
                     SUM(CASE WHEN status = \'pending\' THEN 1 ELSE 0 END) AS pending
              FROM ' . self::tableName() . ' WHERE ' . $where,
             $params
         ) ?? [];
 
         return [
-            'total'   => (int) ($row['total'] ?? 0),
-            'online'  => (int) ($row['online'] ?? 0),
-            'direct'  => (int) ($row['direct'] ?? 0),
-            'relay'   => (int) ($row['relay'] ?? 0),
-            'pending' => (int) ($row['pending'] ?? 0),
+            'total'      => (int) ($row['total'] ?? 0),
+            'online'     => (int) ($row['online'] ?? 0),
+            'direct'     => (int) ($row['direct'] ?? 0),
+            'relay'      => (int) ($row['relay'] ?? 0),
+            'connecting' => (int) ($row['connecting'] ?? 0),
+            'pending'    => (int) ($row['pending'] ?? 0),
         ];
     }
 }

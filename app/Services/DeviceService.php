@@ -42,7 +42,22 @@ final class DeviceService
             throw new ValidationException(['public_key' => 'Must be a base64-encoded 32-byte Curve25519 public key.']);
         }
 
-        $joinCode = JoinCode::redeem($code);
+        // Looked at before it is used. A device re-presenting a code it has
+        // already redeemed is the upgrade case — the installer run again over
+        // an existing install — and burning a use for it would make a
+        // single-use code refuse the very machine it had just admitted.
+        $joinCode = JoinCode::peek($code);
+
+        // A spent code still identifies its network, and that is enough *if*
+        // this key is already on it. The public-key check below is what makes
+        // this safe: a spent code admits nobody new.
+        if ($joinCode === null) {
+            $spent = JoinCode::peekIncludingSpent($code);
+            if ($spent !== null && self::keyBelongsToTenant($publicKey, (int) $spent['tenant_id'])) {
+                $joinCode = $spent;
+            }
+        }
+
         if ($joinCode === null) {
             // Deliberately vague: a valid-looking code should not be
             // distinguishable from an expired one by an enumerating client.
@@ -51,8 +66,16 @@ final class DeviceService
 
         $tenantId = (int) $joinCode['tenant_id'];
         $networkId = (int) $joinCode['network_id'];
+        $preApproved = (int) ($joinCode['pre_approved'] ?? 0) === 1;
 
-        return TenantScope::asTenant($tenantId, static function () use ($input, $publicKey, $tenantId, $networkId): array {
+        return TenantScope::asTenant($tenantId, static function () use (
+            $input,
+            $code,
+            $publicKey,
+            $tenantId,
+            $networkId,
+            $preApproved
+        ): array {
             $network = Network::find($networkId);
             if ($network === null || $network['status'] !== 'active') {
                 throw new ValidationException(['join_code' => 'That network is no longer accepting devices.']);
@@ -78,12 +101,21 @@ final class DeviceService
                     'agent_version' => $input['agent_version'] ?? $existing['agent_version'],
                 ]);
 
+                // No use consumed: this machine is already on the network and
+                // is re-presenting the code it joined with.
                 return [
                     'device_uid'  => (string) $existing['device_uid'],
                     'status'      => (string) $existing['status'],
                     'network_uid' => (string) $network['network_uid'],
                     'poll_after'  => 10,
                 ];
+            }
+
+            // A new device, so the use is claimed now — atomically, which is
+            // what stops fifty machines enrolling together from all taking the
+            // same last use.
+            if (JoinCode::redeem($code) === null) {
+                throw new ValidationException(['join_code' => 'That join code is not valid or has expired.']);
             }
 
             BillingService::assertCanAddDevice($tenantId);
@@ -110,9 +142,21 @@ final class DeviceService
                 'os'       => $input['os'] ?? null,
             ]);
 
-            // A network may opt into auto-approval; it is off by default and
-            // the choice is audited on the network, not silently here.
-            if ((int) $network['auto_approve_devices'] === 1) {
+            // Two ways a device can be admitted without a click, and both are
+            // an administrator's explicit decision recorded before the device
+            // existed — which is what keeps R4 true. Neither is a default.
+            //
+            //   - a pre-approved join code: this code, single- or
+            //     limited-use, short-lived and revocable, issued by a named
+            //     administrator who chose the option;
+            //   - the network's auto-approve setting, off by default.
+            if ($preApproved || (int) $network['auto_approve_devices'] === 1) {
+                AuditService::log('device.pre_approved', 'device', $deviceId, null, [
+                    'reason' => $preApproved
+                        ? 'the join code was issued pre-approved'
+                        : 'the network approves devices automatically',
+                ]);
+
                 self::approve($deviceId, null);
 
                 return [
@@ -130,6 +174,23 @@ final class DeviceService
                 'poll_after'  => 10,
             ];
         });
+    }
+
+    /**
+     * Is this public key already a device of this customer?
+     *
+     * Asked across tenants because an enrolling agent has no identity yet, and
+     * answered as a plain yes or no: nothing about the device is returned
+     * here, and a key belonging to another customer answers no.
+     */
+    private static function keyBelongsToTenant(string $publicKey, int $tenantId): bool
+    {
+        $device = TenantScope::acrossAllTenants(
+            're-enrolment identity check',
+            static fn (): ?array => Device::findByPublicKey($publicKey)
+        );
+
+        return $device !== null && (int) $device['tenant_id'] === $tenantId;
     }
 
     /**

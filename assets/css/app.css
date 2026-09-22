@@ -434,6 +434,9 @@ textarea { resize: vertical; font-family: var(--font-mono); font-size: .82rem; }
 .conn-direct { color: var(--success); }
 .conn-relay { color: var(--warning); }
 .conn-offline { color: var(--text-muted); }
+/* Online, heartbeating, no path to a peer yet. Not a fault and not offline. */
+.conn-connecting { color: var(--info, #3b82f6); }
+.conn-path { font-size: 0.85em; text-transform: lowercase; }
 
 .badge-dot {
     position: absolute; top: 2px; right: 2px;

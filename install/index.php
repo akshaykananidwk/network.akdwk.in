@@ -31,8 +31,25 @@ $installer = new Installer(APP_ROOT);
 
 // ---------------------------------------------------------------- lock gate
 
-if ($installer->isLocked()) {
+$evidence = $installer->installedEvidence();
+
+if ($evidence !== []) {
+    // Put the lock back before answering, so the window closes now rather
+    // than at whatever moment somebody notices it a second time.
+    $relocked = $installer->relock();
+
     http_response_code(403);
+
+    $why = '<ul><li>' . implode('</li><li>', array_map(
+        static fn (string $reason): string => htmlspecialchars($reason, ENT_QUOTES),
+        $evidence
+    )) . '</li></ul>';
+
+    $note = $relocked
+        ? '<p class="hint">install/install.lock has been restored automatically.</p>'
+        : '<p class="hint">install/install.lock could not be written — check that install/ is writable, '
+            . 'or delete the folder\'s contents by hand.</p>';
+
     render_shell('Already installed', <<<HTML
         <div class="alert alert-error">
             <span class="alert-icon">✕</span>
@@ -41,6 +58,9 @@ if ($installer->isLocked()) {
                 <p>Running the installer again could destroy live data, so it is disabled.</p>
             </div>
         </div>
+        <p>What says so:</p>
+        $why
+        $note
         <p>If you genuinely need to reinstall:</p>
         <ol class="steps">
             <li>Take a backup of your database and of <code>config/config.php</code>.</li>

@@ -22,6 +22,7 @@ import (
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/state"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/tunnel"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/wgkey"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/winenv"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/winsvc"
 )
 
@@ -92,6 +93,11 @@ type session struct {
 	dnsRoutedBy string
 	dnsNote     string
 	dnsProblem  string
+	// fwProblem is why the overlay may not be reachable inbound, when that is
+	// the case. Reported to the panel with the other problems: a tunnel that
+	// carries traffic nobody can answer looks like a working tunnel from
+	// every side except the customer's.
+	fwProblem string
 	// dnsRecords fingerprints the record set, so a device renamed in the panel
 	// reaches the hosts file rather than waiting for the zone itself to change.
 	dnsRecords string
@@ -270,6 +276,22 @@ func (s *session) applyConfig(ctx context.Context, priv wgPrivate, cfg *panel.Co
 	s.tun.SetMappings(buildMappings(cfg))
 
 	// Names last of the three, because they are built from mapped addresses.
+	// The overlay has to be reachable, not merely routed. Windows Firewall
+	// drops inbound ICMP on a new adapter by default, so two machines with a
+	// working tunnel could not ping each other until this rule existed.
+	if err := winenv.EnsureOverlayFirewall(s.tun.Name(), cfg.Network.CIDR); err != nil {
+		// Not fatal: the tunnel carries traffic either way, and a machine that
+		// cannot be pinged is better than one that is not connected. Reported
+		// so the panel can say so rather than leaving a technician guessing.
+		s.logf("firewall: %v", err)
+		s.fwProblem = err.Error()
+	} else {
+		s.fwProblem = winenv.OverlayFirewallNote()
+		if s.fwProblem != "" {
+			s.logf("firewall: %s", s.fwProblem)
+		}
+	}
+
 	s.applyNames(ctx, cfg)
 
 	if err := s.applyGateway(cfg); err != nil {

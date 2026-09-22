@@ -243,19 +243,28 @@ Two things about that line:
 crontab -u www -l | grep worker.php
 ```
 
-Then remove the installer:
+**Do not delete the `install/` folder.** An earlier version of this document
+said to, and that is how a production panel came to serve the installation
+wizard for two minutes: `rm -rf install` takes the lock file with it, and the
+next update restored `install/` from the release without the lock — because
+the lock is a protected path and updates do not write those.
 
-```bash
-rm -rf /www/wwwroot/network.akdwk.in/install
-```
+The installer locks itself. Since 1.9.2 it also refuses on the evidence of the
+system rather than on that one file: a `config/config.php`, or a database with
+an account in it, is enough, and reaching the wizard on a configured panel
+writes the lock back.
 
 **Check:**
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' https://network.akdwk.in/install/
+curl -sS https://network.akdwk.in/install/ | grep -o 'already complete'
 ```
 
-**Expect:** `404`.
+**Expect:** `403`, and `already complete`. A `200` with the word *Welcome* in
+it means an unlocked installer is live on your panel — run
+`php cli/install.php --answers=/dev/null` from the app root, which refuses and
+restores the lock, and tell me.
 
 ### 1g — Sign in
 
@@ -530,7 +539,7 @@ own means `uploads/.htaccess` is not in force — check it exists and that
 
 | What you see | Where to look |
 |---|---|
-| The panel loads but `/install` still works | `rm -rf install` was not run — 1f |
+| The panel loads but `/install` serves the wizard | 1.9.2 refuses this on its own and restores the lock. On an older release, recreate `install/install.lock` by hand — and do not delete `install/` |
 | `config/config.php` returns 200 | The root `.htaccess` is not being read. Check the document root, and that the site's `AllowOverride` is `All` — 1b |
 | Every page is HTTP 500 and the log says `php_flag` | An `.htaccess` with unguarded `php_flag`/`php_value` under PHP-FPM. 1.9.1 guards them; a hand-edited copy may not |
 | `storage/logs` files are owned by `root` | The worker cron is root's, not `www`'s — 1f |

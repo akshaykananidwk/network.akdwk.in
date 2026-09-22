@@ -77,8 +77,21 @@ if (isset($options['print-template'])) {
 
 $installer = new Installer(APP_ROOT);
 
-if ($installer->isLocked()) {
-    fwrite(STDERR, "Already installed (install/install.lock exists). Remove it and config/config.php to reinstall.\n");
+// The same evidence the browser wizard uses, and for the same reason: the
+// lock file is something an operator was once told to delete, so it cannot be
+// the only thing standing between a live panel and a reinstall.
+$evidence = $installer->installedEvidence();
+if ($evidence !== []) {
+    fwrite(STDERR, "Already installed:\n");
+    foreach ($evidence as $reason) {
+        fwrite(STDERR, '  - ' . $reason . "\n");
+    }
+    fwrite(STDERR, "Remove install/install.lock and config/config.php to reinstall — after taking a backup.\n");
+
+    if ($installer->relock()) {
+        fwrite(STDERR, "install/install.lock has been restored.\n");
+    }
+
     exit(1);
 }
 

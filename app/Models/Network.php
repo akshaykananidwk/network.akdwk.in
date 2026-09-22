@@ -76,7 +76,10 @@ final class Network extends Model
         $rows = DB::select(
             'SELECT network_id,
                     COUNT(*) AS total,
-                    SUM(CASE WHEN connection_type <> \'offline\' THEN 1 ELSE 0 END) AS online,
+                    SUM(CASE WHEN last_seen_at IS NOT NULL
+                              AND last_seen_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL '
+                                  . Device::OFFLINE_AFTER_SECONDS . ' SECOND)
+                             THEN 1 ELSE 0 END) AS online,
                     SUM(CASE WHEN status = \'pending\' THEN 1 ELSE 0 END) AS pending
              FROM ' . DB::table('devices') . '
              WHERE network_id IN (' . implode(', ', $placeholders) . ') AND deleted_at IS NULL

@@ -174,6 +174,11 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__join_codes` (
   `network_id` BIGINT UNSIGNED NOT NULL,
   `code` VARCHAR(24) NOT NULL,
   `max_uses` INT NOT NULL DEFAULT 1,
+  -- An administrator's decision, taken before the device existed: the next
+  -- machine to present this code is admitted without an approval click. R4
+  -- still holds — the decision is explicit, named, limited, short-lived and
+  -- revocable — it just happens earlier. Off unless asked for.
+  `pre_approved` TINYINT(1) NOT NULL DEFAULT 0,
   `uses` INT NOT NULL DEFAULT 0,
   `expires_at` DATETIME NOT NULL,
   `revoked_at` DATETIME NULL,
@@ -211,7 +216,11 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__devices` (
   `last_seen_at` DATETIME NULL,
   `last_endpoint` VARCHAR(64) NULL,
   `last_lan_endpoint` VARCHAR(64) NULL,
-  `connection_type` ENUM('direct','relay','offline') NOT NULL DEFAULT 'offline',
+  -- How the peers are reached, not whether this device is alive. `offline` is
+  -- written only by the staleness sweep, when the heartbeats stop; an agent
+  -- that is running and has not yet found a peer is `connecting`. Whether a
+  -- device is online is answered by last_seen_at and nothing else.
+  `connection_type` ENUM('direct','relay','connecting','offline') NOT NULL DEFAULT 'offline',
   `relay_id` BIGINT UNSIGNED NULL,
   `rx_bytes` BIGINT UNSIGNED NOT NULL DEFAULT 0,
   `tx_bytes` BIGINT UNSIGNED NOT NULL DEFAULT 0,

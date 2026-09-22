@@ -162,7 +162,20 @@ func (h *handler) log(level uint16, message string) {
 	}
 }
 
-// Install registers the service to start automatically.
+// Install registers the service to start automatically, or updates the
+// registration of one that is already there.
+//
+// Refusing when the service exists is what it used to do, and it made the
+// installer unusable for the thing customers do most: run the new installer
+// over an old install. The .exe copied its files, enrolled the device, and
+// then stopped with "AKConnectAgent is already installed; run 'service
+// uninstall' first" — an instruction requiring a command prompt, given to
+// somebody who had just been promised they would not need one, on a machine
+// that was now half-installed.
+//
+// So an existing service is reconfigured to point at the new binary and left
+// running. The identity is untouched: the keys and the enrolment live in
+// ProgramData, not in the service registration.
 func Install() error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -176,9 +189,9 @@ func Install() error {
 	defer m.Disconnect()
 
 	if existing, err := m.OpenService(Name); err == nil {
-		existing.Close()
+		defer existing.Close()
 
-		return fmt.Errorf("%s is already installed; run 'service uninstall' first", Name)
+		return reinstallOver(existing, exe)
 	}
 
 	s, err := m.CreateService(Name, exe, mgr.Config{
@@ -207,6 +220,69 @@ func Install() error {
 	}
 
 	return nil
+}
+
+// reinstallOver repoints an existing service at a new binary.
+//
+// The service is stopped only if the path actually changed, because a running
+// service holds its .exe open on Windows and cannot be overwritten in place.
+// When the path is the same — the ordinary upgrade, into the same Program
+// Files folder — it is restarted so the new binary is the one running.
+func reinstallOver(s *mgr.Service, exe string) error {
+	cfg, err := s.Config()
+	if err != nil {
+		return fmt.Errorf("reading the existing service configuration: %w", err)
+	}
+
+	cfg.BinaryPathName = fmt.Sprintf("%q service run", exe)
+	cfg.DisplayName = DisplayName
+	cfg.Description = Description
+	cfg.StartType = mgr.StartAutomatic
+	cfg.ErrorControl = mgr.ErrorNormal
+
+	if err := s.UpdateConfig(cfg); err != nil {
+		return fmt.Errorf("updating the existing service: %w", err)
+	}
+
+	if err := s.SetRecoveryActions([]mgr.RecoveryAction{
+		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 60 * time.Second},
+	}, 86400); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: could not set recovery actions: %v\n", err)
+	}
+
+	if err := eventlog.InstallAsEventCreate(Name, eventlog.Error|eventlog.Warning|eventlog.Info); err != nil {
+		// Already registered is the usual reason, and it is not a problem.
+		_ = err
+	}
+
+	// Restart so the binary that is running is the one just installed.
+	// Tolerant of a service that was not running: starting it is the goal
+	// either way.
+	_ = Stop()
+	if err := waitForStopped(20 * time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: %v\n", err)
+	}
+
+	return Start()
+}
+
+// waitForStopped blocks until the service is not running, or gives up.
+func waitForStopped(within time.Duration) error {
+	deadline := time.Now().Add(within)
+
+	for time.Now().Before(deadline) {
+		state, err := Status()
+		// Status's own words, not svc's: "installed, stopped" is what it says
+		// for a service that exists and is not running.
+		if err != nil || state == "installed, stopped" || state == "not installed" {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	return fmt.Errorf("the service did not stop within %s; the new binary may not be the one running", within)
 }
 
 // Uninstall removes the service. It stops it first, because removing a

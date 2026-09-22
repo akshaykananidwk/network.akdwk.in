@@ -183,6 +183,15 @@ func (s *session) problems() []panel.Problem {
 		out = append(out, panel.Problem{Code: "dns.not_routed", Detail: s.dnsProblem})
 	}
 
+	if s.fwProblem != "" {
+		out = append(out, panel.Problem{
+			Code: "firewall.inbound",
+			Detail: "Inbound traffic from the overlay may be blocked on this machine, so peers " +
+				"can reach it but get no answer — a ping will fail even though the tunnel is up. " +
+				s.fwProblem,
+		})
+	}
+
 	for _, prefix := range s.refused {
 		code := "route.clash"
 		detail := fmt.Sprintf(

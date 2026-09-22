@@ -43,6 +43,11 @@ func runUninstall(ui *console) error {
 	if err := removeFirewallRule(); err != nil {
 		problems = append(problems, "firewall: "+err.Error())
 	}
+	// Two rules since 1.9.2: the inbound UDP one for WireGuard, and the one
+	// that lets peers on the overlay reach this machine at all.
+	if err := removeOverlayFirewallRule(); err != nil {
+		problems = append(problems, "firewall: "+err.Error())
+	}
 
 	ui.step("Removing the DNS policy rules")
 	if err := removeNrptRules(); err != nil {

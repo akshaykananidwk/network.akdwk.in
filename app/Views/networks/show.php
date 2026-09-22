@@ -68,15 +68,23 @@ $base = url('networks/' . $network['id']);
                         ? '· ' . e((int) $join_code['max_uses'] - (int) $join_code['uses']) . ' use(s) left'
                         : '· unlimited uses until it expires' ?>
                 </p>
+                <?php if ((int) ($join_code['pre_approved'] ?? 0) === 1): ?>
+                    <p class="text-sm">
+                        <strong>Pre-approved.</strong> A device using this code joins immediately,
+                        with no approval click. That is your decision, recorded in the audit log —
+                        revoke the code below if you did not mean it.
+                    </p>
+                <?php endif; ?>
             </div>
 
             <div class="install-commands">
                 <div class="install-block">
-                    <span class="text-muted text-sm">Windows (PowerShell as administrator)</span>
-                    <div class="code-row">
-                        <code id="cmd-win"><?= e($install_windows) ?></code>
-                        <button type="button" class="btn btn-sm" data-action="copy" data-copy-target="cmd-win">Copy</button>
-                    </div>
+                    <span class="text-muted text-sm">Windows</span>
+                    <p class="text-sm">
+                        Send the customer <code>akconnect-setup.exe</code> and the code above.
+                        They double-click it, type the code, and click OK — nothing else.
+                        No PowerShell, no restart.
+                    </p>
                 </div>
                 <div class="install-block">
                     <span class="text-muted text-sm">Linux / macOS</span>
@@ -91,6 +99,15 @@ $base = url('networks/' . $network['id']);
                 <form method="post" action="<?= e($base . '/join-code') ?>" class="inline">
                     <?= csrf_field() ?>
                     <button type="submit" class="btn btn-sm">New code</button>
+                </form>
+                <form method="post" action="<?= e($base . '/join-code') ?>" class="inline">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="pre_approved" value="1">
+                    <input type="hidden" name="max_uses" value="1">
+                    <input type="hidden" name="ttl_minutes" value="30">
+                    <button type="submit" class="btn btn-sm">
+                        New pre-approved code (1 device, 30 min)
+                    </button>
                 </form>
                 <form method="post" action="<?= e($base . '/join-code/revoke') ?>" class="inline">
                     <?= csrf_field() ?>

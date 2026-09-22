@@ -123,6 +123,26 @@ func removeFirewallRule() error {
 	return fmt.Errorf("%s", strings.TrimSpace(string(out)))
 }
 
+// removeOverlayFirewallRule takes away the inbound rule for the overlay.
+//
+// Named rather than matched loosely, so an administrator's own rules are left
+// alone. The name is winenv.OverlayRuleName; it is spelled out here because
+// this binary is the installer and does not otherwise link the agent's
+// packages.
+func removeOverlayFirewallRule() error {
+	out, err := exec.Command("netsh", "advfirewall", "firewall", "delete", "rule",
+		"name=AKConnect Overlay (inbound from the overlay)").CombinedOutput()
+	if err == nil {
+		return nil
+	}
+
+	if strings.Contains(strings.ToLower(string(out)), "no rules match") {
+		return nil
+	}
+
+	return fmt.Errorf("%s", strings.TrimSpace(string(out)))
+}
+
 // removeNrptRules takes away the DNS policy rules the agent added.
 //
 // Matched by our own comment so an administrator's rules, or another VPN's,

@@ -287,18 +287,33 @@ final class NetworkService
         }
     }
 
-    /** The one-line install command shown on the network page. */
+    /**
+     * What to actually type, per platform.
+     *
+     * This used to print a PowerShell one-liner that fetched `install.ps1` and
+     * ran a verb called `join`. There is no install.ps1 — the URL was a 404 —
+     * the binary is `akconnect-agent`, not the brand slug, and the verb is
+     * `enroll`. Three separate inventions in one line, shown to every
+     * administrator on the network page, and the first person to try it in the
+     * field got a 404.
+     *
+     * Windows is not given a command at all, because on Windows the answer is
+     * not a command: it is akconnect-setup.exe, double-clicked, asking for the
+     * join code and nothing else (§33). Printing a command there would be
+     * offering the hard way as if it were the way.
+     */
     public static function installCommand(string $joinCode, string $os = 'windows'): string
     {
         $url = rtrim((string) Config::get('app.url', ''), '/');
-        $brandSlug = strtolower((string) preg_replace('/[^a-z0-9]+/i', '-', (string) Config::get('brand.name', 'agent')));
 
         return match ($os) {
-            'linux', 'darwin' => sprintf('curl -fsSL %s/install.sh | sudo sh -s -- --join %s', $url, $joinCode),
-            default => sprintf(
-                'powershell -c "irm %s/install.ps1 | iex; %s-agent join %s"',
+            'linux', 'darwin' => sprintf(
+                'sudo akconnect-agent enroll -panel %s -join-code %s',
                 $url,
-                $brandSlug,
+                $joinCode
+            ),
+            default => sprintf(
+                'akconnect-setup.exe          (double-click; it asks for the code)   %s',
                 $joinCode
             ),
         };

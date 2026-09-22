@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/keystore"
@@ -20,12 +21,44 @@ func runEnroll(ctx context.Context, args []string) error {
 	joinCode := fs.String("join-code", "", "join code from an administrator")
 	name := fs.String("name", "", "device name (default: hostname)")
 	wait := fs.Bool("wait", false, "keep polling until approved")
+	force := fs.Bool("force", false, "enrol again even if this machine already has an identity")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	if *panelURL == "" || *joinCode == "" {
 		return errors.New("--panel and --join-code are both required")
+	}
+
+	stateStore, err := state.Open()
+	if err != nil {
+		return err
+	}
+
+	// Already enrolled on this panel? Then this is an upgrade, and the
+	// identity on disk is the one to keep.
+	//
+	// It used to enrol regardless, overwriting the state file with a fresh one
+	// — which threw away the device token and the overlay address, so a
+	// machine that was approved came back from an upgrade looking unapproved.
+	// It also spent a use of the join code, and a pre-approved code is
+	// single-use, so the second run of the installer was refused by the code
+	// the first run had used.
+	if existing, err := stateStore.Load(); err == nil && !*force {
+		if existing.Enrolled() && sameHost(existing.PanelURL, *panelURL) {
+			fmt.Printf("  This machine is already enrolled on %s as %s.\n", existing.PanelURL, existing.DeviceUID)
+
+			if existing.Approved() {
+				fmt.Printf("  Approved, address %s. Nothing to do.\n", existing.VirtualIP)
+			} else {
+				fmt.Printf("  Still waiting for an administrator to approve it; the agent will\n")
+				fmt.Printf("  pick that up by itself.\n")
+			}
+
+			fmt.Printf("\n  Use -force to discard this identity and enrol again.\n")
+
+			return nil
+		}
 	}
 
 	hostname := *name
@@ -75,16 +108,25 @@ func runEnroll(ctx context.Context, args []string) error {
 	fmt.Printf("  Enrolled as %s\n", enrolled.DeviceUID)
 	fmt.Printf("  Status     : %s\n", enrolled.Status)
 
-	stateStore, err := state.Open()
-	if err != nil {
-		return err
+	// Built on what is already there rather than replacing it, so a re-enrol
+	// of the same device on the same panel keeps its token and its address.
+	st, err := stateStore.Load()
+	if err != nil || st == nil {
+		st = &state.State{}
 	}
 
-	st := &state.State{
-		PanelURL:   *panelURL,
-		DeviceUID:  enrolled.DeviceUID,
-		NetworkUID: enrolled.NetworkUID,
+	if !sameHost(st.PanelURL, *panelURL) || st.DeviceUID != enrolled.DeviceUID {
+		// A different panel or a different device: the old token is worthless
+		// and keeping it would be worse than clearing it.
+		st.DeviceToken = ""
+		st.VirtualIP = ""
+		st.Revision = 0
 	}
+
+	st.PanelURL = *panelURL
+	st.DeviceUID = enrolled.DeviceUID
+	st.NetworkUID = enrolled.NetworkUID
+
 	if err := stateStore.Save(st); err != nil {
 		return err
 	}
@@ -103,6 +145,12 @@ func runEnroll(ctx context.Context, args []string) error {
 	}
 
 	return waitForApproval(ctx, client, stateStore, st, pub.Base64())
+}
+
+// sameHost compares two panel URLs without tripping over a trailing slash or
+// a difference in case.
+func sameHost(a, b string) bool {
+	return strings.EqualFold(strings.TrimRight(a, "/"), strings.TrimRight(b, "/"))
 }
 
 // waitForApproval polls until an administrator lets the device in, honouring
