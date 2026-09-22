@@ -48,16 +48,38 @@ func runEnroll(ctx context.Context, args []string) error {
 		if existing.Enrolled() && sameHost(existing.PanelURL, *panelURL) {
 			fmt.Printf("  This machine is already enrolled on %s as %s.\n", existing.PanelURL, existing.DeviceUID)
 
-			if existing.Approved() {
-				fmt.Printf("  Approved, address %s. Nothing to do.\n", existing.VirtualIP)
-			} else {
-				fmt.Printf("  Still waiting for an administrator to approve it; the agent will\n")
-				fmt.Printf("  pick that up by itself.\n")
+			// But is it still, from the panel's side? A device deleted in the
+			// panel leaves a machine that believes it is enrolled, and the
+			// customer's remedy — run the installer again — used to print
+			// "nothing to do" and change nothing. They had done the one thing
+			// they know how to do and it was refused.
+			//
+			// So the panel is asked. Only a clear "I have never heard of this
+			// device" re-enrols; anything else, including being unable to ask,
+			// keeps the identity. Discarding a working enrolment because the
+			// panel was briefly down would be a far worse failure than the one
+			// this fixes, and it would spend a single-use join code doing it.
+			switch stillKnown(ctx, *panelURL, existing) {
+			case known:
+				if existing.Approved() {
+					fmt.Printf("  Approved, address %s. Nothing to do.\n", existing.VirtualIP)
+				} else {
+					fmt.Printf("  Still waiting for an administrator to approve it; the agent will\n")
+					fmt.Printf("  pick that up by itself.\n")
+				}
+
+				fmt.Printf("\n  Use -force to discard this identity and enrol again.\n")
+
+				return nil
+			case unreachable:
+				fmt.Printf("  The panel could not be reached, so this identity is being kept.\n")
+				fmt.Printf("  Nothing has been changed. Try again when the computer is online.\n")
+
+				return nil
+			case forgotten:
+				fmt.Printf("  The panel no longer has a record of this device, so it is joining\n")
+				fmt.Printf("  again with the code given. Its identity key is unchanged.\n\n")
 			}
-
-			fmt.Printf("\n  Use -force to discard this identity and enrol again.\n")
-
-			return nil
 		}
 	}
 
@@ -193,5 +215,62 @@ func waitForApproval(ctx context.Context, client *panel.Client, store *state.Sto
 			return nil
 		case <-time.After(delay):
 		}
+	}
+}
+
+// knownness is what the panel says about a device this machine believes it is.
+type knownness int
+
+const (
+	// known: the panel has a record. Approved or not, it is the panel's to
+	// decide and there is nothing to re-enrol.
+	known knownness = iota
+	// forgotten: the panel has no record of this key. Deleted, or restored
+	// from a backup taken before this device existed.
+	forgotten
+	// unreachable: no answer. Not a verdict, and never treated as one.
+	unreachable
+)
+
+// stillKnown asks the panel whether it has a record of this device.
+//
+// Deliberately conservative. The only outcome that discards anything is the
+// panel answering, in as many words, that it has no enrolment for this key.
+func stillKnown(ctx context.Context, panelURL string, st *state.State) knownness {
+	store, err := keystore.Open()
+	if err != nil {
+		return unreachable
+	}
+
+	priv, err := store.Load()
+	if err != nil {
+		return unreachable
+	}
+
+	pub, err := priv.Public()
+	if err != nil {
+		return unreachable
+	}
+
+	client, err := panel.New(panel.Options{
+		BaseURL:   panelURL,
+		UserAgent: "akconnect-agent/" + version,
+	})
+	if err != nil {
+		return unreachable
+	}
+
+	// Bounded: this runs inside an installer with a customer watching it, and
+	// a panel that is not answering must not hold the dialog open.
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	switch _, err := client.Claim(ctx, st.DeviceUID, pub.Base64()); {
+	case errors.Is(err, panel.ErrNotEnrolled):
+		return forgotten
+	case err != nil:
+		return unreachable
+	default:
+		return known
 	}
 }
