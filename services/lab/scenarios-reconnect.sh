@@ -132,6 +132,18 @@ scenario_reconnect_both() {
 
     fixture cgnat symmetric
 
+    # The coordinator is started once for the whole run and its log is never
+    # truncated, so counting hellos in it counts every scenario that came
+    # before this one. That is how this check came to report "21 hellos — an
+    # agent that is not being answered re-announces forever" about agents that
+    # were answered every time, in a run where seven scenarios had gone first;
+    # run on its own the same code reported four.
+    #
+    # A check whose result depends on what ran before it is not a check. This
+    # is the mark to count from.
+    local hellos_before
+    hellos_before="$(grep -c 'hello from' "$LOGS/coordinator.log" 2>/dev/null)" || hellos_before=0
+
     if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
         record "both/paired" FAIL "the pair never connected in the first place"
         lab::tail_log alpha-up 12
@@ -193,8 +205,9 @@ scenario_reconnect_both() {
     # arrives. A settled agent sends hellos at helloInterval, five minutes
     # apart — so more than a handful over a short run means the same thing is
     # happening here.
-    local hellos
-    hellos="$(grep -c 'hello from' "$LOGS/coordinator.log" 2>/dev/null)" || hellos=0
+    local hellos_now hellos
+    hellos_now="$(grep -c 'hello from' "$LOGS/coordinator.log" 2>/dev/null)" || hellos_now=0
+    hellos=$(( hellos_now - hellos_before ))
     if [ "$hellos" -le 12 ]; then
         record "both/settled" PASS "the agents settled: $hellos hello(s) in total"
     else
