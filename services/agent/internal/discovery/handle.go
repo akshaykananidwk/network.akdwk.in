@@ -55,6 +55,8 @@ func (c *Client) handleHelloAck(header disco.Header, sealed []byte) {
 	c.lastAck = time.Now()
 	c.mu.Unlock()
 
+	c.noteAnswered()
+
 	if changed {
 		c.opts.Logf("discovery: our public address is %s", ack.Reflexive)
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/discovery"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/state"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/wgkey"
 )
 
@@ -63,6 +64,9 @@ func (s *session) startDiscovery(ctx context.Context, cfg *panel.Config, priv wg
 		// So a socket that dies underneath the agent is reopened rather than
 		// logged about forever. See discovery.noteSendFailure.
 		Rebind: s.tun.Rebind,
+		// And so a port a router will not carry is escaped rather than
+		// announced into forever. See discovery/port.go, defect 23.
+		MovePort: s.movePort,
 	})
 	if err != nil {
 		s.logf("discovery: %v", err)
@@ -137,6 +141,31 @@ func resolveCoordinator(host string, port int) (netip.AddrPort, error) {
 // link-local because an address that needs a zone index is not one a peer can
 // simply be handed, and the tunnel interface because routing the underlay
 // through the overlay is a loop.
+// movePort takes this device to a different UDP port and remembers it.
+//
+// Remembering matters as much as moving. Two PCs behind one router that both
+// forget on every restart would race for the same lease every time the
+// customer reboots them; the port that worked is part of this device's
+// identity, like its key and its address.
+func (s *session) movePort() (int, []netip.AddrPort, error) {
+	port := state.AnotherListenPort(s.port)
+
+	if err := s.tun.RebindPort(port); err != nil {
+		return 0, nil, err
+	}
+
+	s.port = port
+	s.st.ListenPort = port
+
+	if err := s.stateSt.Save(s.st); err != nil {
+		// Worth saying, not worth refusing: the device is on the new port
+		// either way, and only the memory of it across a restart is lost.
+		s.logf("discovery: could not record this device's new port: %v", err)
+	}
+
+	return port, localEndpoints(uint16(port), s.tun.Name()), nil
+}
+
 func localEndpoints(port uint16, tunnelIface string) []netip.AddrPort {
 	ifaces, err := net.Interfaces()
 	if err != nil {

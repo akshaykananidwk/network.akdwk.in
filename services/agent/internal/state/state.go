@@ -84,6 +84,29 @@ func ChooseListenPort(current int) int {
 	return low + int(binary.BigEndian.Uint16(buf[:]))%(high-low)
 }
 
+// AnotherListenPort picks a port that is not the one given.
+//
+// Used when the current port is provably not getting through — a router that
+// has leased that external port to another PC on the same LAN, which is what
+// defect 23 actually was. Drawing the same number again would be a move that
+// moves nowhere, so it is drawn until it differs.
+func AnotherListenPort(current int) int {
+	for attempt := 0; attempt < 8; attempt++ {
+		if port := ChooseListenPort(0); port != current {
+			return port
+		}
+	}
+
+	// Eight identical draws from crypto/rand does not happen; walking one up
+	// is still better than returning the port we are trying to leave.
+	next := current + 1
+	if next > 60999 || next < 49152 {
+		next = 49152
+	}
+
+	return next
+}
+
 // Store reads and writes the state file.
 type Store struct{ path string }
 

@@ -207,6 +207,37 @@ func (t *Tunnel) Rebind() error {
 	return t.dev.BindUpdate()
 }
 
+// RebindPort reopens the socket on a different UDP port.
+//
+// Rebind, above, heals a socket that died. This is for the opposite fault: the
+// socket is healthy and the port is unusable, because the router in front of
+// this machine has leased that external port to another PC and drops what this
+// one sends from it. Reopening on the same port would change nothing — the
+// port is the problem. See discovery/port.go for how that is detected.
+//
+// wireguard-go's UAPI takes listen_port and rebinds for us, keeping the
+// device's peers and keys as they are; only the socket underneath moves.
+func (t *Tunnel) RebindPort(port int) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.closed {
+		return fmt.Errorf("tunnel is closed")
+	}
+
+	if port < 1024 || port > 65535 {
+		return fmt.Errorf("refusing to move to UDP %d: outside the usable range", port)
+	}
+
+	if err := t.dev.IpcSet(fmt.Sprintf("listen_port=%d\n", port)); err != nil {
+		return fmt.Errorf("moving to UDP %d: %w", port, err)
+	}
+
+	t.port = port
+
+	return nil
+}
+
 // Apply pushes a vetted configuration into the device and brings it up.
 func (t *Tunnel) Apply(priv wgkey.Private, cfg *panel.Config, plan *netcfg.Plan) error {
 	t.mu.Lock()

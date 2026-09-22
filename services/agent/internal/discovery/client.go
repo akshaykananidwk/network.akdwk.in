@@ -61,6 +61,14 @@ type Options struct {
 	// long as anyone watched, was reachable by nobody, showed no fault
 	// anywhere, and came back only when the service was restarted by hand.
 	Rebind func() error
+	// MovePort reopens the shared socket on a DIFFERENT port and reports the
+	// port and this machine's addresses on it. Optional.
+	//
+	// Separate from Rebind because the two faults are separate: Rebind heals a
+	// socket that died, MovePort escapes a port that a router will not carry.
+	// Reopening on the same port is the right answer to the first and no
+	// answer at all to the second. See port.go.
+	MovePort func() (int, []netip.AddrPort, error)
 }
 
 // Client keeps this agent announced and its peers reachable.
@@ -90,6 +98,13 @@ type Client struct {
 	// rebinds counts how many times the socket has been reopened without the
 	// sends starting to work, so a recovery that is not recovering says so.
 	rebinds int
+	// unacked counts announcements that left the socket and were never
+	// answered, lastSend paces their retries, and portMoves counts the ports
+	// already tried. Together they are how a port a router will not carry is
+	// told apart from a socket that is simply dead — see port.go.
+	unacked   int
+	lastSend  time.Time
+	portMoves int
 	// candidates is every address currently being tried for a peer, so a punch
 	// reply can be matched back to the peer it proves.
 	candidates map[[32]byte][]netip.AddrPort
@@ -243,6 +258,8 @@ func (c *Client) Run(ctx context.Context) {
 		case <-relayTick.C:
 			c.rebindRelays()
 		case <-workTick.C:
+			c.maybeRetryUnacked(keepalive)
+			c.maybeMovePort()
 			c.escalateStalledPeers()
 			c.repunch()
 			c.expireProbes()
@@ -379,6 +396,8 @@ func (c *Client) announce(full bool) {
 
 		return
 	}
+
+	c.noteAnnouncementSent()
 
 	c.mu.Lock()
 	recovered := c.sendFailures > 0 || c.rebinds > 0

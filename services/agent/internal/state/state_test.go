@@ -45,3 +45,19 @@ func TestEachDeviceGetsItsOwnPortAndKeepsIt(t *testing.T) {
 		}
 	}
 }
+
+// A move that lands on the port it is leaving is not a move. It happens when
+// the replacement is drawn from the same range as the original, which it is.
+func TestAnotherListenPortNeverReturnsTheOneBeingLeft(t *testing.T) {
+	for _, current := range []int{51820, 49152, 60999, 55000} {
+		for i := 0; i < 500; i++ {
+			got := AnotherListenPort(current)
+			if got == current {
+				t.Fatalf("AnotherListenPort(%d) returned the port it was asked to leave", current)
+			}
+			if got < 1024 || got > 65535 {
+				t.Fatalf("AnotherListenPort(%d) returned %d, outside the usable range", current, got)
+			}
+		}
+	}
+}
