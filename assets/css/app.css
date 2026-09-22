@@ -112,6 +112,10 @@ code, pre { font-family: var(--font-mono); font-size: .85em; }
 code { background: var(--bg-sunken); padding: .12em .38em; border-radius: var(--radius-sm); }
 code.block { display: block; margin: .2rem 0; }
 code.break { word-break: break-all; }
+/* The command that clears a "behind" badge, printed beside it. Allowed to wrap
+   rather than widen the table, because a path is long and a horizontal
+   scrollbar inside a table cell is where a command goes to be misread. */
+code.inline-command { margin-left: .4rem; white-space: normal; word-break: break-word; }
 
 .text-muted { color: var(--text-muted); }
 .text-sm { font-size: .82rem; }

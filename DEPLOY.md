@@ -563,6 +563,24 @@ It ends in one of two ways and nothing else:
 there anyway, and refuses a toolchain too old to build with rather than failing
 halfway through a compile.
 
+**It updates itself.** Before doing anything to the services it fetches, takes
+the release's own copy of this script out of git, and hands over to it — so the
+script that runs is the one the release shipped, not the one that happened to
+be in the checkout. Without that, a fix to this script only took effect the
+*second* time it was run, and the run meant to deliver the fix was made by the
+code the fix replaced.
+
+The one exception is the first upgrade onto a release that carries this: the
+copy already on the box predates the hand-over and cannot do it, so that time
+the old script runs and behaves as it always did. Run it once more afterwards
+if you want the new behaviour immediately.
+
+**It leaves the checkout usable.** `/opt/akconnect/src` is left on its branch
+at the release's commit, not on a detached HEAD. Earlier versions detached it,
+and the next `git pull` there answered "You are not currently on a branch" —
+so the ordinary way to update a checkout stopped working on every edge server
+this script had touched.
+
 **To stop doing this by hand:**
 
 ```bash

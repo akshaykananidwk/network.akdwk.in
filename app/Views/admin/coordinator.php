@@ -5,6 +5,7 @@
 /** @var list<string> $problems */
 declare(strict_types=1);
 \App\Core\View::layout('layouts.app');
+
 ?>
 <section class="card">
     <header class="card-header">
@@ -55,6 +56,12 @@ declare(strict_types=1);
                             <?= e($edge['coordinator_version'] ?: 'not reported') ?>
                             <?php if (isset($edge['behind']['coordinator'])): ?>
                                 <span class="badge badge-warning">behind</span>
+                                <?php /* The command is beside the badge, not only further down the
+                                         page: the operator who reported this read the badge,
+                                         scrolled past the explanation, and went to the edge server
+                                         to work it out by hand. */ ?>
+                                <code class="inline-command"
+                                      title="Run this on the edge server, as root"><?= e((string) $edge['command']) ?></code>
                             <?php endif; ?>
                         </td>
                     </tr>
@@ -64,6 +71,12 @@ declare(strict_types=1);
                             <?= e($edge['relay_version'] ?: 'not reported') ?>
                             <?php if (isset($edge['behind']['relay'])): ?>
                                 <span class="badge badge-warning">behind</span>
+                                <?php /* The command is beside the badge, not only further down the
+                                         page: the operator who reported this read the badge,
+                                         scrolled past the explanation, and went to the edge server
+                                         to work it out by hand. */ ?>
+                                <code class="inline-command"
+                                      title="Run this on the edge server, as root"><?= e((string) $edge['command']) ?></code>
                             <?php endif; ?>
                         </td>
                     </tr>

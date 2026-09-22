@@ -32,6 +32,9 @@ INSTALL_TIMER=0
 CHECK_ONLY=0
 SKIP_PACK=0
 
+# Kept so the script can hand them to its own replacement. See "re-exec" below.
+ORIGINAL_ARGS=("$@")
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --install-timer) INSTALL_TIMER=1; shift ;;
@@ -438,6 +441,82 @@ TARGET_BRANCH="$(json "$RELEASE_JSON" branch)"
 pass "panel reachable" "$PANEL is on $TARGET_VERSION"
 say "target: $TARGET_VERSION (${TARGET_COMMIT:0:12} on ${TARGET_BRANCH:-main})"
 
+# ------------------------------------------------------------------ re-exec
+#
+# Fetch now, and hand over to the target's own copy of this script.
+#
+# Two things went wrong without this, and the second is the dangerous one.
+#
+# The operator ran the copy that happened to be in the checkout, which is the
+# PREVIOUS release's copy — so a fix to this script did not take effect until
+# somebody ran it twice, and the run that was supposed to deliver the fix was
+# made by the code the fix replaced. That is how a release went out with the
+# empty X-Coordinator-Timestamp still in it.
+#
+# Worse: the checkout below rewrites this file while bash is reading it. Bash
+# reads a script incrementally, by byte offset, so replacing it mid-run makes
+# the shell resume at an offset into different text — which produces a syntax
+# error somewhere unrelated, or silently runs the wrong lines. It is the same
+# failure that killed a release-gate run in this project when a lab script was
+# edited while it executed.
+#
+# So: fetch (which touches no working file), take the target's copy out of git
+# into a temporary file, and exec it from there. The replacement runs from a
+# path nothing will rewrite, and it is the code the panel actually shipped.
+step "fetching the source"
+
+cd "$SRC_DIR" || die "cannot enter $SRC_DIR"
+
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    die "$SRC_DIR has local changes. This script checks out a specific commit and
+    will not discard your work. Commit or stash it, or point --src elsewhere."
+fi
+
+fetched=0
+for attempt in 1 2 3 4; do
+    if git fetch --quiet --tags origin "${TARGET_BRANCH:-main}" 2>/dev/null \
+        || git fetch --quiet origin 2>/dev/null; then
+        fetched=1
+        break
+    fi
+    say "fetch failed; retrying in $((attempt * 2))s"
+    sleep $((attempt * 2))
+done
+[ "$fetched" -eq 1 ] || die "could not fetch from the repository."
+
+REF="${TARGET_COMMIT:-origin/${TARGET_BRANCH:-main}}"
+git rev-parse --quiet --verify "$REF^{commit}" >/dev/null 2>&1 \
+    || REF="origin/${TARGET_BRANCH:-main}"
+
+pass "source fetched" "$(git rev-parse --short "$REF") is available locally"
+
+# AKCONNECT_REEXEC stops this happening twice. One hop is always enough: the
+# script it hands over to IS the target's, so that one has nothing newer to go
+# to. Without the guard, a target whose copy differs from itself — which cannot
+# happen, but a bug could make it look that way — would loop forever.
+if [ -z "${AKCONNECT_REEXEC:-}" ]; then
+    THEIRS="$(mktemp /tmp/akconnect-upgrade-edge.XXXXXX.sh)"
+
+    if git show "$REF:deploy/upgrade-edge.sh" > "$THEIRS" 2>/dev/null && [ -s "$THEIRS" ]; then
+        if ! cmp -s "$THEIRS" "$0"; then
+            chmod +x "$THEIRS"
+            say "the release carries a newer copy of this script; handing over to it"
+
+            # Not "keep"-ed: the EXIT trap belongs to the process that is about
+            # to be replaced, and exec means it never runs. The replacement
+            # removes it itself, below.
+            AKCONNECT_REEXEC="$THEIRS" exec "$THEIRS" "${ORIGINAL_ARGS[@]:-}"
+        fi
+    fi
+
+    rm -f "$THEIRS"
+else
+    # Handed over to. The temporary copy is ours to clean up, and the version
+    # line is worth printing because the operator typed a different path.
+    keep "${AKCONNECT_REEXEC}"
+    say "running the release's own copy of this script"
+fi
+
 CURRENT_COORD="$("$BIN_DIR/akconnect-coordinator" version 2>/dev/null | awk '{print $NF}')"
 CURRENT_RELAY="$("$BIN_DIR/akconnect-relay" version 2>/dev/null | awk '{print $NF}')"
 say "here:   coordinator ${CURRENT_COORD:-none}, relay ${CURRENT_RELAY:-none}"
@@ -455,34 +534,36 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
 fi
 
 # --------------------------------------------------------------- the source
+#
+# Already fetched, above, before the hand-over. What is left is to put the
+# working tree on the target commit.
+#
+# On the BRANCH at that commit, not detached. A detached HEAD is what this used
+# to leave behind, and the next person to run `git pull` in the checkout got
+# "You are not currently on a branch" — so the ordinary thing an operator does
+# to update a checkout stopped working, silently, on every edge server this
+# script had ever touched.
+#
+# -B moves the local branch to the target commit and stays on it. The commit
+# came from the panel and is on that branch, so this is a fast-forward in every
+# case that is not somebody having rewritten history; `git pull` afterwards
+# behaves exactly as it would on a fresh clone.
 
-step "fetching the source"
+step "putting the checkout on the release"
 
 cd "$SRC_DIR" || die "cannot enter $SRC_DIR"
 
-if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-    die "$SRC_DIR has local changes. This script checks out a specific commit and
-    will not discard your work. Commit or stash it, or point --src elsewhere."
-fi
-
-REF="${TARGET_COMMIT:-${TARGET_BRANCH:-main}}"
-
-fetched=0
-for attempt in 1 2 3 4; do
-    if git fetch --quiet --tags origin "${TARGET_BRANCH:-main}" 2>/dev/null || git fetch --quiet origin 2>/dev/null; then
-        fetched=1
-        break
-    fi
-    say "fetch failed; retrying in $((attempt * 2))s"
-    sleep $((attempt * 2))
-done
-[ "$fetched" -eq 1 ] || die "could not fetch from the repository."
-
-git checkout --quiet --detach "$REF" 2>/dev/null \
-    || git checkout --quiet --detach "origin/${TARGET_BRANCH:-main}" \
-    || die "cannot check out $REF"
+git checkout --quiet -B "${TARGET_BRANCH:-main}" "$REF" 2>/dev/null \
+    || die "cannot put $SRC_DIR on ${TARGET_BRANCH:-main} at $REF"
 
 BUILT_FROM="$(git rev-parse --short HEAD)"
+ON_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+
+if [ "$ON_BRANCH" = "HEAD" ]; then
+    fail "checkout is on a branch" "the checkout is detached; git pull will refuse to run here"
+else
+    pass "checkout is on a branch" "$ON_BRANCH at $BUILT_FROM — git pull still works here"
+fi
 REPO_VERSION="$(tr -d '[:space:]' < VERSION 2>/dev/null)"
 
 if [ "$REPO_VERSION" != "$TARGET_VERSION" ]; then

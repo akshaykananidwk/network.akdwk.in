@@ -319,6 +319,154 @@ fi
 kill "$CAP_PID" 2>/dev/null
 trap 'rm -rf "$WORK"' EXIT
 
+# 7. The checkout is left usable, and the release's own script is what runs.
+#
+# Two field faults. The script checked out the target commit with --detach, so
+# every edge server it touched was left on a detached HEAD and the next `git
+# pull` answered "You are not currently on a branch". And because the operator
+# runs the copy that is in the checkout, the script that executed was the
+# PREVIOUS release's — a fix to this file only took effect the second time
+# somebody ran it, which is how a release shipped with a signing defect still
+# in it.
+#
+# Worse than either: the checkout rewrites this file while bash is reading it.
+group "the release's own script runs, and the checkout stays usable"
+
+CLONE="$WORK/clone"
+ORIGIN="$WORK/origin"
+
+# -b main explicitly: git's default branch name depends on the host's
+# configuration, and a seed repository on "master" while the drill pushes to
+# "main" leaves the clone tracking a branch that does not exist — which failed
+# this drill for its own reasons the first time it ran.
+git init --quiet --bare -b main "$ORIGIN"
+git clone --quiet "$ORIGIN" "$WORK/seed" 2>/dev/null
+git -C "$WORK/seed" checkout --quiet -B main 2>/dev/null
+
+# Two commits. The "old" one is this same script with a marker line added, not
+# a stub: the state being modelled is an operator whose checkout holds the
+# PREVIOUS release, and a previous release still has to be able to hand over. A
+# stub could never hand over, so the drill would be asserting something no
+# version of the product does.
+#
+# The very first upgrade onto a release carrying this is the exception: the
+# copy already on the box predates the hand-over and cannot do it, so that one
+# time the operator runs the old script and it behaves as it always did.
+# DEPLOY.md says so rather than leaving it to be found out.
+mkdir -p "$WORK/seed/deploy"
+{
+    head -1 "$SCRIPT"
+    echo 'echo I-AM-THE-OLD-SCRIPT'
+    tail -n +2 "$SCRIPT"
+} > "$WORK/seed/deploy/upgrade-edge.sh"
+chmod +x "$WORK/seed/deploy/upgrade-edge.sh"
+printf '0.0.1
+' > "$WORK/seed/VERSION"
+git -C "$WORK/seed" add -A >/dev/null
+git -C "$WORK/seed" -c user.email=g@l -c user.name=gate commit --quiet -m old
+git -C "$WORK/seed" push --quiet origin HEAD:refs/heads/main 2>/dev/null
+
+cp "$SCRIPT" "$WORK/seed/deploy/upgrade-edge.sh"
+printf '9.9.9-capture
+' > "$WORK/seed/VERSION"
+git -C "$WORK/seed" add -A >/dev/null
+git -C "$WORK/seed" -c user.email=g@l -c user.name=gate commit --quiet -m new
+git -C "$WORK/seed" push --quiet origin HEAD:refs/heads/main 2>/dev/null
+
+TARGET_SHA="$(git -C "$WORK/seed" rev-parse HEAD)"
+
+# The operator's checkout is one commit behind, and detached — the state the
+# previous run left it in.
+git clone --quiet "$ORIGIN" "$CLONE" 2>/dev/null
+git -C "$CLONE" checkout --quiet --detach HEAD~1 2>/dev/null
+
+# A panel that names that commit.
+CAP2="$WORK/capture2.jsonl"
+python3 - "$WORK/panel2.py" "$TARGET_SHA" <<'PYEOF'
+import sys
+open(sys.argv[1], "w").write(
+    open("services/lab/capture-panel.py").read().replace(
+        '"version": "9.9.9-capture"',
+        '"version": "9.9.9-capture", "commit": "%s", "branch": "main"' % sys.argv[2],
+    )
+)
+PYEOF
+
+python3 "$WORK/panel2.py" 8792 "$CAP2" --secret "$CAP_SECRET" >"$WORK/panel2.log" 2>&1 &
+CAP2_PID=$!
+trap 'kill "$CAP_PID" "$CAP2_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
+
+for _ in $(seq 1 40); do
+    (exec 3<>"/dev/tcp/127.0.0.1/8792") 2>/dev/null && break
+    sleep 0.25
+done
+
+mkdir -p "$WORK/etc2"
+cat > "$WORK/etc2/coordinator.env" <<ENVFILE
+AKCONNECT_PANEL_URL=http://127.0.0.1:8792
+AKCONNECT_COORDINATOR_SECRET=$CAP_SECRET
+ENVFILE
+
+# The OLD copy is what the operator invokes, exactly as on a real box.
+#
+# Not --check: that reports and stops before touching the working tree, which
+# is what it is for. The state being asserted below — the checkout left on a
+# branch at the release — belongs to a real run, so this is one. It gets as far
+# as the build and dies there, because the fixture repository contains a script
+# and a VERSION file and nothing to build; that is expected and the run's own
+# verdict is ignored. Everything the drill asserts happens before the build.
+env PATH="/usr/local/go/bin:$PATH" HOME="$WORK" \
+    AKCONNECT_ETC="$WORK/etc2" AKCONNECT_SRC="$CLONE" \
+    "$CLONE/deploy/upgrade-edge.sh" --skip-pack >"$WORK/reexec.out" 2>&1
+
+# The marker proves the OLD copy is what started — otherwise the hand-over
+# below would be trivially true because nothing else ever ran.
+if ! grep -q "I-AM-THE-OLD-SCRIPT" "$WORK/reexec.out"; then
+    bad "the drill never started the old copy" "it is testing nothing; see $WORK/reexec.out"
+elif grep -q "handing over to it" "$WORK/reexec.out"; then
+    ok "the old copy started and handed over to the release's own script"
+else
+    bad "the previous release's script ran to the end" \
+        "a fix to this file would not take effect until it had been run twice"
+fi
+
+ON="$(git -C "$CLONE" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+if [ "$ON" = "main" ]; then
+    ok "the checkout is left on a branch ($ON), so git pull still works"
+else
+    bad "the checkout is left on '$ON'" "git pull answers 'You are not currently on a branch'"
+fi
+
+AT="$(git -C "$CLONE" rev-parse HEAD 2>/dev/null)"
+if [ "$AT" = "$TARGET_SHA" ]; then
+    ok "and at the commit the panel named"
+else
+    bad "the checkout is at $AT, not the panel's $TARGET_SHA"
+fi
+
+if git -C "$CLONE" pull --quiet --ff-only >/dev/null 2>&1; then
+    ok "git pull runs in the checkout without complaint"
+else
+    bad "git pull still fails in the checkout" "$(git -C "$CLONE" pull 2>&1 | head -1)"
+fi
+
+# --check is the other half of the contract: it reports and changes nothing.
+# A "tell me whether I am behind" that moved the working tree would be a trap.
+git -C "$CLONE" checkout --quiet --detach HEAD 2>/dev/null
+BEFORE_CHECK="$(git -C "$CLONE" rev-parse HEAD)"
+
+env PATH="/usr/local/go/bin:$PATH" HOME="$WORK" \
+    AKCONNECT_ETC="$WORK/etc2" AKCONNECT_SRC="$CLONE" \
+    "$CLONE/deploy/upgrade-edge.sh" --check >"$WORK/checkonly.out" 2>&1
+
+if [ "$(git -C "$CLONE" rev-parse HEAD)" = "$BEFORE_CHECK" ]; then
+    ok "--check reports without moving the checkout"
+else
+    bad "--check moved the checkout" "a read-only option must not touch the working tree"
+fi
+
+kill "$CAP2_PID" 2>/dev/null
+
 # ---------------------------------------------------------------- the report
 
 printf '\n  ────────────────────────────────────────────────────────────\n'
