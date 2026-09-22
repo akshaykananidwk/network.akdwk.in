@@ -32,10 +32,24 @@
 # customer reports as broken.
 RECONNECT_BUDGET=${RECONNECT_BUDGET:-30}
 
+# Behind CGNAT, and the first version of this was not — which made it useless.
+#
+# On the ordinary two-NAT topology both scenarios passed on the defective code,
+# with traffic back in one second. The reason is that the lab's "cone" NAT
+# gives each side a static inbound DNAT on the agent's port, so the side that
+# comes back can punch straight at its partner and be answered. Nothing the
+# coordinator does is needed, and nothing it fails to do is noticed.
+#
+# The field case is a laptop behind carrier-grade NAT. It is not reachable
+# inbound by anybody, so a punch from the returning side cannot land and the
+# pair needs the coordinator to re-introduce them and grant a relay — which is
+# precisely what did not happen. This is the same lesson the late-joiner
+# scenario learned: put the drill where the defect lives, or it reports nothing
+# and calls it a pass.
 scenario_reconnect() {
     step "a peer restarts on a new address — the pair must find each other again"
 
-    fixture nat
+    fixture cgnat symmetric
 
     if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
         record "reconnect/paired" FAIL "the pair never connected in the first place"
@@ -56,7 +70,7 @@ scenario_reconnect() {
     # the lab's version of a phone getting a different mobile IP: alpha now
     # holds an address that beta is no longer behind.
     lab::down_agent beta
-    lab::renumber beta natgw-b 11 21 192.168.20 cone
+    lab::renumber beta natgw-b 11 21 192.168.20 symmetric
 
     local restarted_at
     restarted_at="$(date +%s)"
@@ -111,7 +125,7 @@ scenario_reconnect() {
 scenario_reconnect_both() {
     step "both peers restart, one returning a minute after the other"
 
-    fixture nat
+    fixture cgnat symmetric
 
     if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
         record "both/paired" FAIL "the pair never connected in the first place"
@@ -141,7 +155,7 @@ scenario_reconnect_both() {
     # for alpha was done while beta did not exist.
     sleep 60
 
-    lab::renumber beta natgw-b 11 22 192.168.20 cone
+    lab::renumber beta natgw-b 11 22 192.168.20 symmetric
 
     local returned_at
     returned_at="$(date +%s)"
