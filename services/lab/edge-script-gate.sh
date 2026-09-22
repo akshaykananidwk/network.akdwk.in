@@ -673,6 +673,22 @@ OLDBUILDER
     # the worktree's origin is the real remote, the script fetches its default
     # branch, and the checkout lands on a years-old commit whose VERSION does
     # not match — which is a mismatch the drill created, not one it found.
+    # Refuses to touch anything but the throwaway clone.
+    #
+    # An earlier version of this drill built the fixture with `git worktree
+    # add`, and a worktree SHARES .git/config with the repository it came
+    # from — so the `remote set-url` below rewrote the real repository's
+    # origin, and the next push failed with "does not appear to be a git
+    # repository". A harness that can reach outside its sandbox will
+    # eventually do so.
+    FIXTURE_GITDIR="$(git -C "$SKEW/src" rev-parse --absolute-git-dir)"
+    case "$FIXTURE_GITDIR" in
+        "$SKEW/src/.git") : ;;
+        *) bad "the fixture's git directory is $FIXTURE_GITDIR" \
+               "refusing to configure a repository outside the drill's own clone"
+           SKEW_SHA="" ;;
+    esac
+
     git init --quiet --bare -b skew-gate "$SKEW/origin"
     git -C "$SKEW/src" push --quiet "$SKEW/origin" HEAD:refs/heads/skew-gate 2>/dev/null
     git -C "$SKEW/src" remote set-url origin "$SKEW/origin"
