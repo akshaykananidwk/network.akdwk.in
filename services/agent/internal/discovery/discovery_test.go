@@ -2,8 +2,10 @@ package discovery
 
 import (
 	"crypto/rand"
+	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 
@@ -365,5 +367,61 @@ func TestARebindThatDoesNotHelpIsTriedAgain(t *testing.T) {
 
 	if h.client.TransportProblem() == "" {
 		t.Fatal("the panel is not being told the device is unreachable")
+	}
+}
+
+// The recovery must not announce a recovery that has not happened.
+//
+// The first version of this logged "socket reopened; re-announcing" on the
+// line immediately before the next send failed with the same error, and then
+// went round again quietly. A reader of that log would conclude the agent had
+// fixed itself. It had not, and the machine stayed unreachable.
+func TestARebindThatDidNotHelpIsNotReportedAsRecovered(t *testing.T) {
+	h := newHarness(t)
+
+	var lines []string
+	h.client.opts.Logf = func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	h.client.opts.Rebind = func() error { return nil }
+
+	h.transport.mu.Lock()
+	h.transport.failWith = net.ErrClosed
+	h.transport.mu.Unlock()
+
+	for i := 0; i < 6; i++ {
+		h.client.announce(true)
+	}
+
+	for _, line := range lines {
+		if strings.Contains(line, "working again") {
+			t.Fatalf("a dead socket was reported as recovered: %q", line)
+		}
+	}
+
+	// And the problem stays reported for the panel, because it is still true.
+	if h.client.TransportProblem() == "" {
+		t.Fatal("the problem was cleared although nothing was ever sent")
+	}
+
+	// Once the socket genuinely works, the recovery is announced — otherwise
+	// the check above would pass on an agent that never says anything.
+	h.transport.mu.Lock()
+	h.transport.failWith = nil
+	h.transport.mu.Unlock()
+
+	h.client.announce(true)
+
+	recovered := false
+	for _, line := range lines {
+		if strings.Contains(line, "working again") {
+			recovered = true
+		}
+	}
+	if !recovered {
+		t.Fatal("a genuine recovery was not reported")
+	}
+	if h.client.TransportProblem() != "" {
+		t.Fatal("the problem is still reported after a real recovery")
 	}
 }

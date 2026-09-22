@@ -87,6 +87,9 @@ type Client struct {
 	// transportProblem is what to tell the panel about it, so a device nobody
 	// can reach says so rather than looking healthy.
 	transportProblem string
+	// rebinds counts how many times the socket has been reopened without the
+	// sends starting to work, so a recovery that is not recovering says so.
+	rebinds int
 	// candidates is every address currently being tried for a peer, so a punch
 	// reply can be matched back to the peer it proves.
 	candidates map[[32]byte][]netip.AddrPort
@@ -378,8 +381,9 @@ func (c *Client) announce(full bool) {
 	}
 
 	c.mu.Lock()
-	recovered := c.sendFailures > 0
+	recovered := c.sendFailures > 0 || c.rebinds > 0
 	c.sendFailures = 0
+	c.rebinds = 0
 	c.transportProblem = ""
 	c.mu.Unlock()
 
@@ -429,12 +433,36 @@ func (c *Client) noteSendFailure(err error) {
 	// than attempted once and given up on.
 	c.mu.Lock()
 	c.sendFailures = 0
+	c.rebinds++
+	attempts := c.rebinds
 	c.mu.Unlock()
 
-	c.opts.Logf("discovery: socket reopened; re-announcing")
+	// Deliberately not "socket reopened". Rebind() returning nil means the
+	// call succeeded, not that the socket works — and the first version of
+	// this said "socket reopened; re-announcing" on the line immediately
+	// before the next send failed with the same error. Claiming a recovery
+	// that has not happened is the same defect this project keeps finding
+	// elsewhere, written by me, in the code whose entire job is to recover.
+	//
+	// Whether it worked is decided by the next send, which logs either the
+	// failure or "the socket is working again".
+	c.opts.Logf("discovery: socket reopened (attempt %d); announcing again to find out whether it helped",
+		attempts)
+
+	// A socket that will not come back needs a human, and the only way to ask
+	// for one is to keep saying so where an administrator can see it.
+	if attempts == rebindGiveUp {
+		c.opts.Logf("discovery: %d rebinds have not fixed the socket; this device cannot be reached "+
+			"and the AKConnect service needs restarting", attempts)
+	}
 
 	c.Rehello()
 }
+
+// rebindGiveUp is how many fruitless rebinds are worth one loud line. It does
+// not stop trying — a network that comes back deserves an agent that is still
+// there — it stops the log reading as though everything is under control.
+const rebindGiveUp = 3
 
 // TransportProblem is why announcements are not getting out, or "" when they
 // are. Reported to the panel with the other problems.
