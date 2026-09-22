@@ -628,9 +628,16 @@ group "the target's pack builder predates AKCONNECT_BUILD_DIR"
 SKEW="$WORK/skew"
 mkdir -p "$SKEW/bin" "$SKEW/stub"
 
-# A worktree of this repository, so the script under test runs against a real
-# checkout with real git history.
-git -C "$REPO" worktree add --quiet --detach "$SKEW/src" HEAD 2>/dev/null     || bad "could not create a worktree to test against"
+# A shallow clone of this repository, so the script under test runs against a
+# real checkout with real sources.
+#
+# A clone rather than a worktree, although a worktree is cheaper: in a worktree
+# .git is a FILE, and releases before 1.9.4 tested for a .git DIRECTORY and
+# refused at the preflight. The drill would then go red against those releases
+# for a reason that has nothing to do with the defect under test, which is no
+# better than going green for the wrong one.
+git clone --quiet --no-hardlinks "$REPO" "$SKEW/src" 2>/dev/null \
+    || bad "could not clone this repository to test against"
 
 if [ -d "$SKEW/src" ]; then
     # The target release's builder: the shape every release before 1.9.4 had.
@@ -646,8 +653,10 @@ printf 'setup
 ' > "$ROOT/services/kit/pack/akconnect-setup.exe"
 printf 'agent
 ' > "$ROOT/services/kit/pack/akconnect-agent.exe"
-printf 'zip
-'   > "$ROOT/services/kit/akconnect-windows-test-pack.zip"
+# Different bytes every time, so the tracked file is genuinely MODIFIED.
+# Writing back the same content the fixture committed would leave the tree
+# clean and the clean-up assertion could never fail.
+date +%s%N > "$ROOT/services/kit/akconnect-windows-test-pack.zip"
 echo "  pack: $ROOT/services/kit/akconnect-windows-test-pack.zip"
 OLDBUILDER
     chmod +x "$SKEW/src/services/kit/build-windows-pack.sh"
@@ -659,6 +668,14 @@ OLDBUILDER
     git -C "$SKEW/src" add -f services/kit/build-windows-pack.sh         services/kit/akconnect-windows-test-pack.zip >/dev/null 2>&1
     git -C "$SKEW/src" -c user.email=g@l -c user.name=gate commit --quiet -m "old pack builder"
     SKEW_SHA="$(git -C "$SKEW/src" rev-parse HEAD)"
+
+    # A local "origin" holding that commit on a branch of its own. Without it
+    # the worktree's origin is the real remote, the script fetches its default
+    # branch, and the checkout lands on a years-old commit whose VERSION does
+    # not match — which is a mismatch the drill created, not one it found.
+    git init --quiet --bare -b skew-gate "$SKEW/origin"
+    git -C "$SKEW/src" push --quiet "$SKEW/origin" HEAD:refs/heads/skew-gate 2>/dev/null
+    git -C "$SKEW/src" remote set-url origin "$SKEW/origin"
 
     # go, systemctl and ss, stubbed. The "binaries" go build produces are
     # shell scripts that report the version the panel asked for, which is
@@ -675,7 +692,7 @@ case "${1:-}" in
         done
         [ -n "$out" ] || exit 0
         printf '#!/bin/sh
-echo "%s 9.9.9-capture"
+echo "%s ${AKCONNECT_STUB_VERSION:-0.0.0}"
 ' "$(basename "$out")" > "$out"
         chmod +x "$out"
         ;;
@@ -691,14 +708,29 @@ echo "UNCONN 0 0 0.0.0.0:9000 0.0.0.0:*"
 '         > "$SKEW/stub/ss"
     chmod +x "$SKEW/stub"/*
 
-    python3 "$LAB/capture-panel.py" 8796 "$WORK/cap4.jsonl" --secret "$CAP_SECRET"         --version 9.9.9-capture --commit "$SKEW_SHA" --branch HEAD >"$WORK/panel4.log" 2>&1 &
+    # The version the panel claims must be the version that commit actually
+    # carries, and the branch must be one the checkout can be put on. Get
+    # either wrong and the script refuses before the pack step — correctly,
+    # and this drill then passed every later assertion without running one.
+    SKEW_VERSION="$(tr -d '[:space:]' < "$SKEW/src/VERSION")"
+
+    python3 "$LAB/capture-panel.py" 8796 "$WORK/cap4.jsonl" --secret "$CAP_SECRET" \
+        --version "$SKEW_VERSION" --commit "$SKEW_SHA" --branch skew-gate >"$WORK/panel4.log" 2>&1 &
     CAP4_PID=$!
-    trap 'kill "$CAP_PID" "$CAP2_PID" "$CAP3_PID" "$CAP4_PID" 2>/dev/null; git -C "$REPO" worktree remove --force "$SKEW/src" 2>/dev/null; rm -rf "$WORK"' EXIT
+    trap 'kill "$CAP_PID" "$CAP2_PID" "$CAP3_PID" "$CAP4_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
 
     for _ in $(seq 1 40); do
         (exec 3<>"/dev/tcp/127.0.0.1/8796") 2>/dev/null && break
         sleep 0.25
     done
+
+    # A panel that did not start is a panel somebody else is running on that
+    # port, and it answers with somebody else's release — which sent this
+    # drill chasing a version mismatch that had nothing to do with it.
+    if ! kill -0 "$CAP4_PID" 2>/dev/null; then
+        bad "the drill's panel could not start on 8796" \
+            "$(head -3 "$WORK/panel4.log" | tr '\n' ' ')"
+    fi
 
     mkdir -p "$WORK/etc4"
     cat > "$WORK/etc4/coordinator.env" <<ENVFILE
@@ -706,8 +738,21 @@ AKCONNECT_PANEL_URL=http://127.0.0.1:8796
 AKCONNECT_COORDINATOR_SECRET=$CAP_SECRET
 ENVFILE
 
+        AKCONNECT_STUB_VERSION="$SKEW_VERSION" \
     env PATH="$SKEW/stub:$PATH" HOME="$WORK"         AKCONNECT_ETC="$WORK/etc4" AKCONNECT_SRC="$SKEW/src"         AKCONNECT_BIN_DIR="$SKEW/bin" AKCONNECT_REEXEC=1         WINTUN_ZIP="$WORK/wintun.zip"         "$SCRIPT" >"$WORK/skew.out" 2>&1
     SKEW_CODE=$?
+
+    # First: did the run even get there? Three assertions below passed the
+    # first time this drill ran, on a run that stopped at the preflight and
+    # never reached the pack step at all. A check that cannot fail is worse
+    # than no check, because it is counted.
+    if ! grep -q "building the Windows installer" "$WORK/skew.out"; then
+        bad "the run never reached the pack step" \
+            "everything below would pass without testing anything; see $WORK/skew.out"
+        sed 's/^/      /' "$WORK/skew.out" | tail -12
+    else
+        ok "the run reached the pack step"
+    fi
 
     if grep -q "no akconnect-setup.exe was found" "$WORK/skew.out"; then
         bad "the installer was not found" "the script looked in its own directory, not the builder's"

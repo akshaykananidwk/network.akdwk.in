@@ -285,7 +285,11 @@ for tool in systemctl curl git openssl python3; do
 done
 pass "tools" "systemctl, curl, git, openssl, python3"
 
-[ -d "$SRC_DIR/.git" ] || die "no git checkout at $SRC_DIR.
+# Asked of git rather than by looking for a .git directory: in a worktree
+# (git worktree add) .git is a FILE, so the directory test refused a perfectly
+# good checkout — and refused it at the preflight, which made a drill built on
+# a worktree pass every later assertion without running any of them.
+git -C "$SRC_DIR" rev-parse --git-dir >/dev/null 2>&1 || die "no git checkout at $SRC_DIR.
     Clone it once:  git clone <your repo> $SRC_DIR
     Or point this at an existing one:  --src /path/to/checkout"
 
