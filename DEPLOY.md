@@ -498,6 +498,62 @@ Run `collect.ps1` at each stage and send me the zip.
 
 ---
 
+## Updating the edge servers
+
+The panel's updater updates the panel. The coordinator and the relay are Go
+services on a different machine, so they are upgraded there — one command, as
+root:
+
+```bash
+sudo /opt/akconnect/src/deploy/upgrade-edge.sh
+```
+
+It asks the panel which release it is on, builds both services from that exact
+commit, keeps the previous binaries in `/var/backups/akconnect`, installs,
+restarts, and then checks that both report the new version **and** are
+listening. It builds the Windows installer stamped for your panel and
+publishes it at a fixed address, which it prints. It never touches
+`/etc/akconnect` or `config.php`.
+
+It ends in one of two ways and nothing else:
+
+```
+  PASS — 12 step(s), all clean.
+```
+```
+  FAIL — the edge is NOT upgraded. 1 step(s) failed.
+```
+
+**Go.** The services need 1.24 or newer. The official tarball unpacks to
+`/usr/local/go`, which is on nobody's `PATH` in a root shell — the script looks
+there anyway, and refuses a toolchain too old to build with rather than failing
+halfway through a compile.
+
+**To stop doing this by hand:**
+
+```bash
+sudo /opt/akconnect/src/deploy/upgrade-edge.sh --install-timer
+```
+
+That installs a systemd timer which checks this panel hourly and upgrades the
+edge whenever the panel moves to a new release.
+
+### Why the panel's Update Now does not do this for you
+
+To build and restart services on the edge, the panel would need root on that
+machine, stored in the panel. The panel is a PHP application on the public
+internet holding the customer database; the edge holds the coordinator's
+private key and the relay secrets. One compromise of the panel would take the
+data plane with it, and keeping those apart is the whole point of the
+control-plane/data-plane split.
+
+So the edge pulls and the panel never reaches in. What the panel does instead
+is tell you: **Platform → Coordinator** shows the coordinator's and relay's
+versions against its own, and when they are behind it prints the command
+above.
+
+---
+
 ## Updating a panel that is already running
 
 Updates go through **System → Updates** in the panel, or `php cli/update.php`.

@@ -4,6 +4,7 @@
 #
 # Five gates, in the order that fails cheapest first:
 #
+#   0. the edge script — does upgrade-edge.sh fail honestly when it fails
 #   1. the test suites — PHP and Go, including -race
 #   2. the web gate — Apache + PHP-FPM + MariaDB, installed through the
 #      browser installer exactly as a customer would
@@ -14,6 +15,11 @@
 #
 # plus the Windows pack build, which is the part of the customer installer that
 # can be checked without a Windows machine.
+#
+# The edge-script gate is first because it is the cheapest and because of what
+# it is for: upgrade-edge.sh shipped with a failed preflight printing "All
+# steps passed", which is precisely the false pass every other gate here
+# exists to prevent. A deployment script is code and gets gated like code.
 #
 # Any one of them red means the release does not ship.
 #
@@ -101,6 +107,10 @@ windows_pack() {
     "$REPO/services/kit/build-windows-pack.sh" >/dev/null
 }
 
+# The deployment script's own honesty. It shipped with a failed preflight
+# printing "All steps passed", which is the class of defect every other gate
+# here exists to find.
+run_gate "the edge script fails honestly"  "$LAB/edge-script-gate.sh"
 run_gate "Windows pack builds and is stamped" windows_pack
 run_gate "web gate (Apache + PHP-FPM)" web_gate
 run_gate "Argon2 gate (libsodium)"     argon2_gate

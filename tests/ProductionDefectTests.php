@@ -31,6 +31,7 @@ final class ProductionDefectTests
         self::coordinatorValidation();
         self::uploadsControlIsShipped();
         self::deployDocument();
+        self::edgeUpgradeScript();
     }
 
     // ---------------------------------------------------------------- #1, #9
@@ -241,6 +242,86 @@ final class ProductionDefectTests
             ['uploads/.htaccess'],
             PathGuard::SHIPPED_CONTROLS,
             'the carve-out is exactly one file wide'
+        );
+    }
+
+    // ----------------------------------------------- the edge script (1.9.2)
+
+    /**
+     * The deployment script's own honesty, as far as a PHP test can see it.
+     *
+     * The script shipped with a failed preflight printing "All steps passed",
+     * which is the false-pass class every gate in this project exists to
+     * prevent — printed by my own deployment script, on the first thing the
+     * operator ran. The behaviour is exercised properly by
+     * services/lab/edge-script-gate.sh, which runs the real script eleven
+     * ways; these are the invariants that can be checked by reading it, so
+     * that a rewrite cannot quietly drop them.
+     */
+    private static function edgeUpgradeScript(): void
+    {
+        TestCase::group('The edge upgrade script cannot report a false pass');
+
+        $path = APP_ROOT . '/deploy/upgrade-edge.sh';
+        $script = (string) @file_get_contents($path);
+
+        TestCase::assert($script !== '', 'deploy/upgrade-edge.sh exists');
+        TestCase::assert(is_executable($path), 'and is executable');
+
+        // The three independent reasons a false pass is impossible.
+        TestCase::assertContains(
+            'trap on_exit EXIT',
+            $script,
+            'an EXIT trap has the last word on the verdict'
+        );
+        TestCase::assertContains(
+            'REACHED_END',
+            $script,
+            'and success is claimed only from the last line'
+        );
+        TestCase::assert(
+            substr_count($script, 'REACHED_END=1') === 2,
+            'which is set in exactly two places: the --check path and the end',
+            substr_count($script, 'REACHED_END=1') . ' occurrence(s)'
+        );
+        TestCase::assertContains(
+            'STOPPED_BECAUSE',
+            $script,
+            'and die() records why it stopped, so the reason is in the table'
+        );
+
+        // The summary must treat an unfinished run as a failure whatever the
+        // results list says.
+        TestCase::assertContains(
+            '$REACHED_END" -ne 1',
+            $script,
+            'the summary fails an unfinished run'
+        );
+
+        // Go where the official tarball puts it.
+        foreach (['/usr/local/go/bin', '/usr/lib/go'] as $location) {
+            TestCase::assertContains(
+                $location,
+                $script,
+                'it looks for Go in ' . $location
+            );
+        }
+        TestCase::assertContains(
+            'Environment=PATH=/usr/local/go/bin',
+            $script,
+            'and the systemd unit it installs has that on its PATH too'
+        );
+
+        // A toolchain too old to build with is refused up front.
+        TestCase::assertContains('1.24', $script, 'and it refuses a Go older than the services need');
+
+        // The gate that runs it for real.
+        $gate = APP_ROOT . '/services/lab/edge-script-gate.sh';
+        TestCase::assert(is_file($gate) && is_executable($gate), 'the script has a gate of its own');
+        TestCase::assertContains(
+            'edge-script-gate.sh',
+            (string) @file_get_contents(APP_ROOT . '/services/lab/release.sh'),
+            'and release.sh runs it'
         );
     }
 

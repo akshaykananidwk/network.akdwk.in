@@ -43,15 +43,41 @@ while [ $# -gt 0 ]; do
 done
 
 # ------------------------------------------------------------------ reporting
+#
+# The summary is arranged so that a false pass is not something this script can
+# produce. An early version could, and did: the preflight found no Go, printed
+# "✗ go is not installed", and then — because die() summarised a results list
+# that was still empty — finished with "All steps passed." That is the exact
+# failure this whole project keeps finding in other people's code, printed by
+# my own script, on the first thing an operator ran.
+#
+# Three separate reasons it cannot happen now:
+#
+#   - die() records a FAIL before it stops, so the thing that killed the run is
+#     in the table;
+#   - REACHED_END is set on the last line and nowhere else, and the EXIT trap
+#     treats any other exit as a failure whatever the table says;
+#   - a summary with no results at all is a failure, because a run that
+#     checked nothing has proved nothing.
 
 RESULTS=()
 FAILED=0
+REACHED_END=0
+STOPPED_BECAUSE=""
+TEMP_PATHS=()
 
 pass() { RESULTS+=("PASS|$1|${2:-}"); }
 fail() { RESULTS+=("FAIL|$1|${2:-}"); FAILED=$((FAILED + 1)); }
 step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
 say()  { printf '  %s\n' "$*"; }
-die()  { printf '\n  \033[31m✗ %s\033[0m\n\n' "$*" >&2; summary; exit 1; }
+
+# die stops the run and makes sure the reason is in the table. It does not
+# print the summary itself — the EXIT trap does, exactly once.
+die() {
+    printf '\n  \033[31m✗ %s\033[0m\n' "$*" >&2
+    STOPPED_BECAUSE="$*"
+    exit 1
+}
 
 summary() {
     printf '\n\033[1m  Edge upgrade\033[0m\n'
@@ -59,7 +85,7 @@ summary() {
     printf '  %-34s %-6s %s\n' "----------------------------------" "------" "------------------------------"
 
     local line name result detail
-    for line in "${RESULTS[@]}"; do
+    for line in ${RESULTS[@]+"${RESULTS[@]}"}; do
         result="${line%%|*}"
         name="${line#*|}"; name="${name%%|*}"
         detail="${line##*|}"
@@ -71,12 +97,56 @@ summary() {
         fi
     done
 
-    if [ "$FAILED" -gt 0 ]; then
-        printf '\n  \033[31m%d step(s) FAILED.\033[0m The edge is not upgraded.\n\n' "$FAILED"
-    else
-        printf '\n  \033[32mAll steps passed.\033[0m\n\n'
+    if [ "${#RESULTS[@]}" -eq 0 ]; then
+        printf '  (nothing ran)\n'
     fi
+
+    if [ "$FAILED" -gt 0 ] || [ "$REACHED_END" -ne 1 ] || [ "${#RESULTS[@]}" -eq 0 ]; then
+        printf '\n  \033[31mFAIL\033[0m — the edge is NOT upgraded.'
+        if [ "$FAILED" -gt 0 ]; then
+            printf ' %d step(s) failed.' "$FAILED"
+        fi
+        printf '\n\n'
+
+        return 1
+    fi
+
+    printf '\n  \033[32mPASS\033[0m — %d step(s), all clean.\n\n' "${#RESULTS[@]}"
+
+    return 0
 }
+
+# One EXIT trap: it cleans up and it has the last word on the verdict.
+#
+# Anything that leaves this script other than the final line is a failure,
+# including an error nobody thought to check for — which is the point. A
+# summary is printed exactly once, from here.
+on_exit() {
+    local code=$?
+
+    local path
+    for path in ${TEMP_PATHS[@]+"${TEMP_PATHS[@]}"}; do
+        rm -rf "$path"
+    done
+
+    if [ "$REACHED_END" -ne 1 ]; then
+        fail "run completed" "${STOPPED_BECAUSE:-stopped before finishing (exit $code)}"
+    fi
+
+    summary || true
+
+    if [ "$REACHED_END" -ne 1 ] || [ "$FAILED" -gt 0 ]; then
+        [ "$code" -ne 0 ] && exit "$code"
+
+        exit 1
+    fi
+
+    exit 0
+}
+trap on_exit EXIT
+
+# keep registers a temporary path for the trap to remove.
+keep() { TEMP_PATHS+=("$1"); }
 
 # ------------------------------------------------------------------ preflight
 
@@ -84,14 +154,75 @@ step "preflight"
 
 [ "$(id -u)" -eq 0 ] || die "run this as root: sudo $0"
 
-for tool in systemctl curl git go openssl python3; do
-    command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed. $(
-        case "$tool" in
-            go) printf 'Install Go 1.22 or newer: apt install golang-go, or from https://go.dev/dl/' ;;
-            *)  printf 'apt install %s' "$tool" ;;
-        esac)"
+# Go first, and by looking rather than by asking.
+#
+# The official tarball installs to /usr/local/go/bin, which is on nobody's PATH
+# in a fresh root shell and certainly not under systemd — so `command -v go`
+# says Go is missing on a machine where Go is installed and working. An
+# operator who followed go.dev's own instructions got told to install what they
+# had just installed.
+find_go() {
+    if command -v go >/dev/null 2>&1; then
+        GO_BIN="$(command -v go)"
+
+        return 0
+    fi
+
+    local candidate
+    for candidate in /usr/local/go/bin/go /usr/lib/go/bin/go /usr/lib/go-*/bin/go \
+                     /opt/go/bin/go "$HOME/go/bin/go" /snap/bin/go; do
+        if [ -x "$candidate" ]; then
+            GO_BIN="$candidate"
+            # Exported, because the build below shells out and `go` itself
+            # needs its own toolchain directory on PATH.
+            PATH="$(dirname "$candidate"):$PATH"
+            export PATH
+
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+GO_BIN=""
+find_go || die "Go is not installed, or is somewhere this script does not look.
+    Looked on PATH and in: /usr/local/go/bin, /usr/lib/go/bin, /usr/lib/go-*/bin,
+    /opt/go/bin, ~/go/bin, /snap/bin.
+    Install it with:  apt install golang-go
+    or from https://go.dev/dl/ — the tarball unpacks to /usr/local/go, which
+    this script finds without PATH being set."
+
+GO_VERSION="$("$GO_BIN" version 2>/dev/null | awk '{print $3}')"
+
+# The services declare go 1.24, and a toolchain older than that fails deep
+# inside the build with a message about a language feature. Said here instead,
+# because `apt install golang-go` on an older Debian is exactly how somebody
+# ends up with 1.19 and no idea why the build stopped.
+GO_MAJOR="$(printf '%s' "${GO_VERSION#go}" | cut -d. -f1)"
+GO_MINOR="$(printf '%s' "${GO_VERSION#go}" | cut -d. -f2)"
+
+case "$GO_MAJOR.$GO_MINOR" in
+    ''|*[!0-9.]*)
+        say "could not read the Go version from '$GO_VERSION'; carrying on"
+        ;;
+    *)
+        if [ "$GO_MAJOR" -lt 1 ] || { [ "$GO_MAJOR" -eq 1 ] && [ "$GO_MINOR" -lt 24 ]; }; then
+            die "Go $GO_VERSION is too old — the services need 1.24 or newer.
+    Found at: $GO_BIN
+    The distribution package is often behind; https://go.dev/dl/ unpacks to
+    /usr/local/go, which this script finds without PATH being set."
+        fi
+        ;;
+esac
+
+pass "go" "${GO_VERSION:-unknown} at $GO_BIN"
+
+for tool in systemctl curl git openssl python3; do
+    command -v "$tool" >/dev/null 2>&1 \
+        || die "$tool is not installed. Install it with:  apt install $tool"
 done
-pass "tools" "systemctl, curl, git, go, openssl, python3"
+pass "tools" "systemctl, curl, git, openssl, python3"
 
 [ -d "$SRC_DIR/.git" ] || die "no git checkout at $SRC_DIR.
     Clone it once:  git clone <your repo> $SRC_DIR
@@ -191,6 +322,12 @@ Type=oneshot
 # Root, because it installs binaries into /usr/local/bin and restarts
 # services. Nothing else here runs as root.
 User=root
+# systemd gives a unit a minimal PATH that does not include /usr/local/go/bin,
+# which is where the official Go tarball puts itself. The script looks there
+# anyway, and this is belt and braces for the same problem: a timer that could
+# not find the toolchain would fail quietly once an hour.
+Environment=PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=/root
 ExecStart=$self
 # A build is slow on a small VPS, and a timer unit that gives up halfway
 # through one leaves a half-installed edge.
@@ -222,7 +359,7 @@ UNIT
 step "asking the panel which release it is on"
 
 RELEASE_JSON="$(mktemp)"
-trap 'rm -f "$RELEASE_JSON"' EXIT
+keep "$RELEASE_JSON"
 
 if ! panel_get "/api/v1/edge/release" "$RELEASE_JSON"; then
     fail "panel reachable" "$PANEL did not answer, or the shared secret does not match"
@@ -246,13 +383,13 @@ say "here:   coordinator ${CURRENT_COORD:-none}, relay ${CURRENT_RELAY:-none}"
 if [ "$CHECK_ONLY" -eq 1 ]; then
     if [ "$CURRENT_COORD" = "$TARGET_VERSION" ] && [ "$CURRENT_RELAY" = "$TARGET_VERSION" ]; then
         pass "up to date" "both services are on $TARGET_VERSION"
-        summary
-        exit 0
+    else
+        fail "up to date" "coordinator ${CURRENT_COORD:-none}, relay ${CURRENT_RELAY:-none}, panel $TARGET_VERSION"
     fi
 
-    fail "up to date" "coordinator ${CURRENT_COORD:-none}, relay ${CURRENT_RELAY:-none}, panel $TARGET_VERSION"
-    summary
-    exit 1
+    REACHED_END=1
+
+    exit 0
 fi
 
 # --------------------------------------------------------------- the source
@@ -298,12 +435,12 @@ pass "source matches the panel" "$REPO_VERSION at $BUILT_FROM"
 step "building the coordinator and the relay"
 
 BUILD_DIR="$(mktemp -d)"
-trap 'rm -f "$RELEASE_JSON"; rm -rf "$BUILD_DIR"' EXIT
+keep "$BUILD_DIR"
 
 build_one() {
     local svc=$1 out=$2
     ( cd "$SRC_DIR/services/$svc" \
-        && CGO_ENABLED=0 go build -trimpath \
+        && CGO_ENABLED=0 "$GO_BIN" build -trimpath \
             -ldflags "-s -w -X main.version=$TARGET_VERSION" \
             -o "$out" "./cmd/akconnect-$svc" )
 }
@@ -470,11 +607,11 @@ if [ "$INSTALL_TIMER" -eq 1 ]; then
     fi
 fi
 
-summary
-
-if [ -n "$PACK_URL" ]; then
-    printf '  \033[1mSend the customer this, with a join code:\033[0m\n'
-    printf '    %s\n\n' "$PACK_URL"
+if [ -n "$PACK_URL" ] && [ "$FAILED" -eq 0 ]; then
+    printf '\n  \033[1mSend the customer this, with a join code:\033[0m\n'
+    printf '    %s\n' "$PACK_URL"
 fi
 
-[ "$FAILED" -eq 0 ]
+# The last line, and the only place this is set. The EXIT trap prints the
+# summary and decides the exit status from here.
+REACHED_END=1
