@@ -21,6 +21,8 @@ func TestWhatTheIconSays(t *testing.T) {
 		headline string
 		ok       bool
 		ip       string
+		// detail is a phrase the detail line must contain, when one matters.
+		detail string
 	}{
 		{
 			name:     "nothing on disk at all",
@@ -91,13 +93,32 @@ func TestWhatTheIconSays(t *testing.T) {
 			// The panel being reachable is what makes this different from an
 			// internet problem, and it is the whole diagnosis: traffic leaves
 			// this computer and does not return.
+			//
+			// Since 1.9.6 the agent answers that by trying TCP 443, so this
+			// says so rather than sending somebody for a diagnostics file
+			// during the few seconds that takes.
 			name: "the panel answers but the coordinator never does",
 			rt: &state.Runtime{
 				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: true, CoordinatorUp: false,
 				Unanswered: 14, Peers: []state.RuntimePeer{{Path: "connecting"}},
 			},
-			headline: "Something here is blocking AK Connect",
+			headline: "Still trying to connect",
 			ip:       "10.50.0.3",
+		},
+		{
+			// Connected, but only because the HTTPS path exists. Said
+			// plainly: somebody who sees an unexplained word telephones about
+			// it, and the explanation is short and ends in "nothing to do".
+			name: "connected over the HTTPS fallback",
+			rt: &state.Runtime{
+				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: true, CoordinatorUp: true,
+				Fallback: &state.RuntimeFallback{URL: "wss://net.akdwk.in/fallback"},
+				Peers:    []state.RuntimePeer{{Path: "relay-https"}},
+			},
+			headline: "Connected",
+			ok:       true,
+			ip:       "10.50.0.3",
+			detail:   "only allows web traffic",
 		},
 		{
 			// The tray runs as the customer and the service as SYSTEM. A
@@ -126,6 +147,9 @@ func TestWhatTheIconSays(t *testing.T) {
 			}
 			if got.IP != tc.ip {
 				t.Errorf("IP = %q, want %q", got.IP, tc.ip)
+			}
+			if tc.detail != "" && !strings.Contains(got.Detail, tc.detail) {
+				t.Errorf("detail = %q, want it to mention %q", got.Detail, tc.detail)
 			}
 			if tip := tooltip(got); len(tip) > 127 {
 				t.Errorf("tooltip is %d characters; Windows truncates at 127", len(tip))

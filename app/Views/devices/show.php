@@ -98,7 +98,40 @@ declare(strict_types=1);
         </dd></div>
         <div><dt>Private IP</dt><dd><code><?= e($device['virtual_ip'] ?: '—') ?></code></dd></div>
         <div><dt>Operating system</dt><dd><?= e($device['os']) ?> <?= e($device['os_version']) ?> <span class="text-muted"><?= e($device['arch']) ?></span></dd></div>
-        <div><dt>Agent version</dt><dd><?= e($device['agent_version'] ?: '—') ?></dd></div>
+        <div><dt>Agent version</dt><dd>
+            <?= e($device['agent_version'] ?: '—') ?>
+            <?php
+            // What this device did about the last release it was offered.
+            //
+            // An all-in-one stayed on 1.9.3 for days after 1.9.4 was
+            // published and nobody found out, because everything the agent
+            // does about an update it does silently: from here a machine that
+            // never checked and one that refused a bad signature both looked
+            // like a version number that had not moved.
+            $updateState = (string) ($device['update_state'] ?? 'idle');
+            $updateVersion = (string) ($device['update_version'] ?? '');
+            $updateError = (string) ($device['update_error'] ?? '');
+            $updateChecked = $device['update_checked_at'] ?? null;
+            ?>
+            <?php if ($updateChecked === null): ?>
+                <p class="field-hint">This device has not checked for an update yet. A running
+                    agent checks five minutes after it starts and every six hours after that.</p>
+            <?php elseif ($updateState === 'failed'): ?>
+                <p class="field-hint text-danger">
+                    <?= e($updateVersion !== '' ? 'Update to ' . $updateVersion . ' failed' : 'The update check failed') ?>
+                    <?= $updateError !== '' ? ': ' . e($updateError) : '' ?>
+                    <span class="text-muted">(<?= e(time_ago($updateChecked)) ?>)</span>
+                </p>
+            <?php elseif ($updateState === 'installed'): ?>
+                <p class="field-hint">Installed <?= e($updateVersion) ?> and restarted
+                    <span class="text-muted">(<?= e(time_ago($updateChecked)) ?>)</span>.</p>
+            <?php elseif ($updateState === 'downloading' || $updateState === 'offered'): ?>
+                <p class="field-hint">Updating to <?= e($updateVersion) ?>
+                    <span class="text-muted">(<?= e(time_ago($updateChecked)) ?>)</span>.</p>
+            <?php else: ?>
+                <p class="field-hint">Up to date as of <?= e(time_ago($updateChecked)) ?>.</p>
+            <?php endif; ?>
+        </dd></div>
         <div><dt>Public endpoint</dt><dd><code><?= e($device['last_endpoint'] ?: '—') ?></code></dd></div>
         <div><dt>LAN endpoint</dt><dd><code><?= e($device['last_lan_endpoint'] ?: '—') ?></code></dd></div>
         <div><dt>Latency</dt><dd><?= $device['latency_ms'] !== null ? e($device['latency_ms']) . ' ms' : '—' ?></dd></div>

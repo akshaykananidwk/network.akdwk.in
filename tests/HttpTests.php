@@ -64,6 +64,7 @@ final class HttpTests
             self::edgeUpgrade();
             self::installLink();
             self::deviceUpdateNow();
+            self::deviceUpdateState();
             self::coordinatorSaysUnanswered();
             self::selfUpdate();
         } finally {
@@ -970,6 +971,121 @@ final class HttpTests
         );
 
         TenantScope::asTenant($tenantId, static fn (): mixed => Device::recordUnanswered($deviceId, false));
+    }
+
+    /**
+     * 1.9.6: what a device did about the last release, visible in the panel.
+     *
+     * An all-in-one at a customer site stayed on 1.9.3 for days after 1.9.4
+     * was published and nobody found out. Everything the agent does about an
+     * update it does silently — the check, the offer, the download, the
+     * signature, the swap — and every failure path is a line in a log file on
+     * the customer's machine. From the panel a device that never checked and
+     * a device that refused a badly signed release looked identical: a
+     * version number that had not moved.
+     *
+     * So the agent reports where it got to, on the heartbeat it already
+     * sends, and the device page says it in a sentence.
+     */
+    private static function deviceUpdateState(): void
+    {
+        TestCase::group('HTTP — what a device did about the last release (1.9.6)');
+
+        $client = self::signIn('alpha');
+        $deviceId = (int) self::$fixtures['alpha']['device_id'];
+        $tenantId = (int) self::$fixtures['alpha']['tenant_id'];
+
+        $agent = [
+            'Authorization' => 'Bearer ' . (string) self::$fixtures['alpha']['device_token'],
+            'Content-Type'  => 'application/json',
+            'Accept'        => 'application/json',
+        ];
+        $api = self::client();
+
+        $read = static fn (): array => (array) TenantScope::asTenant(
+            $tenantId,
+            static fn (): ?array => Device::find($deviceId)
+        );
+
+        // A device that checked and had nothing to do. Worth recording: it is
+        // what tells "up to date" apart from "has never asked".
+        $api->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'direct',
+            'update'          => ['state' => 'idle'],
+        ]), $agent);
+        TestCase::assertSame(200, $api->status(), 'a heartbeat carrying an update report is accepted');
+
+        $device = $read();
+        TestCase::assertSame('idle', (string) ($device['update_state'] ?? ''), 'the state is recorded');
+        TestCase::assert(
+            ($device['update_checked_at'] ?? null) !== null,
+            'and when it was checked, which is what separates up to date from never asked'
+        );
+
+        // A refusal. This is the one that has to reach a person: the device is
+        // healthy, heartbeating, and running software it should have replaced.
+        $api->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'direct',
+            'update'          => [
+                'state'   => 'failed',
+                'version' => '1.9.6',
+                'error'   => 'refused: the signature does not verify against this panel\'s key',
+            ],
+        ]), $agent);
+
+        $device = $read();
+        TestCase::assertSame('failed', (string) ($device['update_state'] ?? ''), 'a refusal is recorded');
+        TestCase::assertSame('1.9.6', (string) ($device['update_version'] ?? ''), 'with the version it refused');
+        TestCase::assertContains(
+            'does not verify',
+            (string) ($device['update_error'] ?? ''),
+            'and why, in the agent\'s own words'
+        );
+
+        $client->get('/devices/' . $deviceId);
+        TestCase::assertContains(
+            'Update to 1.9.6 failed',
+            $client->body(),
+            'and the device page says so rather than showing a version that has not moved'
+        );
+
+        // A state the column does not hold is filed as idle rather than
+        // refused: a newer agent inventing one must not cost its heartbeat.
+        $api->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'direct',
+            'update'          => ['state' => 'rolling-back', 'version' => '1.9.7'],
+        ]), $agent);
+        TestCase::assertSame(200, $api->status(), 'an unknown state does not cost the heartbeat');
+        TestCase::assertSame('idle', (string) ($read()['update_state'] ?? ''), 'and is filed as idle');
+
+        // An error longer than the column is truncated, not refused, for the
+        // same reason.
+        $api->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'direct',
+            'update'          => [
+                'state'   => 'failed',
+                'version' => '1.9.6',
+                'error'   => str_repeat('x', 400),
+            ],
+        ]), $agent);
+        TestCase::assertSame(200, $api->status(), 'an over-long error does not cost the heartbeat either');
+        TestCase::assert(
+            mb_strlen((string) ($read()['update_error'] ?? '')) <= 255,
+            'and is stored truncated'
+        );
+
+        // Installed, which is the ordinary outcome and must read as one.
+        $api->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'direct',
+            'update'          => ['state' => 'installed', 'version' => '1.9.6'],
+        ]), $agent);
+
+        $client->get('/devices/' . $deviceId);
+        TestCase::assertContains(
+            'Installed 1.9.6',
+            $client->body(),
+            'a successful update is shown as one'
+        );
     }
 
     /**

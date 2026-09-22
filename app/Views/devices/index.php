@@ -66,7 +66,12 @@ declare(strict_types=1);
                             <?php endforeach; ?>
                         </td>
                         <td><?= e($device['os']) ?><div class="text-muted text-sm"><?= e($device['os_version']) ?></div></td>
-                        <td class="text-muted"><?= e($device['agent_version'] ?: '—') ?></td>
+                        <td class="text-muted">
+                            <?= e($device['agent_version'] ?: '—') ?>
+                            <?php if ((string) ($device['update_state'] ?? '') === 'failed'): ?>
+                                <span class="text-danger" title="<?= e((string) ($device['update_error'] ?? 'the last update failed')) ?>">!</span>
+                            <?php endif; ?>
+                        </td>
                         <td><code><?= e($device['virtual_ip'] ?: '—') ?></code></td>
                         <td><?= \App\Core\View::partial('partials.connection', ['device' => $device]) ?></td>
                         <td class="text-muted text-sm"><?= e($device['last_endpoint'] ?: '—') ?></td>

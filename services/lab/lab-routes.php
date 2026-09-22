@@ -11,6 +11,7 @@ declare(strict_types=1);
  */
 
 use App\Middleware\TenantScope;
+use App\Models\Device;
 use App\Models\Network;
 use App\Models\NetworkRoute;
 use App\Services\AclService;
@@ -263,6 +264,64 @@ function labProblems(string $uid): int
             (string) ($problem['detail'] ?? '')
         );
     }
+
+    return 0;
+}
+
+/**
+ * Ask a device to check for an update now, the way the panel's button does.
+ *
+ * The drill needs the product's own path rather than a test-only shortcut. An
+ * administrator pressing "Update now" is what sets this flag, and the agent
+ * consumes it on its next poll — so a drill that uses it is exercising the
+ * automatic in-process update, which is the path that failed in the field. The
+ * manual `agent update` command is a different code path and was the only one
+ * anything proved.
+ */
+function labUpdateNow(string $uid): int
+{
+    if ($uid === '') {
+        return fail('usage: update-now <device-uid>');
+    }
+
+    $device = findDevice($uid);
+    if ($device === null) {
+        return fail("device {$uid} not found");
+    }
+
+    TenantScope::asTenant((int) $device['tenant_id'], static function () use ($device): void {
+        Device::requestUpdate((int) $device['id']);
+    });
+
+    return 0;
+}
+
+/**
+ * Print what a device has reported about the last release it was offered.
+ *
+ * As "state|version|error". This exists because an all-in-one at a customer
+ * site stayed on an old version for days and nobody found out: everything the
+ * agent does about an update it does silently, and from the panel a machine
+ * that never checked looked exactly like one that refused a bad signature.
+ * Both were a version number that had not moved.
+ */
+function labUpdateState(string $uid): int
+{
+    if ($uid === '') {
+        return fail('usage: update-state <device-uid>');
+    }
+
+    $device = findDevice($uid);
+    if ($device === null) {
+        return fail("device {$uid} not found");
+    }
+
+    printf(
+        "%s|%s|%s\n",
+        (string) ($device['update_state'] ?? ''),
+        (string) ($device['update_version'] ?? ''),
+        (string) ($device['update_error'] ?? '')
+    );
 
     return 0;
 }

@@ -131,6 +131,9 @@ type session struct {
 	// are "configured the same" and behave differently are usually two
 	// different answers to this, and it used to exist only in a log line.
 	coordinator string
+	// updateState is what this agent last did about a release, reported on
+	// the next heartbeat. Nil until it has checked once.
+	updateState *panel.UpdateState
 	// peerMeta maps a peer's hex public key to the names the panel gave it,
 	// which the WireGuard device itself does not carry.
 	peerMeta  map[string]peerNames

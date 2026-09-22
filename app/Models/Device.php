@@ -286,6 +286,51 @@ final class Device extends Model
     }
 
     /**
+     * Record what a device did about the last release it was offered.
+     *
+     * Raw SQL and not through update(), because these are not in $fillable and
+     * never will be: an administrator does not type them, a device reports
+     * them, and a mass-assignment path for a column that governs what software
+     * a fleet runs is not a thing to have.
+     *
+     * The valid states are the ones the column holds; anything else is filed
+     * as idle rather than refused, because a newer agent inventing a state is
+     * not a reason to lose its heartbeat.
+     */
+    public static function recordUpdateState(
+        int $deviceId,
+        string $state,
+        ?string $version,
+        ?string $error
+    ): void {
+        if (!in_array($state, self::UPDATE_STATES, true)) {
+            $state = 'idle';
+        }
+
+        DB::execute(
+            'UPDATE ' . self::tableName() . '
+             SET update_state = :s,
+                 update_version = :v,
+                 update_error = :e,
+                 update_checked_at = UTC_TIMESTAMP(),
+                 updated_at = UTC_TIMESTAMP()
+             WHERE id = :id',
+            [
+                's'  => $state,
+                'v'  => $version === '' ? null : $version,
+                // Truncated rather than refused: a long error is still worth
+                // most of itself, and losing the whole heartbeat over it is
+                // losing the device.
+                'e'  => ($error === null || $error === '') ? null : mb_substr($error, 0, 255),
+                'id' => $deviceId,
+            ]
+        );
+    }
+
+    /** The states a device may report about an update. */
+    public const UPDATE_STATES = ['idle', 'offered', 'downloading', 'installed', 'failed'];
+
+    /**
      * Ask a device to check for an update now, instead of in six hours.
      *
      * Recorded rather than pushed. The agent asks the panel for its

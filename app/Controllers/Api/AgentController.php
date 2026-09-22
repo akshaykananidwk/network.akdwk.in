@@ -254,6 +254,24 @@ final class AgentController
         // acted on.
         Device::recordProblems((int) $device['id'], self::sanitiseProblems($input['problems'] ?? null));
 
+        // And what it did about the last release it was offered.
+        //
+        // Reported here rather than through an endpoint of its own because
+        // this is the message a device already sends and is already
+        // authenticated for, and because the interesting case — a device that
+        // is failing to update — is one that is otherwise perfectly healthy
+        // and heartbeating.
+        if (isset($input['update']) && is_array($input['update'])) {
+            $update = $input['update'];
+
+            Device::recordUpdateState(
+                (int) $device['id'],
+                (string) ($update['state'] ?? 'idle'),
+                isset($update['version']) ? mb_substr((string) $update['version'], 0, 32) : null,
+                isset($update['error']) ? (string) $update['error'] : null
+            );
+        }
+
         // How long the agent has been running, which is how the page answers
         // "did it restart?" without anybody telephoning the customer.
         if (isset($input['uptime_seconds'])) {

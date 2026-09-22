@@ -103,41 +103,65 @@ func fromRuntime(rt *state.Runtime) view {
 		// on a machine that was never going to connect — an office Wi-Fi where
 		// the same laptop had worked on a phone hotspot an hour before, and
 		// the tray said the same hopeful thing all afternoon.
+		//
+		// Since 1.9.6 the agent tries TCP 443 when this happens, so reaching
+		// this branch means even that has not worked yet. The wording waits
+		// rather than sending somebody for a file immediately: the fallback
+		// takes a few seconds, and a message that cried wolf during those
+		// seconds would be the same mistake in the other direction.
 		return view{
-			Headline: "Something here is blocking " + displayName,
+			Headline: "Still trying to connect",
 			Detail: "This computer reaches the panel, but nothing answers it back — usually a " +
-				"firewall on this network. Right-click here, choose Collect diagnostics, and " +
-				"send the file to your supplier.",
+				"firewall on this network. " + displayName + " is trying another way round. " +
+				"If this does not clear in a minute, right-click here, choose Collect " +
+				"diagnostics, and send the file to your supplier.",
 			IP: rt.VirtualIP,
 		}
 	case total == 0:
 		return view{
 			Headline: "Connected",
-			Detail:   "No other computers on this network yet.",
+			Detail:   withFallbackNote("No other computers on this network yet.", rt),
 			IP:       rt.VirtualIP,
 			OK:       true,
 		}
 	case reachable == 0:
 		return view{
 			Headline: "Connecting to the other computers",
-			Detail:   fmt.Sprintf("None of %s reachable yet. This usually takes a few seconds.", plural(total)),
-			IP:       rt.VirtualIP,
+			Detail: withFallbackNote(
+				fmt.Sprintf("None of %s reachable yet. This usually takes a few seconds.", plural(total)), rt),
+			IP: rt.VirtualIP,
 		}
 	case reachable < total:
 		return view{
 			Headline: "Connected",
-			Detail:   fmt.Sprintf("%d of %s reachable.", reachable, plural(total)),
+			Detail:   withFallbackNote(fmt.Sprintf("%d of %s reachable.", reachable, plural(total)), rt),
 			IP:       rt.VirtualIP,
 			OK:       true,
 		}
 	default:
 		return view{
 			Headline: "Connected",
-			Detail:   fmt.Sprintf("All %s reachable.", plural(total)),
+			Detail:   withFallbackNote(fmt.Sprintf("All %s reachable.", plural(total)), rt),
 			IP:       rt.VirtualIP,
 			OK:       true,
 		}
 	}
+}
+
+// withFallbackNote says, once, that this network needed the HTTPS path.
+//
+// Said plainly and closed off. Somebody who sees a word like "relay" without
+// an explanation telephones about it, and the honest explanation is short:
+// this network does not carry the usual traffic, we are using the kind a
+// browser uses, everything works, there is nothing to do. Without the last
+// clause it reads as a warning, and it is not one.
+func withFallbackNote(detail string, rt *state.Runtime) string {
+	if rt.Fallback == nil {
+		return detail
+	}
+
+	return detail + " This network only allows web traffic, so " + displayName +
+		" is using that. Nothing needs changing."
 }
 
 // countReachable counts peers with a path that carries traffic.

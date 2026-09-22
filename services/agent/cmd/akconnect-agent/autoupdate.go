@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/selfupdate"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/winsvc"
 )
@@ -51,23 +52,34 @@ func (s *session) maybeUpdate(ctx context.Context) {
 	if err != nil {
 		// Not worth a line on every poll: the heartbeat beside it already
 		// reports when the panel is unreachable.
+		s.noteUpdate("failed", "", "could not ask the panel: "+err.Error())
+
 		return
 	}
 	if !offer.Available || offer.Version == "" {
+		// Checked, nothing to do. Recorded, because "this device is up to
+		// date" and "this device has never asked" are different answers and
+		// the panel could not tell them apart.
+		s.noteUpdate("idle", "", "")
+
 		return
 	}
 
 	if s.controllerKey == "" {
 		s.logf("update %s is offered but this panel publishes no controller key; not installing", offer.Version)
+		s.noteUpdate("failed", offer.Version,
+			"this panel publishes no controller key, so no release can be verified")
 
 		return
 	}
 
 	s.logf("update %s is offered (running %s); downloading", offer.Version, version)
+	s.noteUpdate("downloading", offer.Version, "")
 
 	staged, err := download(ctx, s.client, offer)
 	if err != nil {
 		s.logf("update %s could not be downloaded: %v", offer.Version, err)
+		s.noteUpdate("failed", offer.Version, "download failed: "+err.Error())
 
 		return
 	}
@@ -75,17 +87,20 @@ func (s *session) maybeUpdate(ctx context.Context) {
 
 	if err := selfupdate.Verify(staged, offer.SHA256, offer.Signature, s.controllerKey); err != nil {
 		s.logf("update %s REFUSED: %v", offer.Version, err)
+		s.noteUpdate("failed", offer.Version, "refused: "+err.Error())
 
 		return
 	}
 
 	if _, err := selfupdate.Apply(staged); err != nil {
 		s.logf("update %s could not be installed: %v", offer.Version, err)
+		s.noteUpdate("failed", offer.Version, "could not be installed: "+err.Error())
 
 		return
 	}
 
 	s.logf("update %s installed and verified; restarting to run it", offer.Version)
+	s.noteUpdate("installed", offer.Version, "")
 
 	if !winsvc.IsService() {
 		s.logf("not running as a service, so nothing restarts this process; %s runs at the next start", offer.Version)
@@ -95,7 +110,18 @@ func (s *session) maybeUpdate(ctx context.Context) {
 
 	if err := winsvc.RestartDetached(); err != nil {
 		s.logf("update %s is on disk but the restart failed: %v", offer.Version, err)
+		s.noteUpdate("failed", offer.Version,
+			"installed on disk but the service would not restart: "+err.Error())
 	}
+}
+
+// noteUpdate records where this agent got to, for the next heartbeat.
+//
+// Held rather than sent, because the heartbeat is the message the panel
+// already trusts from this device and adding a second authenticated call for
+// one field would be two things to keep working instead of one.
+func (s *session) noteUpdate(state, version, detail string) {
+	s.updateState = &panel.UpdateState{State: state, Version: version, Error: detail}
 }
 
 // updateDue answers whether enough time has passed, and records the check.

@@ -87,6 +87,11 @@ func (s *session) heartbeat(ctx context.Context) error {
 	hb := panel.Heartbeat{
 		Revision: s.st.Revision,
 		Problems: s.problems(),
+		// What this agent last did about a release. Sent on every heartbeat
+		// rather than once, because the panel is the thing that has to notice
+		// a fleet that has stopped updating, and a report that arrives once
+		// is a report that is lost the first time a heartbeat fails.
+		Update: s.updateState,
 		// Rounded to whole seconds and always at least one, so a heartbeat
 		// sent in the first second of a restart still says "just started"
 		// rather than saying nothing, which the panel reads as unknown.

@@ -238,6 +238,25 @@ type Heartbeat struct {
 	// timestamp because a machine with a wrong clock is common and a duration
 	// does not care what the clock says.
 	UptimeSeconds int `json:"uptime_seconds,omitempty"`
+	// Update is this agent's own account of what it did about the last
+	// release it was offered.
+	//
+	// Nil until it has checked once. It is here because everything the agent
+	// does about an update it does silently, and every failure is a line in a
+	// log on the customer's machine: a machine that never checked and one
+	// that refused a bad signature look identical from the panel, both still
+	// on the old version. One did nothing wrong and one needs attention.
+	Update *UpdateState `json:"update,omitempty"`
+}
+
+// UpdateState is where a device got to with a release.
+type UpdateState struct {
+	// State is one of idle, offered, downloading, installed, failed.
+	State string `json:"state"`
+	// Version is the release this is about, empty when nothing was offered.
+	Version string `json:"version,omitempty"`
+	// Error is why it stopped, when it stopped badly.
+	Error string `json:"error,omitempty"`
 }
 
 // Problem is one thing that needs a person.

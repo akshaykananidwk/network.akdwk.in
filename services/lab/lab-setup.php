@@ -69,6 +69,8 @@ exit(match ($command) {
     'host'      => labHost($args),
     'zone'      => labZone((int) ($args[0] ?? 0)),
     'problems'  => labProblems((string) ($args[0] ?? '')),
+    'update-now' => labUpdateNow((string) ($args[0] ?? '')),
+    'update-state' => labUpdateState((string) ($args[0] ?? '')),
     'endpoint'  => labEndpoint((string) ($args[0] ?? '')),
     'joincode'  => labJoinCode($args),
     'usage'     => labUsage((int) ($args[0] ?? 0)),

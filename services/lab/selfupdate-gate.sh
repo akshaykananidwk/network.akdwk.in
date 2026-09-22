@@ -30,10 +30,14 @@ LOCAL_CONFIG="$REPO/config/config.local.php"
 
 OLD_VERSION="1.0.0-gate"
 NEW_VERSION="9.9.9-gate"
+# A third version for the drill that matters most: the one nobody runs a
+# command for. See "a running agent updates itself" below.
+AUTO_VERSION="9.9.10-gate"
 
 PASS=0
 FAIL=0
 SERVER_PID=""
+AGENT_PID=""
 TENANT=""
 WROTE_CONFIG=0
 
@@ -44,7 +48,9 @@ die()  { printf '\n  \033[31m✗ %s\033[0m\n\n' "$1"; FAIL=$((FAIL + 1)); exit 1
 
 cleanup() {
     [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
+    [ -n "$AGENT_PID" ] && kill "$AGENT_PID" 2>/dev/null
     php "$LAB/publish-agent.php" --withdraw "$NEW_VERSION" >/dev/null 2>&1
+    php "$LAB/publish-agent.php" --withdraw "$AUTO_VERSION" >/dev/null 2>&1
     [ -n "$TENANT" ] && php "$LAB/lab-setup.php" teardown "$TENANT" >/dev/null 2>&1
     # Only ours goes. An operator's own pin must survive a drill.
     [ "$WROTE_CONFIG" = "1" ] && rm -f "$LOCAL_CONFIG"
@@ -96,6 +102,11 @@ step "building two versions of the agent"
     && GOTOOLCHAIN=local CGO_ENABLED=0 go build \
         -ldflags "-X main.version=$NEW_VERSION" -o "$WORK/new-agent" ./cmd/akconnect-agent ) \
     || die "could not build the new agent"
+
+( cd "$REPO/services/agent" \
+    && GOTOOLCHAIN=local CGO_ENABLED=0 go build \
+        -ldflags "-X main.version=$AUTO_VERSION" -o "$WORK/auto-agent" ./cmd/akconnect-agent ) \
+    || die "could not build the agent for the automatic drill"
 
 AGENT="$WORK/akconnect-agent"
 export AKCONNECT_STATE_DIR="$WORK/state"
@@ -257,3 +268,69 @@ fi
 grep -q "removed the previous binary" "$WORK/up.log" \
     && pass "and it said so in the log" \
     || fail "it removed the binary without saying so" "an unexplained version change is a support call"
+
+# ------------------------------------------------- the drill that matters
+#
+# Everything above runs `agent update`, which is a person typing a command.
+# Nobody typed a command on the all-in-one that stayed on 1.9.3 for days after
+# 1.9.4 was published: the automatic path is a different function, runs inside
+# the poll loop, and had nothing proving it at all.
+#
+# So this one publishes a release and then does nothing but wait. The only
+# thing that happens is an administrator pressing "Update now" in the panel,
+# which is the product's own path and the one the owner actually pressed.
+
+step "a running agent updates itself, with nobody typing anything"
+
+php "$LAB/publish-agent.php" "$AUTO_VERSION" "$WORK/auto-agent" linux amd64 >/dev/null \
+    || die "could not publish the release for the automatic drill"
+
+php "$LAB/lab-setup.php" update-now "$UID_DEV" >/dev/null \
+    || die "could not ask the panel to update the device"
+pass "the panel is asked to update $UID_DEV, the way the button does"
+
+# Run it as the service runs it: a process that stays up and polls. Nothing
+# below invokes `update`.
+"$AGENT" up --iface akc-gate2 --port 51998 >"$WORK/auto.log" 2>&1 &
+AGENT_PID=$!
+
+INSTALLED=""
+for _ in $(seq 1 60); do
+    if [ "$(running_version)" = "$AUTO_VERSION" ]; then
+        INSTALLED=yes
+        break
+    fi
+    sleep 2
+done
+
+if [ -n "$INSTALLED" ]; then
+    pass "the binary on disk became $AUTO_VERSION without any command being run"
+else
+    fail "the running agent never updated itself" \
+        "still $(running_version); see $WORK/auto.log"
+fi
+
+# And the half that makes a stalled fleet visible. A machine that never
+# checked and a machine that refused a bad signature both look like a version
+# number that has not moved; only this tells them apart.
+STATE=""
+for _ in $(seq 1 30); do
+    STATE="$(php "$LAB/lab-setup.php" update-state "$UID_DEV" 2>/dev/null)"
+    case "$STATE" in installed\|*) break ;; esac
+    sleep 2
+done
+
+case "$STATE" in
+    "installed|$AUTO_VERSION|")
+        pass "and the panel shows it installed $AUTO_VERSION"
+        ;;
+    installed\|*)
+        fail "the panel shows the wrong version installed" "$STATE"
+        ;;
+    *)
+        fail "the panel was never told what the device did" "reported: ${STATE:-nothing}"
+        ;;
+esac
+
+kill "$AGENT_PID" 2>/dev/null
+AGENT_PID=""
