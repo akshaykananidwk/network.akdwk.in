@@ -74,6 +74,18 @@ to the panel as a problem rather than left to be discovered by a failing ping.
 download endpoints are now real, public, and stream the artefact that
 `upgrade-edge.sh` published.
 
+**Names stopped resolving wherever `/etc/hosts` is a bind mount**, which is
+every machine running in a container. The agent replaces it with a rename and a
+rename onto a bind mount fails with `EBUSY`. It now falls back to writing
+through the existing inode; the rename stays the default.
+
+**The resolver took systemd-resolved's own loopback addresses.** `127.0.0.54`
+was tried first and `127.0.0.53` second. Both are resolved's, both become free
+whenever its stub listener is off — the configuration of every machine running
+dnsmasq or Pi-hole beside it — and resolved refuses to be pointed at either,
+so the agent would bind one, be refused by `resolvectl` and fall back to the
+hosts file without saying why. The list now starts at `127.0.0.55`.
+
 **The coordinator's registry handed out live pointers to entries other
 goroutines were writing.** `Get` and `PeersOf` returned the stored `*Entry`,
 and every caller read it after the registry's lock was gone. It was latent
@@ -136,7 +148,19 @@ to punch through, and the scenario passed with the defect still in place until
 it was moved.
 
 **Relays are registered by hostname in the lab**, because registering them by
-IP is what hid the relay-endpoint defect.
+IP is what hid the relay-endpoint defect. That change alone exposed two more
+shipped defects in the OS-DNS integration: `/etc/hosts` cannot be replaced by a
+rename when it is a bind mount (`EBUSY`, which is every machine in a container
+and now every namespace here), and the resolver was taking systemd-resolved's
+own `127.0.0.54` — which resolved then refuses to be pointed at, because a link
+whose server is resolved's own address is a loop. Both fixed; the DNS block is
+24 of 24.
+
+**The agent's self-update is drilled, not asserted.** `selfupdate-gate.sh`
+enrols a real device against a real panel, publishes a real signed release, and
+checks the binary on disk is a different version afterwards — then publishes
+one signed by the wrong key and one whose bytes do not match its digest, and
+checks both are refused with the old binary still running.
 
 **The deployment script is gated like code.** `upgrade-edge.sh` shipped with a
 failed preflight printing "All steps passed". `edge-script-gate.sh` runs the

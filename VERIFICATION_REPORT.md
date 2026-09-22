@@ -57,22 +57,36 @@ NAT remain untested. See
 | I   | Production (1.9.0)  | **Failed, then fixed** | Ten defects in one evening on a real aaPanel box; two new gates now reproduce six of them, and found a seventh nobody had reported |
 | J   | Two Windows PCs, two ISPs (1.9.1) | **Failed, then fixed** | Eight defects, two of them protocol defects that cost two hours; a CGNAT topology and a late-joiner drill now reproduce both. **The ONE-CLICK acceptance test itself has not been run** |
 
-Automated suites, as of 1.9.1:
+Automated suites, as of 1.9.2:
 
 ```
-$ ./services/lab/release.sh
+$ ./services/lab/release.sh --url=http://127.0.0.1:8088
 
-  test suites (PHP)              475 assertions, 0 failed
-  test suites (Go, -race)        clean across all four modules
-  Windows pack builds and is stamped
-  web gate (Apache + PHP-FPM)    36 passed, 0 failed
-  Argon2 gate (libsodium)        6 passed, 0 failed
-  networking gate                73 scenarios, 0 failed
-  update gate                    17 checks, all passed
+  test suites (PHP)                          641 assertions, 0 failed
+  test suites (Go, -race)                    clean across all four modules
+  the edge script fails honestly             11 passed, 0 failed
+  Windows pack builds and is stamped         clean
+  the agent replaces itself, and refuses     15 passed, 0 failed
+  web gate (Apache + PHP-FPM)                36 passed, 0 failed
+  Argon2 gate (libsodium)                    6 passed, 0 failed
+  networking gate                            85 checks, 0 failed
+  update gate                                17 checks, all passed
 ```
 
-The PHP figure rises release to release; the newest of it is the regression
-tests for the ten production defects, which fail against 1.9.0.
+**Two runs, not one, and the reason is worth stating.** In the run above the
+two container gates failed on `429 Too Many Requests` from Docker Hub while
+pulling `debian:bookworm-slim` — a rate limit, not a result — and were re-run
+on their own once the pull worked. An earlier run had failed the web gate
+differently: Apache answered 503 (`AH01079: failed to make connection to
+backend`) because PHP-FPM was not answering under load, and every check after
+it failed as fallout. Neither was a defect in the panel; both are recorded here
+because a gate that fails for its own reasons and is then quietly re-run is how
+a real failure gets waved through.
+
+The PHP figure rises release to release. The newest of it is the regression
+tests for the eight defects two real Windows PCs found, and the §14 round trip
+— a signed release offered to a device, refused without a device token, and
+served byte-identical with one.
 
 The HTTP suite needs a server answering at the configured panel URL, so
 `release.sh` skips it unless one is up. Started locally it runs too:
@@ -80,7 +94,7 @@ The HTTP suite needs a server answering at the configured panel URL, so
 ```
 $ php -S 127.0.0.1:8088 -t . tests/dev-server.php &
 $ php tests/run.php --url=http://127.0.0.1:8088
-  593 passed, 0 failed, 1 skipped  (593 assertions)
+  641 passed, 0 failed, 1 skipped  (641 assertions)
 ```
 
 That one skip is the two-factor challenge, which needs a super admin with 2FA
@@ -89,8 +103,11 @@ it enrols two-factor on the administrator the installer creates, because a
 platform administrator cannot reach any other page until they do.
 
 The Go tests run under `-race` because the coordinator handles every packet in
-its own goroutine. That is not decoration — it found a data race in this
-release's own relay-selection code, described below.
+its own goroutine. That is not decoration — it found a data race in 1.8.0's
+relay-selection code, and another in 1.9.2's, on the first run of the new
+coordinator test: `Registry.Get` and `Registry.PeersOf` returned the stored
+`*Entry`, which every caller then read after the registry's lock was gone. See
+§J.
 
 ---
 
@@ -2061,6 +2078,54 @@ the first run of the new coordinator test. Both now return a snapshot. The
 entry's maps are replaced wholesale rather than mutated, which is what makes a
 shallow copy a real snapshot — and is now written down beside the code, because
 nothing else would catch it if that stopped being true.
+
+### Two more the new topology found on its own
+
+Neither is in the customer's list. Both are in the OS-DNS integration, both
+were shipped, and neither could have been found before 1.9.2 because the lab
+did not have the conditions that expose them.
+
+**`/etc/hosts` cannot be replaced by a rename when it is a bind mount.** The
+agent writes a temporary file beside it and renames it into place, which is the
+correct way to replace a file and the wrong way to replace this one: a rename
+onto a bind mount fails with `EBUSY`. `/etc/hosts` is a bind mount on every
+machine inside a container — and, since the relay-by-name fix, inside every
+namespace in this lab, because `ip netns exec` bind-mounts
+`/etc/netns/<ns>/hosts` over it. Every name in the network stopped resolving,
+with one line to explain it:
+
+```
+dns: replacing /etc/hosts: rename /etc/.akconnect-hosts-4052405984 /etc/hosts: device or resource busy
+```
+
+`EBUSY` now falls back to writing through the existing inode. The rename stays
+the default — atomicity is worth having, and is not worth having *instead of*
+working name resolution.
+
+**The resolver took systemd-resolved's own addresses.** The candidate list was
+`127.0.0.54` first and `127.0.0.53` second, with a comment saying `.53` would
+break the machine's own name resolution and then offering it one line down. The
+worse half is that resolved refuses to be *pointed at* either:
+
+```
+resolvectl dns akc-dnstest 127.0.0.54
+Failed to set DNS configuration: Invalid DNS server address
+```
+
+because a link whose server is resolved's own address is a loop. Both are
+bindable whenever the stub listener is off — `DNSStubListener=no`, which is how
+every machine running dnsmasq or Pi-hole beside it is configured — so the agent
+would take one, be refused by `resolvectl`, and fall back to the hosts file
+without saying why. Split DNS would simply have been worse on those machines
+than on the ones it was tested against. The list now starts at `127.0.0.55`;
+there was never anything to gain from either address.
+
+The `resolved` scenario found it only because this lab's resolved happened to
+be running without its stub listener at the time — which is the configuration
+the product had not considered. The whole DNS block is now 24 of 24, including
+`resolved/applied`, `resolved/server`, `resolved/domain`, `resolved/scope`,
+`resolved/query`, `resolved/isolation`, `resolved/hosts-untouched` and
+`resolved/revert`.
 
 ### The deployment script, gated like code
 

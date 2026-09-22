@@ -96,12 +96,17 @@ everything.
 
 **641 assertions pass** (`php tests/run.php --url=…`; 501 without an HTTP
 server), and **`services/lab/release.sh` is the release gate**. It runs the
-test suites, builds and verifies the Windows pack, stands up Apache with
-PHP-FPM and installs the panel into it through the browser installer, runs the
-real `Crypto` class against a PHP whose Argon2 comes from libsodium, runs every
+test suites, proves `upgrade-edge.sh` fails honestly eleven different ways,
+builds and verifies the Windows pack, watches the agent replace its own binary
+and refuse two releases it should refuse, stands up Apache with PHP-FPM and
+installs the panel into it through the browser installer, runs the real
+`Crypto` class against a PHP whose Argon2 comes from libsodium, runs every
 networking scenario, and drills a cross-version update and rollback in a
 scratch database. One table, non-zero on any failure. No release ships without
 a clean one.
+
+At 1.9.2: PHP 641/0, Go clean under `-race`, edge script 11/0, self-update
+15/0, web 36/0, Argon2 6/0, networking **85**/0, update 17/17.
 
 ---
 
