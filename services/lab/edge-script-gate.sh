@@ -1482,6 +1482,13 @@ grep -qE '0 file\(s\) could NOT' <<<"$UNDOOUT" \
     && bad "the failure count is still read after the fi, so it is always zero" \
     || ok "and does not claim zero files could not be put back"
 
+# The count and the "there is nothing here" case are different situations, and
+# the number is printed at somebody whose web server is part-way through a
+# change. A missing backup set used to return 1, which reads as "one file".
+grep -q 'no backup set' <<<"$UNDOOUT" \
+    && ok "and a missing backup set says so rather than reporting one file" \
+    || bad "a missing backup set is reported as one file that could not be put back"
+
 # /dev/tty is mode 0666, so test -r is true for every process on the machine
 # including one with no controlling terminal. The refusal was unreachable.
 CONFIRMTEST="$WORK/confirm-test.sh"

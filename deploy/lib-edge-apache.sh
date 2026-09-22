@@ -154,7 +154,11 @@ akconnect_apache_replace() {
 akconnect_apache_rollback() {
     local dest=$1 index original state failures=0
 
-    [ -d "$dest" ] && [ -f "$dest/$AKCONNECT_MANIFEST" ] || return 1
+    # 255, not 1. The return value is a COUNT, so "1" means one file could not
+    # be put back — a completely different situation from "there is no backup
+    # set here to put anything back from", and the caller prints that number
+    # at somebody whose web server is part-way through a change.
+    [ -d "$dest" ] && [ -f "$dest/$AKCONNECT_MANIFEST" ] || return 255
 
     while IFS=$'\t' read -r index original state; do
         [ -n "$original" ] || continue
@@ -573,6 +577,14 @@ akconnect_apache_undo() {
         $report "everything this run changed has been put back"
 
         return 0
+    fi
+
+    if [ "$failures" -eq 255 ]; then
+        $report "WARNING: there is no backup set at $backup, so NOTHING could be put"
+        $report "back. This server may be part-way through a change and this run cannot"
+        $report "tell you which files. Check the virtual host for an AK Connect block."
+
+        return 1
     fi
 
     $report "WARNING: $failures file(s) could NOT be put back. This server is part-way"
