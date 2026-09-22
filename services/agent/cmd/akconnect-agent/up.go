@@ -218,6 +218,16 @@ func (s *session) close() {
 
 // run fetches configuration, brings the tunnel up, then keeps both current.
 func (s *session) run(ctx context.Context) error {
+	// Before anything else: Windows tells the service when the machine wakes
+	// and when its network moves, and that is the fastest notice this agent
+	// will ever get that its socket and its address are both stale. See
+	// wake.go.
+	s.installWakeHandler()
+
+	// And the half Windows does not tell us about: a cable plugged in, a
+	// hotspot replacing a broken line, a new lease after a power cut.
+	go s.watchAddresses(ctx)
+
 	priv, pub, _, err := keystore.LoadOrCreate(s.keyStore)
 	if err != nil {
 		return err

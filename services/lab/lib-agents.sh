@@ -93,6 +93,52 @@ lab::up() {
 # rule that still holds afterwards is being held by the other end.
 lab::up_tampered() { lab::up "$1" akconnect-agent-tampered; }
 
+# lab::netns_inode identifies a network namespace by its inode.
+#
+# NOT by readlink. /var/run/netns/<name> is a regular file that `ip netns` bind
+# -mounts the namespace onto, so readlink on it returns nothing at all, while
+# readlink on /proc/<pid>/ns/net returns "net:[4026532466]". Comparing the two
+# compares a string against the empty string, which is never equal — so the
+# /proc scan below matched nothing, ever.
+#
+# That is worse than a bug in a helper: lab::down_agent is how a scenario says
+# "this machine goes away", and for as long as this was wrong it did not stop
+# anything. What it removed was the pid from a bookkeeping array.
+#
+# stat -L resolves both to the same number: the namespace's inode.
+lab::netns_inode() {
+    stat -Lc %i "$1" 2>/dev/null
+}
+
+# lab::agent_pid is the pid of the agent running in one namespace, or empty.
+#
+# Found the same way lab::down_agent finds it — by what the process is
+# executing and which namespace it is in — because pkill -f has matched this
+# harness's own shell before now.
+#
+# Used by the scenarios that have to prove a recovery was NOT a restart, which
+# is invisible from the outside: at thirty seconds a process that recovered and
+# a process that was replaced look exactly the same.
+lab::agent_pid() {
+    local ns=$1 pid exe target want
+
+    target="$(readlink -f "$BIN/akconnect-agent")"
+    want="$(lab::netns_inode "/var/run/netns/$ns")"
+
+    for entry in /proc/[0-9]*; do
+        pid="${entry#/proc/}"
+        exe="$(readlink "$entry/exe" 2>/dev/null)" || continue
+        [ "$exe" = "$target" ] || continue
+        if [ -n "$want" ] && [ "$(lab::netns_inode "$entry/ns/net")" = "$want" ]; then
+            printf '%s' "$pid"
+
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 # lab::down_agent stops ONE namespace's agent, the way a reboot does.
 #
 # The scenarios that restart a peer need the other one left alone: the whole
@@ -102,9 +148,10 @@ lab::up_tampered() { lab::up "$1" akconnect-agent-tampered; }
 # It removes the pid from AGENT_PIDS so the teardown does not later wait on a
 # process that is long gone.
 lab::down_agent() {
-    local ns=$1 pid exe target remaining=()
+    local ns=$1 pid exe target want remaining=()
 
     target="$(readlink -f "$BIN/akconnect-agent")"
+    want="$(lab::netns_inode "/var/run/netns/$ns")"
 
     # Found by what each process is executing and which namespace it is in,
     # not by a command-line pattern: pkill -f has matched this harness's own
@@ -113,7 +160,7 @@ lab::down_agent() {
         pid="${entry#/proc/}"
         exe="$(readlink "$entry/exe" 2>/dev/null)" || continue
         [ "$exe" = "$target" ] || continue
-        [ "$(readlink "$entry/ns/net" 2>/dev/null)" = "$(readlink "/var/run/netns/$ns" 2>/dev/null)" ] \
+        [ -n "$want" ] && [ "$(lab::netns_inode "$entry/ns/net")" = "$want" ] \
             && kill -TERM "$pid" 2>/dev/null
     done
 

@@ -30,3 +30,7 @@ func Uninstall() error        { return errNotWindows }
 func Start() error            { return errNotWindows }
 func Stop() error             { return errNotWindows }
 func Status() (string, error) { return "not applicable on this platform", nil }
+
+// OnWake is the Windows resume hook. Declared here so the agent can set it
+// unconditionally; nothing off Windows ever calls it.
+var OnWake func(reason string)

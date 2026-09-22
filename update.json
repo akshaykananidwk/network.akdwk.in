@@ -1,12 +1,12 @@
 {
-  "version": "1.9.4",
-  "released_at": "2026-09-22T22:00:00Z",
+  "version": "1.9.5",
+  "released_at": "2026-09-22T23:30:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Reconnection after a reboot or an address change: the relay pinned each side's address and silently dropped a device that came back somewhere else, so two machines that rebooted never found each other again. The agent now reopens a discovery socket that has died under it instead of announcing into it every twenty seconds forever. Update channels no longer offer an older release as an update. And deploy/upgrade-edge.sh stops dirtying its own checkout, runs the release's own copy of itself, and says precisely what it did and did not upgrade.",
+  "notes": "Two PCs behind one shop router can now reach each other: every device picks its own UDP port instead of all of them using 51820, prefers a peer's LAN address when they are on the same network, and leaves a port its router will not carry. The Windows agent is a Windows program \u2014 listed in Settings so it uninstalls like any other app, silent install with /S /CODE=, an MSI for deployment tools, a notification-area icon showing whether it works, and a refusal to downgrade itself. It survives a reboot, and now notices a resume and a network change instead of waiting out a keepalive. The device page answers \"has it restarted?\" and \"what went wrong last?\", and has an Update now button. One link, with the join code in it, is all a customer needs to be sent. One click shares a computer's LAN. The edge keeps itself current by default, and critical alerts reach a telephone.",
   "migrations": [
-    "2026_09_22_190000_update_channel_edge.php"
+    "2026_09_22_210000_device_uptime_and_error.php"
   ],
   "protected": [
     ".env",

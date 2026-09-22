@@ -310,12 +310,13 @@ declare -A SCENARIOS=(
     [late-joiner]=scenario_late_joiner
     [reconnect]=scenario_reconnect
     [reconnect-both]=scenario_reconnect_both
+    [roaming]=scenario_roaming
     [shared-router]=scenario_shared_router
     [dns]=scenario_dns
     [resolved]=scenario_resolved
     [revocation]=scenario_revocation
 )
-ORDER=(cone relay cgnat cgnat-direct late-joiner shared-router reconnect reconnect-both cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash overlay-clash gateway-tamper subnet-mapping dns resolved revocation)
+ORDER=(cone relay cgnat cgnat-direct late-joiner shared-router reconnect reconnect-both roaming cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash overlay-clash gateway-tamper subnet-mapping dns resolved revocation)
 
 if [ "${1:-}" = "--list" ]; then
     printf '%s\n' "${ORDER[@]}"

@@ -6,6 +6,96 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.5] — 2026-09-22
+
+Two PCs behind one router, and a Windows program that behaves like one.
+
+### Fixed
+
+**Two computers behind the same router could not reach each other.** Every
+device in the world used UDP 51820, so the first one out held the router's
+lease on that external port and everything the second sent from it was dropped
+inside the router. Nothing failed: every send succeeded, no answer ever came,
+and the agent announced into that hole for as long as anyone watched. Each
+device now picks its own port and remembers it, prefers a peer's LAN address
+when the two are on the same network, and — for the case where the replacement
+port is also unusable — notices announcements going out unanswered and moves to
+another one. Guarded three ways, because moving the port costs every session on
+it: nothing moves while a peer is reachable, nothing moves while sends are
+failing, and each move makes the next rarer so a panel outage does not churn
+the port every fifteen seconds. Proved in the lab, red on 1.9.4 and green on
+this, with three devices behind two routers.
+
+**A woken laptop sat unreachable for a minute.** The service now accepts power
+and network-binding events, and watches its own addresses besides — because
+Windows says nothing at all when somebody plugs in a cable or switches to a
+hotspot. On any of those it reopens its socket and re-announces at once instead
+of waiting out a twenty-second keepalive and a three-failure detector.
+
+**The Windows gateway could share one LAN and not two.** It created one
+`New-NetNat` instance per advertised prefix, each with the same internal prefix;
+New-NetNat refuses an internal prefix that overlaps an existing instance, and a
+prefix overlaps itself. One instance for the overlay is both correct and what
+works.
+
+**A reinstall on a machine the panel had forgotten did nothing.** "Already
+enrolled, nothing to do" — to a customer who had done the one thing they know
+how to do. The installer now asks the panel, and rejoins only on a clear "no
+enrolment for this key": being unable to ask keeps the identity, because
+discarding a working enrolment over a panel that was briefly down is worse than
+the fault it fixes, and it would spend a single-use join code doing it.
+
+### Added
+
+**Apps & features.** The agent is listed in Settings → Apps and uninstalls from
+there like any other program, with no command to type. The uninstaller runs
+from a temporary copy of itself, because Windows will not delete a running
+program and the one thing it could not remove was itself. It prints what it
+removed rather than asking to be trusted.
+
+**Silent install, and an MSI.** `setup.exe /S /CODE=ABCD-1234` for anyone
+scripting a rollout, and `msiexec /i AKConnect.msi JOINCODE=ABCD-1234 /qn` for
+deployment tools. The MSI is a wrapper: everything hard stays in the installer
+that is tested rather than being reimplemented in MSI tables.
+
+**A notification-area icon.** Whether the network is working, in words a
+shopkeeper can act on; this computer's address, copied with one click; the
+panel; and a diagnostics bundle written to the Desktop with everything
+credential-shaped redacted on the way in.
+
+**Downgrades are refused.** The installer a customer was sent in January,
+double-clicked in June, no longer takes a working computer back to January.
+
+**One link to send a customer.** `/join/ABCD-1234` shows the download button
+and the code, with nothing to sign in to and nothing about the network on the
+page.
+
+**One click to share a computer's LAN**, with the range filled in from the
+address that computer reports — a suggestion, in an editable box, because
+"almost always a /24" is not good enough to be quietly wrong about which range
+reaches a customer's cameras.
+
+**The device page answers the two questions a support call starts with:** how
+long the agent has been running, and the last problem it reported — kept after
+it clears, because the fault that was happening when the customer rang had
+otherwise left no trace. Plus an Update now button, which records a request the
+agent collects on its next poll: nothing is ever pushed into a PC behind a shop
+router.
+
+**Alerts that reach a telephone.** Critical failures — a relay down, a backup
+failed, an update rolled back — go to a configurable WhatsApp API as well as by
+email. The token is encrypted at rest and never logged.
+
+**A second relay**, with `deploy/add-relay.sh`.
+
+### Changed
+
+**The edge upgrade timer is on by default.** An edge that is only upgraded when
+somebody remembers to log in runs an old coordinator for months. `--no-timer`
+turns it off and says so in the summary.
+
+---
+
 ## [1.9.4] — 2026-09-22
 
 Reconnection, and the tooling that delivers it.

@@ -284,3 +284,89 @@ more than 4 means it is re-announcing unanswered"
 
     assert_split_tunnel alpha "shared/R1"
 }
+
+# A laptop carried from one network to another, without stopping.
+#
+# The reconnect scenarios above all restart the agent, which is a reboot. This
+# is the other half of the same customer experience and the more common one: a
+# machine that keeps running while its network changes underneath it — a cable
+# plugged in at a reception desk, a hotspot replacing a broken line, a router
+# handing out a new lease after a power cut, a lid closed in one place and
+# opened in another.
+#
+# Nothing restarts here. The agent has the same process, the same socket and
+# the same identity throughout, and it has to notice by itself.
+scenario_roaming() {
+    step "the network changes under a running agent — no restart, no help"
+
+    fixture cgnat symmetric
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
+        record "roaming/paired" FAIL "the pair never connected in the first place"
+        lab::tail_log alpha-up 12
+        return
+    fi
+    record "roaming/paired" PASS "alpha and beta are connected before anything moves"
+
+    # Settled: pings rather than hellos, which is the state a machine is in
+    # when somebody unplugs it.
+    sleep 20
+
+    # The pid before, so "it recovered" cannot be satisfied by a restart.
+    local pid_before
+    pid_before="$(lab::agent_pid beta)"
+    if [ -z "$pid_before" ]; then
+        record "roaming/running" FAIL "beta's agent could not be found; nothing to observe"
+        return
+    fi
+    record "roaming/running" PASS "beta's agent is running as pid $pid_before"
+
+    local moved_at
+    moved_at="$(date +%s)"
+
+    # Beta's own address changes, and so does the public address its router
+    # presents. Both halves of a real move: the machine is on a different LAN
+    # and behind a different public address, and it was never switched off.
+    ip netns exec beta ip address del 192.168.20.2/24 dev veth-beta 2>/dev/null || true
+    ip netns exec beta ip address add 192.168.20.5/24 dev veth-beta
+    ip netns exec beta ip route add default via 192.168.20.1 2>/dev/null || true
+    lab::renumber beta natgw-b 11 21 192.168.20 symmetric
+
+    if lab::wait_tunnel alpha "$BETA_IP" "$((RECONNECT_BUDGET + 15))"; then
+        local took=$(( $(date +%s) - moved_at ))
+        if [ "$took" -le "$RECONNECT_BUDGET" ]; then
+            record "roaming/restored" PASS "traffic resumed ${took}s after the move"
+        else
+            record "roaming/restored" FAIL \
+                "traffic resumed, but after ${took}s — the budget is ${RECONNECT_BUDGET}s"
+        fi
+    else
+        record "roaming/restored" FAIL "the pair never reconnected after the move"
+        lab::tail_log beta-up 15
+        return
+    fi
+
+    # And it was the same process throughout. A recovery that is really a
+    # restart is a different product: it loses every session on the machine,
+    # and on Windows it is the service manager doing it, not us.
+    local pid_after
+    pid_after="$(lab::agent_pid beta)"
+    if [ "$pid_after" = "$pid_before" ]; then
+        record "roaming/same-process" PASS "the same agent process recovered (pid $pid_after)"
+    else
+        record "roaming/same-process" FAIL \
+            "the agent was restarted ($pid_before -> ${pid_after:-gone}); that is not what was tested"
+    fi
+
+    # The mechanism, not just the outcome. Recovering because a keepalive
+    # eventually noticed is the behaviour this scenario exists to improve on,
+    # and it looks identical from the outside at thirty seconds.
+    if grep -q "network address changed" "$LOGS/beta-up.log" 2>/dev/null; then
+        record "roaming/noticed" PASS "beta noticed the address change itself"
+    else
+        record "roaming/noticed" FAIL \
+            "beta never logged noticing; it recovered on a timer, not on the change"
+    fi
+
+    assert_split_tunnel alpha "roaming/R1"
+}

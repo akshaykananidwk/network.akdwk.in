@@ -34,6 +34,22 @@ const Description = "Maintains this device's connection to its private overlay n
 // RunFunc is the agent's real work, run until the context is cancelled.
 type RunFunc func(ctx context.Context) error
 
+// OnWake is called when Windows tells the service the machine has come back —
+// from sleep, from hibernation, or from the half-shutdown that Fast Startup
+// does instead of a real one.
+//
+// It exists because a laptop that is closed at a shop and opened at a hotel is
+// the ordinary case, not the exotic one. The socket it had is bound to an
+// interface that may be gone, its public address is certainly different, and
+// the coordinator's idea of where it is, is wrong. Nothing in a twenty-second
+// keepalive notices any of that quickly enough for somebody standing there
+// waiting.
+//
+// Set before Run. It must return promptly: it runs on the service control
+// handler, and the SCM gives that a few seconds before it considers the
+// service unresponsive.
+var OnWake func(reason string)
+
 // IsService reports whether this process was started by the SCM rather than
 // from a console, so main can pick the right path without a flag.
 func IsService() bool {
@@ -89,7 +105,12 @@ type handler struct {
 }
 
 func (h *handler) Execute(args []string, r <-chan svc.ChangeRequest, s chan<- svc.Status) (bool, uint32) {
-	const accepted = svc.AcceptStop | svc.AcceptShutdown
+	// PowerEvent is the resume (defect: a woken laptop sat unreachable until
+	// the keepalive and the dead-socket detector between them noticed).
+	// NetBindChange is Windows saying an adapter's bindings moved, which is
+	// what a Wi-Fi network change or a dock looks like from in here.
+	const accepted = svc.AcceptStop | svc.AcceptShutdown |
+		svc.AcceptPowerEvent | svc.AcceptNetBindChange
 
 	s <- svc.Status{State: svc.StartPending}
 
@@ -107,6 +128,19 @@ func (h *handler) Execute(args []string, r <-chan svc.ChangeRequest, s chan<- sv
 		case req := <-r:
 			switch req.Cmd {
 			case svc.Interrogate:
+				s <- req.CurrentStatus
+			case svc.PowerEvent:
+				// PBT_APM_RESUME_SUSPEND (7) and PBT_APM_RESUME_AUTOMATIC
+				// (18) are the two that mean "awake again". The rest —
+				// battery low, power source changed, query suspend — are not
+				// ours to act on, and reconnecting on each of them would
+				// churn the tunnel every time a charger is unplugged.
+				if req.EventType == pbtResumeSuspend || req.EventType == pbtResumeAutomatic {
+					h.wake("the computer woke up")
+				}
+				s <- req.CurrentStatus
+			case svc.NetBindAdd, svc.NetBindRemove, svc.NetBindEnable, svc.NetBindDisable:
+				h.wake("the network changed")
 				s <- req.CurrentStatus
 			case svc.Stop, svc.Shutdown:
 				// Tell the SCM we are stopping before doing it, or a slow
@@ -153,6 +187,26 @@ func (h *handler) Execute(args []string, r <-chan svc.ChangeRequest, s chan<- sv
 			return false, 2
 		}
 	}
+}
+
+// Power-event subtypes. Named here because x/sys does not export them and a
+// bare 7 and 18 in a switch is a line nobody can check.
+const (
+	pbtResumeSuspend   = 7
+	pbtResumeAutomatic = 18
+)
+
+// wake tells the agent to re-establish itself, without blocking the control
+// handler: the SCM expects an answer from here in seconds, and what the agent
+// does in response involves the network.
+func (h *handler) wake(reason string) {
+	h.log(eventlog.Info, "AKConnect agent: "+reason+"; re-establishing this device's connection")
+
+	if OnWake == nil {
+		return
+	}
+
+	go OnWake(reason)
 }
 
 func (h *handler) log(level uint16, message string) {
