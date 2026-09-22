@@ -152,10 +152,29 @@ func (s *session) udpIsHopeless() bool {
 	return refused >= fallbackAfterUnanswered && failing >= fallbackAfterSilence
 }
 
-// udpIsWorking reports whether the socket itself has carried discovery traffic
-// recently.
+// udpIsWorking reports whether the ordinary path is carrying this device's
+// traffic.
+//
+// Two conditions, and the second one exists because of the case the lab did
+// not have: a machine that was working on UDP and is then carried to a network
+// that is not.
+//
+// The proof that UDP works is a discovery packet arriving on the socket, and
+// that proof is allowed to be forty-five seconds old — it has to be, because
+// the keepalive that produces those packets is twenty seconds and one lost
+// datagram must not read as the network failing. But the agent decides UDP is
+// hopeless after four seconds of unanswered announcements, which is much
+// sooner. In between, a device that had just moved would have opened the
+// fallback and then refused to use it, because a stamp from the network it had
+// left still said UDP was fine. Up to forty seconds of a thirty-second budget,
+// on exactly the machine this release is for.
+//
+// Announcements going unanswered while the fallback is not yet carrying them
+// is therefore enough on its own to stop preferring UDP. Once the fallback is
+// up the coordinator answers through it, nothing goes unanswered, and the
+// socket is the only thing left deciding — which is what it should be.
 func (s *session) udpIsWorking() bool {
-	if s.tun == nil {
+	if s.tun == nil || s.udpIsHopeless() {
 		return false
 	}
 

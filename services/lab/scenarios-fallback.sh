@@ -157,6 +157,74 @@ scenario_https_inbound_blocked() {
     lab::unblock_udp
 }
 
+# The laptop's actual story, and the one the two scenarios above do not tell.
+#
+# They block UDP before the agent starts, so the agent has never seen a
+# working socket and the switch is a cold start. The laptop had a working
+# socket all morning on a phone hotspot and was then carried into an office
+# where it did not. That transition has its own way of going wrong, and it
+# did: the agent decides UDP is hopeless after four seconds, but the proof
+# that UDP works is allowed to be forty-five seconds old — so for the
+# difference between them the agent would open the fallback and then refuse to
+# use it, because a stamp from the network it had left still said UDP was
+# fine. Forty seconds of a thirty-second budget, on exactly the machine this
+# release is for.
+scenario_https_switch() {
+    step "a working machine is carried onto a network that blocks UDP"
+
+    fixture cgnat symmetric
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
+        record "https-switch/before" FAIL "the pair never connected on a working network"
+        lab::tail_log alpha-up 15
+
+        return
+    fi
+
+    local before
+    before="$(lab::settled_path alpha 30)"
+    case "$before" in
+        relay-https)
+            record "https-switch/before" FAIL "it was already on the fallback, so nothing switches"
+
+            return
+            ;;
+        *)
+            record "https-switch/before" PASS "connected over $before before anything changes"
+            ;;
+    esac
+
+    # Settled: pinging rather than saying hello, which is the state a laptop
+    # is in when somebody closes the lid and drives to the office.
+    sleep 20
+
+    local blocked_at
+    blocked_at="$(date +%s)"
+    lab::block_udp both
+
+    # Traffic has to come back, on the fallback, inside the same budget a
+    # cold start gets. Nothing is restarted and nothing is touched.
+    if lab::wait_tunnel alpha "$BETA_IP" "$((FALLBACK_BUDGET + 20))"; then
+        local took=$(( $(date +%s) - blocked_at ))
+        if [ "$took" -le "$FALLBACK_BUDGET" ]; then
+            record "https-switch/budget" PASS "back in ${took}s after the network changed under it"
+        else
+            record "https-switch/budget" FAIL "took ${took}s, over the ${FALLBACK_BUDGET}s budget"
+        fi
+    else
+        record "https-switch/budget" FAIL "traffic never came back after UDP was blocked"
+        lab::tail_log alpha-up 20
+    fi
+
+    if lab::wait_path alpha relay-https 20; then
+        record "https-switch/path" PASS "and it is on the HTTPS path, not a stale UDP one"
+    else
+        record "https-switch/path" FAIL "the agent reports '$(lab::path alpha)' on a network with no UDP"
+    fi
+
+    lab::unblock_udp
+}
+
 # And the other half of the requirement: it is a fallback, not a destination.
 scenario_https_recover() {
     step "when UDP starts working again the pair must leave the fallback by itself"
