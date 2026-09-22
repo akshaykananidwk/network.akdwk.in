@@ -31,7 +31,16 @@ MSI_VERSION="$(printf '%s' "$VERSION" | sed 's/^v//; s/[-+].*$//')"
 case "$MSI_VERSION" in
     [0-9]*.[0-9]*.[0-9]*) ;;
     [0-9]*.[0-9]*)        MSI_VERSION="$MSI_VERSION.0" ;;
-    *) echo "  ✗ $VERSION is not a version an MSI can carry" >&2; exit 1 ;;
+    *)
+        # A development build — the release gate builds the pack as "dev" —
+        # still gets an MSI, because the point of building one in the gate is
+        # to read its tables back. It is numbered 0.0.0 so nothing can mistake
+        # it for something to ship, and this is a note rather than a failure:
+        # refusing here made the whole release gate red for a build nobody was
+        # going to publish.
+        echo "  ! $VERSION is not a version an MSI can carry; numbering this one 0.0.0"
+        MSI_VERSION="0.0.0"
+        ;;
 esac
 
 wixl -a "$ARCH" \
