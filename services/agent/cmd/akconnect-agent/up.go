@@ -206,6 +206,12 @@ func newSession(iface string, port int, verbose bool, logf func(string, ...any))
 }
 
 func (s *session) close() {
+	// The service control handler holds a pointer to this session's wake
+	// method, and the tunnel it uses is about to be closed. Left set, a resume
+	// arriving during shutdown would try to reopen a socket that is going
+	// away, and log a failure about it.
+	winsvc.OnWake = nil
+
 	s.stopNames()
 
 	if s.tun != nil {
