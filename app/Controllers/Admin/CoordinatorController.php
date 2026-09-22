@@ -8,6 +8,7 @@ use App\Controllers\Controller;
 use App\Core\Request;
 use App\Core\Response;
 use App\Services\CoordinatorSettings;
+use App\Services\EdgeRelease;
 
 /**
  * Settings → Coordinator.
@@ -49,6 +50,12 @@ final class CoordinatorController extends Controller
             'has_shared_secret' => (string) $current['shared_secret'] !== '',
             'has_signing_key'   => (string) $current['signing_key'] !== '',
             'problems'          => CoordinatorSettings::problems(),
+            // The panel's updater updates the panel. The coordinator and the
+            // relay are Go services on another machine, so the page has to say
+            // when they are behind — an operator who ran Update Now and
+            // assumed that was all of it is how 1.9.1's two protocol fixes sat
+            // unapplied on a live deployment.
+            'edge'              => EdgeRelease::status(),
         ]);
     }
 }

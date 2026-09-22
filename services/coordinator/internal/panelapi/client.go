@@ -76,6 +76,11 @@ func (c *Client) VerifyDevice(ctx context.Context, deviceUID, token, publicKey s
 	return &out, nil
 }
 
+// Version is the coordinator's build version, stamped at build time with
+// -ldflags "-X …/panelapi.Version=1.9.2" and reported to the panel on every
+// call.
+var Version = "dev"
+
 // EndpointReport is one device's observed addresses.
 type EndpointReport struct {
 	DeviceUID   string `json:"device_uid"`
@@ -142,6 +147,11 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	// So the panel can say "your edge is on 1.9.1 and this panel is on 1.9.2"
+	// rather than leaving an operator to find out the way the last one did.
+	// Not signed, and it does not need to be: nothing is decided on it, it is
+	// only displayed.
+	req.Header.Set("X-Coordinator-Version", Version)
 	req.Header.Set("X-Coordinator-Timestamp", timestamp)
 	req.Header.Set("X-Coordinator-Signature", signature)
 

@@ -35,6 +35,13 @@ $router->group('', ['maintenance'], static function (Router $router): void {
     $router->post('/reset-password', 'AuthController@resetPassword', ['guest', 'csrf', 'throttle:reset']);
 
     $router->post('/logout', 'AuthController@logout', ['csrf']);
+
+    // The customer installer, at an address that does not change between
+    // releases so a link in an email keeps working. Unauthenticated on
+    // purpose — see DownloadController for why that is safe and why the
+    // alternative is a customer on the phone.
+    $router->get('/download/setup.exe', 'DownloadController@windowsSetup', ['throttle:download']);
+    $router->get('/download/windows-pack.zip', 'DownloadController@windowsPack', ['throttle:download']);
 });
 
 // ------------------------------------------------------------ dashboard
@@ -170,6 +177,13 @@ $router->group('/api/v1', ['maintenance'], static function (Router $router): voi
     // Billing. The relay measured it; the coordinator relays it; nothing a
     // customer controls is on this path.
     $router->post('/coordinator/relay-usage', 'Api\CoordinatorController@reportRelayUsage', ['coordinator']);
+
+    // The edge servers' upgrade path. Same secret, same reasoning, and the
+    // direction is deliberate: the edge asks and tells, the panel never
+    // reaches in. See EdgeRelease for why Update Now does not do this itself.
+    $router->get('/edge/release', 'Api\EdgeController@release', ['coordinator']);
+    $router->post('/edge/report', 'Api\EdgeController@report', ['coordinator']);
+    $router->post('/edge/artifact', 'Api\EdgeController@artifact', ['coordinator']);
 
     // Everything else an agent calls needs its device token.
     $router->get('/agent/config', 'Api\AgentController@config', ['device']);

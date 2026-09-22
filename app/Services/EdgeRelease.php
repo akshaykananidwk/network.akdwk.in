@@ -1,0 +1,315 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services;
+
+use App\Core\Config;
+use App\Core\Logger;
+use App\Core\UpdateException;
+use App\Models\Setting;
+use App\Models\UpdateSetting;
+use App\Updater\UpdateEnv;
+
+/**
+ * What the edge servers are running, and what they should be.
+ *
+ * The panel's updater updates the panel. It cannot update the coordinator and
+ * the relay, because those are Go services on a different machine — and 1.9.2
+ * fixed two defects that live in exactly those. So an operator who ran Update
+ * Now still had a stale edge, and no way to tell from the panel.
+ *
+ * ## Why the panel does not simply do it
+ *
+ * To build and restart services on the edge, the panel would need
+ * root-equivalent access to that machine, stored here. The panel is a PHP
+ * application on the public internet holding the customer database; the edge
+ * holds the coordinator's private key and the relay secrets. One compromise
+ * would take both, and keeping those apart is R6 — the control plane is not
+ * the data plane.
+ *
+ * So the edge pulls. `deploy/upgrade-edge.sh` is one command, and with
+ * `--install-timer` it becomes a systemd timer that watches this panel and
+ * upgrades itself. The trust runs the safe way: the edge already trusts the
+ * repository it was built from and already authenticates to this panel. The
+ * panel's job is to say what the current release is and to notice when the
+ * edge is behind it.
+ */
+final class EdgeRelease
+{
+    private const PREFIX = 'edge.';
+
+    /** Where uploaded artefacts live. Inside storage/, which no update touches. */
+    private const DIR = 'storage/downloads';
+
+    /** Artefacts this panel will accept and serve. */
+    public const KINDS = ['windows-pack', 'windows-setup'];
+
+    /**
+     * What the edge should build.
+     *
+     * The version is this panel's own, and the commit is what the updater
+     * recorded when it installed it — so an edge that builds this ref is
+     * building the same code the panel is running, not merely the newest.
+     *
+     * @return array<string,string>
+     */
+    public static function target(): array
+    {
+        $update = UpdateSetting::current();
+
+        return [
+            'version'   => UpdateEnv::currentVersion(APP_ROOT),
+            'commit'    => (string) ($update['current_commit'] ?? ''),
+            'owner'     => (string) ($update['repo_owner'] ?? ''),
+            'repo'      => (string) ($update['repo_name'] ?? ''),
+            'branch'    => (string) ($update['branch'] ?? 'main'),
+            'panel_url' => rtrim((string) Config::get('app.url', ''), '/'),
+        ];
+    }
+
+    /**
+     * Record what an edge server reports about itself.
+     *
+     * @param array<string,mixed> $report
+     */
+    public static function record(array $report): void
+    {
+        foreach (['coordinator_version', 'relay_version', 'host'] as $key) {
+            $value = trim((string) ($report[$key] ?? ''));
+            if ($value !== '' && preg_match('/^[\w.\-:+]{1,64}$/', $value) === 1) {
+                Setting::set(self::PREFIX . $key, $value);
+            }
+        }
+
+        Setting::set(self::PREFIX . 'reported_at', gmdate('Y-m-d H:i:s'));
+        Setting::flushCache();
+    }
+
+    /** Just the coordinator's version, from the header it sends on every call. */
+    public static function noteCoordinatorVersion(string $version): void
+    {
+        $version = trim($version);
+        if ($version === '' || preg_match('/^[\w.\-+]{1,32}$/', $version) !== 1) {
+            return;
+        }
+
+        if (Setting::get(self::PREFIX . 'coordinator_version', null) === $version) {
+            // Every verify call carries this header; only a change is worth a
+            // write, or a busy coordinator would rewrite the same row forever.
+            return;
+        }
+
+        Setting::set(self::PREFIX . 'coordinator_version', $version);
+        Setting::set(self::PREFIX . 'reported_at', gmdate('Y-m-d H:i:s'));
+        Setting::flushCache();
+    }
+
+    /**
+     * Is the edge behind this panel?
+     *
+     * @return array<string,mixed>
+     */
+    public static function status(): array
+    {
+        $target = self::target();
+        $coordinator = (string) (Setting::get(self::PREFIX . 'coordinator_version', null) ?? '');
+        $relay = (string) (Setting::get(self::PREFIX . 'relay_version', null) ?? '');
+
+        $behind = [];
+        foreach (['coordinator' => $coordinator, 'relay' => $relay] as $what => $seen) {
+            if ($seen === '') {
+                continue;
+            }
+            if (version_compare($seen, $target['version'], '<')) {
+                $behind[$what] = $seen;
+            }
+        }
+
+        return [
+            'panel_version'       => $target['version'],
+            'coordinator_version' => $coordinator,
+            'relay_version'       => $relay,
+            'reported_at'         => Setting::get(self::PREFIX . 'reported_at', null),
+            'behind'              => $behind,
+            'unknown'             => $coordinator === '' && $relay === '',
+            // Printed verbatim on the page, because the point is that an
+            // operator should not have to work it out.
+            'command'             => 'sudo /opt/akconnect/src/deploy/upgrade-edge.sh',
+        ];
+    }
+
+    // ------------------------------------------------------------- artefacts
+
+    /**
+     * Append one chunk of an upload, and finish it when the last one lands.
+     *
+     * Chunked because a 14 MB installer does not fit inside the
+     * `post_max_size` a shared host is willing to allow, and because a failed
+     * 14 MB upload that has to start again on a VPS in another country is a
+     * bad way to spend five minutes.
+     *
+     * @return array<string,mixed> what the caller should report back
+     * @throws UpdateException
+     */
+    public static function receiveChunk(
+        string $kind,
+        string $version,
+        string $sha256,
+        int $offset,
+        int $total,
+        string $bytes
+    ): array {
+        if (!in_array($kind, self::KINDS, true)) {
+            throw new UpdateException('Unknown artefact kind: ' . $kind);
+        }
+        if (preg_match('/^[0-9a-f]{64}$/', $sha256) !== 1) {
+            throw new UpdateException('The artefact checksum is not a sha256 digest.');
+        }
+        if (preg_match('/^[\w.\-+]{1,32}$/', $version) !== 1) {
+            throw new UpdateException('The artefact version is not a version.');
+        }
+        if ($total <= 0 || $total > 256 * 1024 * 1024) {
+            throw new UpdateException('The artefact size is implausible.');
+        }
+        if ($offset < 0 || $offset + strlen($bytes) > $total) {
+            throw new UpdateException('That chunk does not fit inside the artefact.');
+        }
+
+        $dir = APP_ROOT . '/' . self::DIR;
+        if (!is_dir($dir) && !mkdir($dir, 0775, true) && !is_dir($dir)) {
+            throw new UpdateException('Cannot create ' . self::DIR);
+        }
+
+        // Named after the digest, so two uploads of different builds cannot
+        // interleave into one file.
+        $partial = $dir . '/.' . $sha256 . '.part';
+
+        if ($offset === 0) {
+            @unlink($partial);
+        }
+
+        $handle = fopen($partial, $offset === 0 ? 'wb' : 'cb');
+        if ($handle === false) {
+            throw new UpdateException('Cannot write ' . basename($partial));
+        }
+
+        try {
+            if (fseek($handle, $offset) !== 0) {
+                throw new UpdateException('Cannot seek to that offset.');
+            }
+            if (fwrite($handle, $bytes) !== strlen($bytes)) {
+                throw new UpdateException('Short write storing the artefact.');
+            }
+        } finally {
+            fclose($handle);
+        }
+
+        $written = (int) filesize($partial);
+        if ($written < $total) {
+            return ['complete' => false, 'received' => $written, 'total' => $total];
+        }
+
+        // Verified before it is published: an artefact served to customers is
+        // the one thing here that ends up executing on their machines.
+        $actual = hash_file('sha256', $partial);
+        if (!hash_equals($sha256, (string) $actual)) {
+            @unlink($partial);
+
+            throw new UpdateException('The uploaded artefact does not match its checksum; discarded.');
+        }
+
+        $final = $dir . '/' . self::filename($kind, $version);
+        if (!rename($partial, $final)) {
+            @unlink($partial);
+
+            throw new UpdateException('Cannot put the artefact in place.');
+        }
+        @chmod($final, 0644);
+
+        Setting::set(self::PREFIX . $kind . '.file', self::filename($kind, $version));
+        Setting::set(self::PREFIX . $kind . '.version', $version);
+        Setting::set(self::PREFIX . $kind . '.sha256', $sha256);
+        Setting::set(self::PREFIX . $kind . '.size', (string) $total);
+        Setting::set(self::PREFIX . $kind . '.published_at', gmdate('Y-m-d H:i:s'));
+        Setting::flushCache();
+
+        self::prune($dir, self::filename($kind, $version), $kind);
+
+        Logger::notice('update', 'Edge artefact published', [
+            'kind'    => $kind,
+            'version' => $version,
+            'size'    => $total,
+        ]);
+
+        return [
+            'complete' => true,
+            'url'      => self::downloadUrl($kind),
+            'sha256'   => $sha256,
+            'size'     => $total,
+        ];
+    }
+
+    /**
+     * The artefact to serve, or null when none has been published.
+     *
+     * @return array<string,mixed>|null
+     */
+    public static function current(string $kind): ?array
+    {
+        if (!in_array($kind, self::KINDS, true)) {
+            return null;
+        }
+
+        $file = (string) (Setting::get(self::PREFIX . $kind . '.file', null) ?? '');
+        if ($file === '' || basename($file) !== $file) {
+            return null;
+        }
+
+        $path = APP_ROOT . '/' . self::DIR . '/' . $file;
+        if (!is_file($path)) {
+            return null;
+        }
+
+        return [
+            'path'         => $path,
+            'filename'     => $file,
+            'version'      => (string) (Setting::get(self::PREFIX . $kind . '.version', null) ?? ''),
+            'sha256'       => (string) (Setting::get(self::PREFIX . $kind . '.sha256', null) ?? ''),
+            'size'         => (int) filesize($path),
+            'published_at' => Setting::get(self::PREFIX . $kind . '.published_at', null),
+        ];
+    }
+
+    /** The stable, unchanging address an operator can send to a customer. */
+    public static function downloadUrl(string $kind): string
+    {
+        return rtrim((string) Config::get('app.url', ''), '/') . '/download/' . match ($kind) {
+            'windows-setup' => 'setup.exe',
+            default         => 'windows-pack.zip',
+        };
+    }
+
+    private static function filename(string $kind, string $version): string
+    {
+        return match ($kind) {
+            'windows-setup' => 'akconnect-setup-' . $version . '.exe',
+            default         => 'akconnect-windows-pack-' . $version . '.zip',
+        };
+    }
+
+    /** Keep the current artefact and the one before it; delete the rest. */
+    private static function prune(string $dir, string $keep, string $kind): void
+    {
+        $pattern = $kind === 'windows-setup' ? 'akconnect-setup-*.exe' : 'akconnect-windows-pack-*.zip';
+
+        $files = glob($dir . '/' . $pattern) ?: [];
+        usort($files, static fn (string $a, string $b): int => filemtime($b) <=> filemtime($a));
+
+        foreach (array_slice($files, 2) as $old) {
+            if (basename($old) !== $keep) {
+                @unlink($old);
+            }
+        }
+    }
+}

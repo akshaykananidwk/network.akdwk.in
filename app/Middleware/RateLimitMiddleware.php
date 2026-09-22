@@ -128,6 +128,12 @@ final class RateLimitMiddleware
             // ceiling throttled the guessing, not because the failure counter
             // did, and the two are not the same control.
             'enroll' => [(int) Config::get('security.enroll_requests_per_hour', 1200), 3600],
+            // The installer download. Generous because a shop with twenty
+            // machines fetches it twenty times from one address, and a ceiling
+            // at all because the file is fourteen megabytes and an open
+            // endpoint that serves it without limit is a way to spend
+            // somebody's bandwidth bill.
+            'download' => [60, 3600],
             default  => [(int) Config::get('security.api_rate_per_minute', 120), 60],
         };
     }

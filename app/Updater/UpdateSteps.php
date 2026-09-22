@@ -96,7 +96,10 @@ final class UpdateSteps
         }
 
         // 4. Writability of everything we will touch.
-        foreach (['app', 'assets', 'database', 'cli', 'storage', 'storage/updates', 'storage/backups'] as $directory) {
+        foreach ([
+            'app', 'assets', 'database', 'cli', 'storage',
+            'storage/updates', 'storage/backups', 'storage/downloads',
+        ] as $directory) {
             $path = $this->appRoot . '/' . $directory;
             if (is_dir($path) && !is_writable($path)) {
                 $problems[] = 'Directory is not writable: ' . $directory;

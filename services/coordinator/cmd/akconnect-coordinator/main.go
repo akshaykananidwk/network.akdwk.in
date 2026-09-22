@@ -40,6 +40,10 @@ import (
 
 var version = "dev"
 
+// The panel is told this on every call, so it can notice an edge that is
+// behind. Kept in step here rather than stamped twice at build time.
+func init() { panelapi.Version = version }
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()

@@ -13,9 +13,11 @@ use App\Models\ApiKey;
 use App\Models\Device;
 use App\Models\JoinCode;
 use App\Models\Network;
+use App\Models\Setting;
 use App\Models\Plan;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Services\CoordinatorSettings;
 use App\Services\DeviceService;
 use App\Services\NetworkService;
 
@@ -56,6 +58,8 @@ final class HttpTests
             self::apiAuthentication();
             self::agentEndpoints();
             self::rateLimiting();
+            // 1.9.2: the edge's own upgrade path, end to end over HTTP.
+            self::edgeUpgrade();
         } finally {
             self::removeFixtures();
         }
@@ -540,6 +544,162 @@ final class HttpTests
 
         $client->get('/api/v1/networks', ['Authorization' => 'Bearer ' . $apiKey, 'Accept' => 'application/json']);
         TestCase::assertSame(401, $client->status(), 'a revoked key is rejected at once');
+    }
+
+    /**
+     * The edge upgrade path: ask, upload, serve.
+     *
+     * Exercised over real HTTP with a real HMAC, because that signature is the
+     * only thing standing between an unauthenticated caller and publishing an
+     * executable this panel hands to customers. A unit test of the service
+     * would not have caught a middleware that forgot to read the raw body.
+     */
+    private static function edgeUpgrade(): void
+    {
+        TestCase::group('HTTP — the edge asks, uploads and is served (1.9.2)');
+
+        $secret = (string) CoordinatorSettings::current()['shared_secret'];
+        if ($secret === '') {
+            TestCase::skip('edge upgrade', 'no coordinator shared secret is configured');
+
+            return;
+        }
+
+        $client = self::client();
+
+        // Whatever this panel had published is put back at the end. A test
+        // that leaves a 9.9.9-test installer as the live download would be a
+        // test that broke the thing it was checking.
+        $before = [];
+        foreach (['file', 'version', 'sha256', 'size', 'published_at'] as $key) {
+            $before[$key] = Setting::get('edge.windows-setup.' . $key, null);
+        }
+
+        try {
+            self::edgeUpgradeChecks($client, $secret);
+        } finally {
+            foreach ($before as $key => $value) {
+                Setting::set('edge.windows-setup.' . $key, $value === null ? null : (string) $value);
+            }
+            Setting::flushCache();
+
+            foreach (glob(APP_ROOT . '/storage/downloads/akconnect-setup-9.9.9-test.exe') ?: [] as $leftover) {
+                @unlink($leftover);
+            }
+        }
+    }
+
+    /** @see self::edgeUpgrade() — the body, so the restore above is a finally. */
+    private static function edgeUpgradeChecks(HttpClient $client, string $secret): void
+    {
+        // 1. What should the edge build?
+        self::signedRequest($client, 'GET', '/api/v1/edge/release', '', $secret);
+        TestCase::assertSame(200, $client->status(), 'a signed caller is told the release');
+
+        $release = json_decode($client->body(), true);
+        $target = is_array($release) ? ($release['data'] ?? []) : [];
+        TestCase::assert(
+            is_array($target) && ($target['version'] ?? '') !== '',
+            'and the answer names a version',
+            is_array($target) ? (string) ($target['version'] ?? '') : ''
+        );
+
+        // 2. An unsigned caller is told nothing.
+        $client->get('/api/v1/edge/release', ['Accept' => 'application/json']);
+        TestCase::assertSame(401, $client->status(), 'an unsigned caller is refused');
+
+        // 3. Publish something, in two chunks, so the chunking is exercised
+        //    rather than assumed.
+        $payload = random_bytes(200000);
+        $digest = hash('sha256', $payload);
+        $half = (int) (strlen($payload) / 2);
+
+        foreach ([[0, substr($payload, 0, $half)], [$half, substr($payload, $half)]] as [$offset, $chunk]) {
+            $body = (string) json_encode([
+                'kind'    => 'windows-setup',
+                'version' => '9.9.9-test',
+                'sha256'  => $digest,
+                'offset'  => $offset,
+                'total'   => strlen($payload),
+                'data'    => base64_encode($chunk),
+            ]);
+
+            self::signedRequest($client, 'POST', '/api/v1/edge/artifact', $body, $secret);
+            TestCase::assertSame(200, $client->status(), 'chunk at offset ' . $offset . ' accepted');
+        }
+
+        $result = json_decode($client->body(), true);
+        $data = is_array($result) ? ($result['data'] ?? []) : [];
+        TestCase::assert(
+            is_array($data) && ($data['complete'] ?? false) === true,
+            'the last chunk completes the artefact'
+        );
+
+        // 4. And a customer, with no credential at all, can fetch it.
+        $client->get('/download/setup.exe');
+        TestCase::assertSame(200, $client->status(), 'the installer downloads without signing in');
+        TestCase::assertSame(
+            $digest,
+            hash('sha256', $client->body()),
+            'and arrives byte-identical to what was published'
+        );
+        TestCase::assertContains(
+            'attachment',
+            (string) $client->header('Content-Disposition'),
+            'served as a download rather than rendered'
+        );
+
+        // 5. Bytes that do not match the digest are refused, not published.
+        $body = (string) json_encode([
+            'kind'    => 'windows-setup',
+            'version' => '9.9.9-test',
+            'sha256'  => str_repeat('0', 64),
+            'offset'  => 0,
+            'total'   => 8,
+            'data'    => base64_encode('12345678'),
+        ]);
+        self::signedRequest($client, 'POST', '/api/v1/edge/artifact', $body, $secret);
+        TestCase::assertSame(422, $client->status(), 'an artefact that fails its checksum is discarded');
+
+        // The published artefact is still the good one.
+        $client->get('/download/setup.exe');
+        TestCase::assertSame(
+            $digest,
+            hash('sha256', $client->body()),
+            'and the refusal did not replace what was already published'
+        );
+    }
+
+    /**
+     * Sign a request the way the coordinator does, and send it.
+     *
+     * The scheme is sha256 HMAC over "<timestamp>\n<body>" — the same three
+     * lines deploy/upgrade-edge.sh reproduces in openssl and
+     * deploy/publish-artifact.py reproduces in Python. Three implementations
+     * of one scheme is two too many to leave untested.
+     */
+    private static function signedRequest(
+        HttpClient $client,
+        string $method,
+        string $path,
+        string $body,
+        string $secret
+    ): void {
+        $timestamp = (string) time();
+        $headers = [
+            'Accept'                  => 'application/json',
+            'Content-Type'            => 'application/json',
+            'X-Coordinator-Timestamp' => $timestamp,
+            'X-Coordinator-Signature' => hash_hmac('sha256', $timestamp . "\n" . $body, $secret),
+        ];
+
+        if ($method === 'GET') {
+            $client->get($path, $headers);
+
+            return;
+        }
+
+        $client->post($path, $body, $headers);
     }
 
     private static function agentEndpoints(): void

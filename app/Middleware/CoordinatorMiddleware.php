@@ -8,6 +8,7 @@ use App\Core\Logger;
 use App\Core\Request;
 use App\Core\Response;
 use App\Services\CoordinatorSettings;
+use App\Services\EdgeRelease;
 
 /**
  * Authenticates the coordinator service to the panel (§7.3).
@@ -52,6 +53,13 @@ final class CoordinatorMiddleware
         // the expected digest one byte at a time.
         if (!hash_equals($expected, $signature)) {
             return self::reject($request, 'signature mismatch');
+        }
+
+        // Recorded only after the signature checks out, so an unauthenticated
+        // caller cannot write anything the panel displays.
+        $version = (string) ($request->header('X-Coordinator-Version') ?? '');
+        if ($version !== '') {
+            EdgeRelease::noteCoordinatorVersion($version);
         }
 
         return null;

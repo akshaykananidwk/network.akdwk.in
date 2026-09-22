@@ -12,6 +12,8 @@
 /storage/updates/*
 /storage/tmp/*
 /storage/keys/*
+# Installers built on the edge and published here. Binaries, not source.
+/storage/downloads/*
 /storage/maintenance.flag
 !/storage/*/.gitkeep
 

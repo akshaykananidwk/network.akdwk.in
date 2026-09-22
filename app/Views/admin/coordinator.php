@@ -34,6 +34,68 @@ declare(strict_types=1);
         <?php endif; ?>
     </div>
 
+    <div class="card-body">
+        <h3>Edge servers</h3>
+        <?php if ($edge['unknown']): ?>
+            <p class="text-muted">
+                No coordinator has reported in yet, so this panel does not know what the edge is
+                running. It learns that from the coordinator's own calls, so this fills in as soon
+                as one connects.
+            </p>
+        <?php else: ?>
+            <table class="table table-compact">
+                <tbody>
+                    <tr>
+                        <th>This panel</th>
+                        <td><?= e($edge['panel_version']) ?></td>
+                    </tr>
+                    <tr>
+                        <th>Coordinator</th>
+                        <td>
+                            <?= e($edge['coordinator_version'] ?: 'not reported') ?>
+                            <?php if (isset($edge['behind']['coordinator'])): ?>
+                                <span class="badge badge-warning">behind</span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Relay</th>
+                        <td>
+                            <?= e($edge['relay_version'] ?: 'not reported') ?>
+                            <?php if (isset($edge['behind']['relay'])): ?>
+                                <span class="badge badge-warning">behind</span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <?php if ($edge['reported_at'] !== null): ?>
+                        <tr>
+                            <th>Last heard</th>
+                            <td><?= e(local_time((string) $edge['reported_at'])) ?></td>
+                        </tr>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        <?php endif; ?>
+
+        <?php if ($edge['behind'] !== []): ?>
+            <div class="alert alert-warning">
+                <strong>The edge is behind this panel.</strong>
+                <p>
+                    Update Now updates this panel only. The coordinator and the relay are separate
+                    services on another machine, and this panel deliberately has no way to reach
+                    into it — it holds the coordinator's private key, and a panel that could
+                    restart services there could also be used to take them over.
+                </p>
+                <p>Run this on the edge server, once:</p>
+                <pre><code><?= e((string) $edge['command']) ?></code></pre>
+                <p class="text-muted text-sm">
+                    Add <code>--install-timer</code> and it will keep itself in step with this
+                    panel from then on.
+                </p>
+            </div>
+        <?php endif; ?>
+    </div>
+
     <form method="post" action="<?= e(url('admin/coordinator')) ?>" class="form">
         <?= csrf_field() ?>
 
