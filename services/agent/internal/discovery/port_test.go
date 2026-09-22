@@ -175,3 +175,30 @@ func TestAReplacementPortThatIsAlsoBlockedIsLeftToo(t *testing.T) {
 		t.Fatalf("the port was moved %d time(s) and then abandoned while still unanswered", moves)
 	}
 }
+
+// The backoff must never reach zero.
+//
+// It doubles: portMoveAfter << moves. Shifting a Go int by its own width or
+// more yields zero, so after enough moves the threshold would have been 0 —
+// and a threshold of zero means "move the port every second, for ever", which
+// is the exact opposite of a backoff. It takes a long outage to get there, and
+// a long outage is precisely when this must not churn.
+func TestTheBackoffNeverReachesZero(t *testing.T) {
+	for moves := 0; moves < 1000; moves++ {
+		got := portMoveThreshold(moves)
+
+		if got < portMoveAfter {
+			t.Fatalf("portMoveThreshold(%d) = %d, below the first threshold of %d",
+				moves, got, portMoveAfter)
+		}
+		if got > portMoveCeiling {
+			t.Fatalf("portMoveThreshold(%d) = %d, above the ceiling of %d",
+				moves, got, portMoveCeiling)
+		}
+	}
+
+	// And it does grow, or it is not a backoff at all.
+	if portMoveThreshold(2) <= portMoveThreshold(0) {
+		t.Fatal("the threshold does not rise with each move")
+	}
+}

@@ -104,10 +104,7 @@ func (c *Client) maybeMovePort() {
 	}
 
 	c.mu.Lock()
-	threshold := portMoveAfter << c.portMoves
-	if threshold > portMoveCeiling {
-		threshold = portMoveCeiling
-	}
+	threshold := portMoveThreshold(c.portMoves)
 	blocked := c.unacked >= threshold && c.sendFailures == 0
 	if blocked && c.anyPeerReachableLocked() {
 		// Someone can reach us, so the port works. Reset rather than count on
@@ -145,6 +142,31 @@ func (c *Client) maybeMovePort() {
 	c.opts.Logf("discovery: now on UDP %d; announcing again to find out whether it helped", port)
 
 	c.Rehello()
+}
+
+// portMoveThreshold is how many unanswered announcements the next move needs.
+//
+// Doubling, capped. The cap is applied to the SHIFT and not only to the
+// result, which matters more than it looks: shifting a Go int by its own width
+// or more yields zero, so after enough moves `portMoveAfter << moves` would
+// have been 0 — and a threshold of zero is "move the port every second, for
+// ever", which is the exact opposite of the backoff this is.
+func portMoveThreshold(moves int) int {
+	const maxShift = 5 // 3 << 5 is already past the ceiling
+
+	if moves < 0 {
+		moves = 0
+	}
+	if moves > maxShift {
+		moves = maxShift
+	}
+
+	threshold := portMoveAfter << moves
+	if threshold > portMoveCeiling {
+		threshold = portMoveCeiling
+	}
+
+	return threshold
 }
 
 // anyPeerReachableLocked reports whether any peer currently has a path that
