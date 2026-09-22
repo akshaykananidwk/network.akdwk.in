@@ -6,6 +6,154 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.2] — 2026-09-22
+
+The one-click standard, applied to the installer, to the edge and to the agent
+itself.
+
+1.9.1 installed cleanly on two real Windows PCs on two real ISPs — and then
+took two hours of PowerShell to get them to "connecting", after which they
+still could not reach each other. The standard from here is the one the
+customer set: **double-click the setup, type the join code, click OK, and
+within sixty seconds both machines are ONLINE in the panel and can ping each
+other's overlay address.** Nothing else. No PowerShell, no restart, no reboot.
+
+Everything below is either a defect that standard exposed, or a piece of
+machinery that stops the next one shipping.
+
+### Fixed
+
+**A device added after another was already connected could never be reached.**
+The coordinator learned a device's peer set from its first `Hello` and never
+looked again, so a machine that announced while it was alone held an empty
+allowed set for the life of its process. Approving a second device changed
+nothing for the first until somebody restarted its service — which is exactly
+what two hours of PowerShell was spent doing. The coordinator now re-verifies a
+device's peers on a `Ping` when its last verification is over a minute old,
+re-sends the peer list when the set has changed, and invalidates the peers of
+any device that says hello. The agent re-announces whenever its configuration
+changes, and at least every five minutes.
+
+**Relay fallback never happened on the real internet.** A relay registered by
+hostname — which is how a relay on a VPS is registered — arrived at the agent
+as a name, and the agent parsed relay endpoints with `netip.ParseAddrPort`,
+which does not resolve names. Every offer for a named relay was silently
+dropped, so two devices that could not punch simply never connected. Relay
+endpoints are now resolved, IPv4 preferred, off the hot path, and the resolved
+address is remembered.
+
+**A new `setup.exe` over an existing install failed.** The installer stopped
+the service unconditionally on exit and refused to re-register an already
+installed service. Running it again now upgrades in place: the service
+definition and recovery actions are updated, the binary is replaced with the
+service stopped only if the write needs it, and the identity — the device's
+private key and its enrolment — is kept. Enrolment itself is idempotent: the
+same panel and an existing enrolment is a no-op rather than a second device.
+
+**The installer wizard was reachable on a production panel.** Deleting
+`install/install.lock` was enough to re-open it. The installer now looks for
+evidence that the panel is installed — the lock file, a written
+`config/config.php`, a users row — and refuses on any of them, writing the lock
+back rather than just complaining.
+
+**The panel showed devices as Offline while they were heartbeating.** Online
+was computed from the agent's own `connection_type`, so a device that was
+connected to the panel but had not yet reached a peer read as Offline. Online
+is now the heartbeat and nothing else — ninety seconds — and how it is
+connected (direct, relay, connecting) is shown separately, which is the
+question it was actually answering.
+
+**Windows Firewall dropped every inbound packet on the overlay.** The agent
+opened its UDP listen port and nothing else, so `ping 10.50.x.x` failed in both
+directions on a default Windows install. The agent now installs one inbound
+allow rule scoped to the overlay CIDR — not "allow everything" — and sets the
+overlay adapter's network profile to Private. If either fails, it is reported
+to the panel as a problem rather than left to be discovered by a failing ping.
+
+**The panel's `install.ps1` was a 404 with the wrong binary and verb.** The
+download endpoints are now real, public, and stream the artefact that
+`upgrade-edge.sh` published.
+
+**The coordinator's registry handed out live pointers to entries other
+goroutines were writing.** `Get` and `PeersOf` returned the stored `*Entry`,
+and every caller read it after the registry's lock was gone. It was latent
+until re-verification started running in a goroutine of its own, at which point
+the race detector found it in the first run. Both now return a snapshot.
+
+**Agents reporting `offline` were stored as a state the database did not have.**
+Agents up to 1.9.1 send `offline` to mean "no peer reached yet"; the panel now
+maps it to `connecting`, which is what it means.
+
+### Added
+
+**Pre-approved join codes.** An administrator can now issue a code that
+authorises the devices enrolling with it immediately — the admin's explicit
+choice, per code, limited-use, short TTL, revocable, and audited as
+`device.pre_approved`. R4 is intact: no device is trusted until an
+administrator decides it is; this moves that decision from after enrolment to
+before it, and does not remove it.
+
+**`deploy/upgrade-edge.sh`.** One command, run as root on the VPS, that brings
+the coordinator and relay up to whatever release the panel is running: it asks
+the panel what to build, checks out that exact commit, builds both services,
+*verifies the new binaries report the new version before installing them*,
+backs up what it replaces, restarts, confirms both are listening, rebuilds the
+Windows installer stamped for the panel, publishes it at a stable download URL
+and prints it. It never touches `/etc/akconnect` or `config.php`.
+`--install-timer` makes it a systemd timer that keeps the edge current by
+itself.
+
+It does not get run by the panel's Update Now, deliberately: for a PHP
+application on the public internet to build and restart services on the VPS it
+would need root there, and that machine holds the coordinator's private key and
+the relay secrets. One compromise would take both. The edge pulls; the panel is
+never given a way to push.
+
+**Agent self-update (§14).** The agent can replace its own binary from a
+release the panel has signed, so the next defect does not mean visiting every
+PC. The download is not trusted for being authenticated or for arriving over
+TLS — it is trusted for matching a sha256 that the controller's ed25519 key has
+signed, and `Verify` requires both. `akconnect-agent update` does it by hand
+and prints every step; the poll loop does it every six hours after a healthy
+pass; `AKCONNECT_NO_AUTO_UPDATE` turns the automatic half off.
+
+### Gates
+
+The lab passed everything that failed in the field, so the lab was wrong.
+
+**A real CGNAT topology.** Two NAT layers with `--random-fully` on both, RFC
+6598 carrier space, and the far side symmetric — the shape a Jio hotspot
+actually has, where hole-punching cannot work and a relay is the only path.
+`cgnat` asserts the relay carries it; `cgnat-direct` puts a cone NAT on the far
+side and asserts it goes direct anyway, so "we relayed everything" cannot pass
+as success.
+
+**A device approved after another is already connected.** `late-joiner` brings
+one device up alone, approves the second nine minutes into its life, and
+asserts the first reaches it without a restart. It is built on the CGNAT
+topology on purpose: on a plain NAT the panel's own `last_endpoint` is enough
+to punch through, and the scenario passed with the defect still in place until
+it was moved.
+
+**Relays are registered by hostname in the lab**, because registering them by
+IP is what hid the relay-endpoint defect.
+
+**The deployment script is gated like code.** `upgrade-edge.sh` shipped with a
+failed preflight printing "All steps passed". `edge-script-gate.sh` runs the
+real script eleven ways — no Go, Go too old, not root, no panel, an unreadable
+secret — and asserts each one prints FAIL and exits non-zero. It found six.
+
+### Changed
+
+- Go is looked for in `/usr/local/go/bin` and `/usr/lib/go/bin` before being
+  declared missing, and the systemd unit carries that `PATH`. The official
+  tarball puts it somewhere no fresh root shell has on its path.
+- `install.ps1`, `setup.exe` and the test pack are served from stable panel
+  URLs, published by `upgrade-edge.sh` and verified by sha256 before they
+  replace what is live.
+
+---
+
 ## [1.9.1] — 2026-09-22
 
 Ten defects a real aaPanel deployment found in one evening, and the gate that

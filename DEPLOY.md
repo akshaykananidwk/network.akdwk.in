@@ -498,6 +498,40 @@ Run `collect.ps1` at each stage and send me the zip.
 
 ---
 
+## Updating to 1.9.2 — three steps, in this order
+
+1. **In the panel: System → Updates → Update Now.** This brings the PHP side to
+   1.9.2 and runs its three migrations. Nothing else changes yet: the
+   coordinator and the relay are still on the old release, and the panel will
+   say so on **Platform → Coordinator**.
+
+2. **On the VPS, once, as root:**
+
+   ```bash
+   sudo /opt/akconnect/src/deploy/upgrade-edge.sh
+   ```
+
+   This is where the two protocol fixes actually land — the coordinator is the
+   thing that was freezing peer lists. It also builds a fresh
+   `akconnect-setup.exe` stamped for your panel and prints the address it is
+   served from. Copy that address; it is what the customer downloads. It ends
+   in `PASS — N step(s), all clean.` or `FAIL — the edge is NOT upgraded.`, and
+   nothing in between.
+
+3. **On each Windows PC: double-click the new `akconnect-setup.exe`, type the
+   join code, click OK.** Over an existing install this upgrades in place and
+   keeps the device's identity — same key, same enrolment, same overlay
+   address. No PowerShell, no restart, no reboot.
+
+Within about a minute both machines should read **Online** in the panel, and
+each should be able to ping the other's `10.50.x.x` address.
+
+After this, step 3 is not needed again for a defect fix: 1.9.2 agents check
+with the panel every six hours and install a release it has signed. Publishing
+one is what step 2 does.
+
+---
+
 ## Updating the edge servers
 
 The panel's updater updates the panel. The coordinator and the relay are Go

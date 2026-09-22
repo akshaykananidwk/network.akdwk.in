@@ -1,18 +1,26 @@
 # Verification report
 
-**Version 1.9.1 · 22 September 2026**
+**Version 1.9.2 · 22 September 2026**
 
 What follows is what was actually run and what it actually produced. Where a
 requirement is met, the evidence is the command and its output. Where it is
 not met, it says so and why. Nothing here is inferred from reading the code.
 
-**1.9.1 is a correction, not a feature release.** It exists because 1.9.0 was
-deployed to a real server and a real Windows laptop and came back with ten
-defects in one evening — none of which this lab could have found, because
-every test in it ran against PHP's built-in web server. Section I is the
-account of that, of the two container gates added so it cannot happen the same
-way again, and of the seventh defect the first of those gates found on its own.
-The rest of the report is the history that preceded it.
+**1.9.2 is a correction, like 1.9.1 before it.** 1.9.0 was deployed to a real
+server and came back with ten defects in one evening; 1.9.1 fixed those and was
+then installed on two real Windows PCs on two real ISPs, where it took two
+hours of PowerShell to reach "connecting" and the machines still could not
+reach each other. Eight more defects came back. Section I is the first account,
+**section J is the second**, and neither set could have been found by this lab
+as it stood — the first because every test ran against PHP's built-in web
+server, the second because the lab registered its relays by IP address and
+approved every device before any agent started. Both gaps are now closed.
+
+**The acceptance test for 1.9.2 is not in this report.** It is the customer's:
+two fresh Windows PCs on two ISPs, one behind CGNAT, double-click, join code,
+OK, and both online and pinging each other within sixty seconds. There is no
+Windows machine in this environment, so that test has not been run, and nothing
+here should be read as saying it passes.
 
 Everything was exercised against a real installation — PHP 8.4.19, MariaDB
 10.11.14 — and against the real GitHub repository, not a mock. Eight releases
@@ -47,6 +55,7 @@ NAT remain untested. See
 | H   | The networking gate | **Pass** | 73 scenarios in one command; it found four defects when first written and more at every release since |
 | H2  | Dogfooding          | **Pass after two fixes** | Six update runs, two rollbacks; the rollback drill found a P1, and testing its fix found the fix incomplete |
 | I   | Production (1.9.0)  | **Failed, then fixed** | Ten defects in one evening on a real aaPanel box; two new gates now reproduce six of them, and found a seventh nobody had reported |
+| J   | Two Windows PCs, two ISPs (1.9.1) | **Failed, then fixed** | Eight defects, two of them protocol defects that cost two hours; a CGNAT topology and a late-joiner drill now reproduce both. **The ONE-CLICK acceptance test itself has not been run** |
 
 Automated suites, as of 1.9.1:
 
@@ -1945,6 +1954,211 @@ when nothing has connected yet.
 
 ---
 
+## J — Two Windows PCs, two ISPs, and the eight defects they found
+
+1.9.1 was deployed to the production panel and installed on two real Windows
+PCs on two different ISPs — a laptop behind CGNAT whose public port is remapped
+per destination, and a second PC on an ordinary connection.
+
+The install worked. Both machines enrolled by double-click, stamped the panel
+URL, picked up approval by themselves, and brought up a tunnel with the overlay
+route, NRPT split DNS and the split-tunnel default route intact.
+
+**And then it took two hours of PowerShell to get them both to "connecting",
+after which they still could not reach each other.** That is the result that
+matters, and it is the reason 1.9.2 exists.
+
+### What went wrong, and what catches it now
+
+| # | Defect | Caught now by |
+|---|--------|---------------|
+| 11 | The installer wizard was reachable on a live panel: `rm -rf install` removed the lock, the next update restored `install/` without it | `ProductionDefectTests`; `DatabaseTests::reinstallKeepsItsIdentity` |
+| 12 | A new `setup.exe` over an existing install failed; enrolment created a second device | Go `setup_test.go`; `enroll.go` idempotency |
+| 13 | The panel's `install.ps1` was a 404, with the wrong binary and the wrong verb | `HttpTests` download endpoints |
+| 14 | The installer stopped the service on exit, leaving the machine disconnected | Go `setup_test.go` |
+| 15 | **The coordinator froze a device's peer set at its first hello** | `server_test.go` (2 tests); `late-joiner` scenario |
+| 16 | **A relay registered by hostname was never resolved, so fallback never happened** | `relay_test.go` (2 tests); `cgnat` scenario |
+| 17 | The panel showed Offline while devices were heartbeating | `DatabaseTests`; `Device::OFFLINE_AFTER_SECONDS` |
+| 18 | Windows Firewall dropped every inbound packet on the overlay | `winenv.EnsureOverlayFirewall`; reported as a problem when it fails |
+
+Defects 15 and 16 are the two that cost the two hours, and they are the two the
+lab could not see. Both were proven to fail on 1.9.1's code before the fix was
+put back:
+
+**15 — a device added after another is already connected.** The coordinator
+learned a device's peer set from its `Hello` and never looked again. A machine
+that announced while it was alone held an empty allowed set for the life of its
+process; approving a second device changed nothing for the first. On reverted
+code the new `late-joiner` scenario reproduces the field symptom exactly:
+
+```
+wg error: peer(MhnV…1ulc) - Failed to send handshake initiation: no known endpoint for peer
+```
+
+repeated every five seconds, with `grep -c relay alpha-up.log` returning 0 —
+the first device never even *asked* for a relay, because it did not know the
+peer existed. Final line: `late/reached FAIL — alpha never reached the device
+approved after it · 1 of 2 checks FAILED`.
+
+On 1.9.2 the same scenario reads:
+
+```
+✓ late/alone       — alpha is up and running with no peers at all
+✓ late/reached     — alpha reached the newcomer 15s after approval, without a restart
+✓ late/mutual      — and the newcomer reached alpha
+✓ late/no-restart  — alpha brought its interface up exactly once
+```
+
+The fix has three parts: the coordinator re-verifies a peer set with the panel
+on a `Ping` when its last verification is over a minute old; a `Hello` from any
+device invalidates the peer sets of everyone that device can reach; and the
+agent re-announces whenever its configuration changes, and at least every five
+minutes.
+
+**The scenario was worthless at first, and that is worth recording.** Written
+against the ordinary two-NAT topology it passed with all three cures reverted.
+The reason is that `AclService::buildPeerSet` publishes each peer's
+`last_endpoint`, which is a second, independent path to the address — enough to
+punch through an ordinary NAT without the coordinator's introduction at all. It
+was moved onto the CGNAT topology, where punching cannot work and the
+introduction is genuinely required, and only then did it fail against the
+defect. A scenario that passes on broken code is worse than no scenario.
+
+**16 — a relay named rather than numbered.** A relay on a VPS is registered by
+hostname. The agent parsed relay endpoints with `netip.ParseAddrPort`, which
+does not resolve names, so every offer for a named relay was dropped in
+silence — two devices that could not punch simply never connected, with nothing
+in any log to say why. The lab could not have found it: it registered its
+relays by IP address. It now registers them as `relay.lab.internal`, resolved
+per namespace through `/etc/netns/<ns>/hosts`, and the `cgnat` scenario asserts
+the relay actually carried the traffic:
+
+```
+✓ cgnat/tunnel     — alpha pinged 10.99.0.3 from behind two layers of NAT
+✓ cgnat/path       — the path is a relay, as it must be
+✓ cgnat/relay-used — the relay bound 8 session(s); both ends reached it
+✓ cgnat/relay-name — the agent accepted a relay named relay.lab.internal
+```
+
+### The CGNAT topology
+
+The lab's "symmetric NAT" was one NAT layer with per-destination mapping. A Jio
+hotspot is two: the customer's own router, and the carrier's, both remapping.
+`topology.sh cgnat` builds that — RFC 6598 carrier space, `MASQUERADE
+--random-fully` on both layers — and runs two scenarios against it:
+
+* `cgnat` puts a symmetric NAT on the far side, where punching cannot work, and
+  asserts the relay carries it;
+* `cgnat-direct` puts a cone NAT on the far side and asserts the path is
+  **direct anyway**, so "we relayed everything" cannot pass for success.
+
+### A race the fix exposed
+
+Re-verification runs in a goroutine, which made an existing hazard reachable:
+`Registry.Get` and `Registry.PeersOf` returned the stored `*Entry`, and every
+caller read it after the registry's lock was gone. `go test -race` found it on
+the first run of the new coordinator test. Both now return a snapshot. The
+entry's maps are replaced wholesale rather than mutated, which is what makes a
+shallow copy a real snapshot — and is now written down beside the code, because
+nothing else would catch it if that stopped being true.
+
+### The deployment script, gated like code
+
+`deploy/upgrade-edge.sh` shipped with a failed preflight printing **"All steps
+passed"** — a false pass in the one script whose whole job is to tell an
+operator whether the edge upgraded. It was reported from the field, not found
+here.
+
+The structure is now such that a false pass is hard to produce rather than
+merely unlikely: every check appends to one `RESULTS` array, `die()` records
+before it exits, the summary is printed from a single `EXIT` trap, and it
+returns failure when anything failed **or** when the script did not reach its
+last line. `REACHED_END=1` is set in exactly one place.
+
+`services/lab/edge-script-gate.sh` runs the real script eleven ways and asserts
+each one fails honestly:
+
+```
+── a failed preflight is a failure, not a pass
+  (the stripped PATH has 1488 tools and no go)
+  ✓ Go absent → FAIL and non-zero (exit 1)
+  ✓ and it says which tool is missing
+  ✓ and names where it looked
+── Go off PATH but installed is not missing
+  ✓ Go at /usr/local/go/bin is found without PATH
+  ✓ and the run still fails honestly further on (exit 1)
+── a Go too old to build with is refused, not attempted
+  ✓ Go 1.19 → FAIL and non-zero (exit 1)
+  ✓ and says which version is needed
+── every other early exit fails honestly too
+  ✓ run without root → FAIL and non-zero (exit 1)
+  ✓ no source checkout → FAIL and non-zero (exit 1)
+  ✓ an unknown option exits non-zero (exit 2)
+  ✓ and claims nothing
+  11 passed, 0 failed
+```
+
+It failed six of eleven against the shipped script, reproducing the operator's
+output. The "Go off PATH" case is the second half of that report: the official
+Go tarball installs to `/usr/local/go/bin`, which is on no fresh root shell's
+`PATH` and on no systemd unit's. The script now looks there — and in
+`/usr/lib/go/bin`, `/usr/lib/go-*/bin`, `/opt/go/bin`, `~/go/bin` and
+`/snap/bin` — before declaring Go missing, and the timer unit carries the same
+`PATH`.
+
+### Agent self-update (§14)
+
+Fixing a defect should not mean visiting every PC. It now does not have to.
+
+The security is one function. A release is installed only if its sha256 matches
+**and** that digest carries an ed25519 signature from the controller key the
+panel publishes in the agent's configuration. `Verify` requires both; there is
+no path that installs a binary without them. The panel is on the public
+internet and holds the customer database — the signing key is the one thing an
+attacker who owns the panel still does not have, and it is the only thing
+between a compromised panel and code on every customer machine.
+`selfupdate_test.go` enumerates nine ways to fail (no digest, wrong digest, no
+signature, no key, another key's signature, malformed signature, short
+signature, malformed key, short key) and asserts every one is refused.
+
+Applying it is a rename rather than a write, because on Windows a running
+executable cannot be overwritten or deleted but *can* be renamed. The old
+binary is kept as `.old` — also the only thing to put back if the new one does
+not start — and removed at the next start. Staging happens beside the target,
+and a staged file anywhere else is refused before anything moves: `os.Rename`
+across filesystems fails, and it would fail *after* the running binary had been
+moved aside.
+
+The HTTP test for it found a real defect on the way in: `/api/v1/agent/version`
+advertised `/agent/download/3` while the route is `/api/v1/agent/download/3`.
+Every self-update would have 404'd at the last step.
+
+**Not proven:** the swap-and-restart has never run on a Windows machine. It
+compiles for Windows; `Verify` and `Apply` are tested on Linux; the detached
+`Restart-Service` that has to survive its own parent being stopped is unproven
+until somebody reports it working.
+
+### Pre-approved join codes, without breaking R4
+
+R4 says no device is trusted until an administrator approves it. The ONE-CLICK
+standard says nobody clicks anything. Both hold, because the administrator's
+decision moves rather than disappears: issuing a join code marked pre-approved
+*is* the approval, made in advance, for a code that is limited-use, short-lived
+and revocable. It is the admin's explicit per-code choice, never a default, and
+every device admitted that way is audited as `device.pre_approved`.
+`DatabaseTests::preApprovedJoinCode` asserts an ordinary code still leaves a
+device pending.
+
+### What has not been shown
+
+**The ONE-CLICK ACCEPTANCE TEST has not been run.** Everything above is
+evidence that the defects it exposed are fixed and gated; none of it is
+evidence that the test passes. That requires two fresh Windows PCs on two ISPs
+with one behind CGNAT, and this environment has no Windows machine at all. The
+pack is built and stamped for the panel; the result belongs to whoever runs it.
+
+---
+
 ## What this verification found
 
 The single most important result is not in the table above. It is that **three
@@ -2033,6 +2247,27 @@ start.
 ## Known limitations
 
 These are real and currently shipped.
+
+0. **The ONE-CLICK ACCEPTANCE TEST has not been run.** Two fresh Windows PCs on
+   two ISPs, one behind CGNAT, double-click, join code, OK, both online and
+   pinging each other within sixty seconds. There is no Windows machine in this
+   environment. Every defect that test exposed is fixed and has a regression
+   that fails against 1.9.1 — that is a different statement, and this report
+   does not make the first one.
+
+0b. **The agent's self-update has never completed on Windows.** `Verify` and
+   `Apply` are tested on Linux and the panel half is tested over HTTP. The
+   Windows-specific part — a detached `Restart-Service` that must outlive the
+   service stopping it — compiles and has never run. If it does not work, the
+   new binary is on disk and takes over at the next start or reboot rather than
+   immediately; it does not leave a machine without an agent, because the swap
+   is a rename with the old binary kept.
+
+0c. **The coordinator re-verifies on a one-minute TTL, per device.** That is a
+   deliberate load choice, not a proof: a thousand devices pinging every ten
+   seconds means up to a thousand panel calls a minute in the worst case.
+   Single-flight per device and "only when the set changed" push keep it well
+   under that in practice, and it has not been measured at that scale.
 
 1. **The gates run Debian's Apache and a purpose-built PHP, not aaPanel's.**
    The web gate reproduces the combination that broke — Apache talking to
@@ -2141,34 +2376,51 @@ These are real and currently shipped.
    caller's open transaction. Callers that restore inside a transaction should
    not expect to roll that transaction back.
 
-17. **Fourteen files remain above the ~400-line guideline**, and the list has
-   grown rather than shrunk. `BackupManager` was split for exactly this reason
-   during 1.0.7 (517 → 417 plus a 240-line `ArchiveStore`); nothing else has
-   been:
+17. **Twenty-six files remain above the ~400-line guideline**, and the list has
+   grown again — nine of them added or pushed over the line by 1.9.2's gates
+   and defect fixes. `BackupManager` was split for exactly this reason during
+   1.0.7 (517 → 417 plus a 240-line `ArchiveStore`); nothing else has been.
+   Roughly half are test suites and lab harnesses, where the guideline earns
+   less than it does in application code, but `install/Installer.php`,
+   `app/Services/DeviceService.php` and `up.go` are not:
 
    | File | Lines |
    |---|---|
-   | `tests/DatabaseTests.php` | 879 |
-   | `app/Updater/UpdateSteps.php` | 750 |
-   | `tests/HttpTests.php` | 683 |
-   | `install/Installer.php` | 677 |
+   | `tests/DatabaseTests.php` | 1040 |
+   | `tests/HttpTests.php` | 960 |
+   | `install/Installer.php` | 760 |
+   | `app/Updater/UpdateSteps.php` | 753 |
    | `tests/UnitTests.php` | 641 |
+   | `deploy/upgrade-edge.sh` | 631 |
+   | `services/agent/cmd/akconnect-agent/up.go` | 566 |
+   | `app/Services/DeviceService.php` | 537 |
    | `tests/StaticAnalysisTests.php` | 516 |
-   | `install/index.php` | 487 |
+   | `install/index.php` | 507 |
+   | `services/lab/scenarios.sh` | 505 |
+   | `services/lab/scenarios-gateway.sh` | 488 |
+   | `services/lab/dogfood.sh` | 484 |
    | `tests/GatewayTests.php` | 476 |
-   | `app/Services/DeviceService.php` | 465 |
+   | `services/lab/topology.sh` | 465 |
+   | `app/Controllers/Api/AgentController.php` | 462 |
+   | `services/lab/lib-agents.sh` | 457 |
+   | `services/coordinator/internal/server/server_test.go` | 456 |
    | `app/Updater/RollbackManager.php` | 435 |
    | `app/Updater/UpdateManager.php` | 434 |
+   | `services/agent/internal/discovery/relay.go` | 424 |
    | `app/Updater/BackupManager.php` | 417 |
    | `app/Updater/GithubClient.php` | 409 |
+   | `services/lab/lab-setup.php` | 408 |
    | `app/Services/AclService.php` | 408 |
+   | `services/agent/internal/winsvc/winsvc_windows.go` | 403 |
 
    `UpdateSteps.php` is still the clear offender — a step machine and eleven
    steps in one file. `DatabaseTests.php` overtook it in 1.9.1, which is the
    cost of putting the production regressions where the fixtures already are;
-   splitting the tenant-isolation fixtures out is the obvious next move. New
-   code in 1.9.1 stayed under the line: the largest is
-   `app/Updater/PathGuard.php` at 328.
+   splitting the tenant-isolation fixtures out is the obvious next move. Most
+   of 1.9.2's new application code stayed under the line — `EdgeRelease.php` is
+   395, `selfupdate` is two files of 131 and 116 — but `DeviceService.php`,
+   `AgentController.php` and `up.go` each grew past it, and
+   `deploy/upgrade-edge.sh` was over it the day it was written.
 
 18. **Signature verification is implemented but unused.** Manifests carry a
    `signature` field and the code checks it when present; no release in this
@@ -2193,10 +2445,14 @@ this report should be read as claiming otherwise.
 1. **Billing and payment.** Plans and limits are enforced at the action; there
    is no payment provider, invoicing or dunning.
 
-2. **Agent release distribution.** The `agent_releases` table exists and is
-   empty. There is now an agent to release — and a Windows installer pack that
-   is built by hand and copied — so this has gone from "nothing to serve" to
-   "not built yet".
+2. **Agent release distribution — built in 1.9.2, not yet exercised in
+   production.** `agent_releases` is populated by `deploy/upgrade-edge.sh`,
+   every row is signed with the controller key, and the agent verifies both the
+   digest and the signature before swapping its binary. What has not happened
+   is a real device updating itself: the round trip is tested over HTTP and on
+   Linux, and the Windows restart is unproven. Staged rollout exists
+   (`rollout_percent`, bucketed by a stable hash of the device uid) and has
+   only ever been used at 100.
 
 3. **Horizontal scale testing.** The session store is in the database and the
    web tier is stateless by design, so more than one node should work. It has
@@ -2208,8 +2464,16 @@ this report should be read as claiming otherwise.
 
 In the order I would do them.
 
-0. **Apply 1.9.1 to the production box and re-run the checks in DEPLOY.md
-   stage 1b.** Every path in that list must answer 403 or 404, `uploads/` must
+0. **Run the ONE-CLICK ACCEPTANCE TEST.** Three steps, in this order: apply
+   1.9.2 from the panel's Update Now; run `deploy/upgrade-edge.sh` once as root
+   on the VPS, which brings the coordinator and relay to the same release and
+   publishes a Windows installer stamped for the panel; then double-click that
+   installer on both PCs, type the join code, click OK. Within sixty seconds
+   both should read ONLINE and each should ping the other's `10.50.x.x`. Every
+   other item below is less important than this one, because everything in
+   1.9.2 exists for it and none of it has been demonstrated.
+
+0b. **Then re-run the checks in DEPLOY.md stage 1b.** Every path in that list must answer 403 or 404, `uploads/` must
    refuse a `.php`, and an agent call with a valid token must not come back as
    `no_credential`. Three of the manual patches made on that box by hand are
    superseded by this release; `.htaccess` and `app/Core/Crypto.php` are

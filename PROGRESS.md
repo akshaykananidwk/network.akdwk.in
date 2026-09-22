@@ -3,7 +3,7 @@
 What is built, what is stubbed, what is next. Kept honest — a plan that
 overstates itself is worse than no plan.
 
-Last updated: 2026-09-22 · version 1.9.1
+Last updated: 2026-09-22 · version 1.9.2
 
 ---
 
@@ -12,7 +12,7 @@ Last updated: 2026-09-22 · version 1.9.1
 `VERIFICATION_REPORT.md` records what was actually run, against a real
 installation and the real GitHub repository. The short version:
 
-* 593 automated assertions, all passing, repeatable across consecutive runs.
+* 641 automated assertions, all passing, repeatable across consecutive runs.
 * Nine update runs through the panel's own pipeline, six of them rolled back.
 * A rollback that restores 213 of 213 files byte-for-byte and 20 of 20 tables.
 * Byte-exact recovery from damage severe enough that the panel could not boot.
@@ -54,6 +54,23 @@ all three are fixed in 1.9.1 with regression tests that fail on 1.9.0. Gateway
 mode (Stage 13) and the installer `.exe` end to end (Stage 15) are still
 untested on real hardware.
 
+**Two real Windows PCs, two real ISPs, one behind CGNAT.** 1.9.1 installed
+cleanly on both by double-click — and then took two hours of PowerShell to
+reach "connecting", after which the machines still could not ping each other.
+Eight more defects came back from that session, the two that mattered being
+protocol defects the lab could not see: the coordinator froze a device's peer
+set at its first hello, so every machine already connected broke the moment a
+new one was added; and a relay registered by hostname was never resolved, so
+relay fallback never happened on the real internet. Both are fixed in 1.9.2,
+both have scenarios that fail against 1.9.1, and the lab now has a CGNAT
+topology and a late-joiner drill because it did not have either.
+
+**The acceptance test for 1.9.2 is the customer's, not the lab's**: on two
+fresh PCs, double-click the setup, type the join code, click OK, and within
+sixty seconds both are ONLINE in the panel and can ping each other's overlay
+address. Nothing else. It has not been run yet — the pack is built and
+waiting, and no claim that it passes belongs here until somebody runs it.
+
 **And the panel has been deployed.** 1.9.0 went onto a real aaPanel VPS —
 Ubuntu 24.04, Apache 2.4 with PHP-FPM 8.3, MariaDB 10.11 — and returned seven
 more defects in one evening, every one of them invisible to a lab that ran
@@ -74,10 +91,10 @@ everything.
 | P3 Relay | Relay service, fallback and silent upgrade to direct, RTT-based selection, failover, usage accounting | **Working in the lab**, selection on measured RTT, failover drilled; accounting verified against the relay's own count |
 | P4 Advanced | ACL enforcement on the agent, routes, DNS, subnet router, site-to-site | **ACL, subnet-router mode with 1:1 subnet mapping, and split DNS all working and drilled on Linux**, including against a client with its enforcement compiled out; NRPT split DNS confirmed on real Windows, gateway mode not; site-to-site not started |
 | P5 Commercial | Plans, limits, billing, invoices, API keys, OpenAPI, white-label | Mostly done (see below) |
-| **Deployment** | Panel on aaPanel, coordinator + relay on a VPS, field kit pointed at both | `DEPLOY.md` and `deploy/`; **the panel has been deployed** — it found ten defects, fixed in 1.9.1. Coordinator and relay on a VPS not yet |
+| **Deployment** | Panel on aaPanel, coordinator + relay on a VPS, field kit pointed at both | `DEPLOY.md` and `deploy/`; **the panel has been deployed** — it found ten defects (1.9.1) and two real Windows PCs found eight more (1.9.2). The edge upgrades in one command (`deploy/upgrade-edge.sh`); the coordinator and relay are not yet on a VPS |
 | P6 Enterprise | HA, multi-region relays, SSO/SAML, staged agent rollout | Not started |
 
-**593 assertions pass** (`php tests/run.php --url=…`; 475 without an HTTP
+**641 assertions pass** (`php tests/run.php --url=…`; 501 without an HTTP
 server), and **`services/lab/release.sh` is the release gate**. It runs the
 test suites, builds and verifies the Windows pack, stands up Apache with
 PHP-FPM and installs the panel into it through the browser installer, runs the
@@ -275,10 +292,11 @@ Listed so nobody discovers them the hard way.
    closing it — but the class of defect that got through in 1.9.0 cannot get
    through the same way again.
 
-1. **Put 1.9.1 on the production box, through the updater.** The ten defects
-   above are fixed and gated; none of that is worth anything until the panel
-   that found them is running the release that fixes them. The checks in
-   `DEPLOY.md` stage 1b are the acceptance test.
+1. **The ONE-CLICK acceptance test, on the two PCs that failed it.** Update the
+   panel to 1.9.2, run `deploy/upgrade-edge.sh` once on the VPS, and
+   double-click the new `akconnect-setup.exe` on both machines. Everything in
+   1.9.2 exists for that one test, and nothing in this file claims it passes
+   until it has been run.
 2. **Stage 15 — the installer `.exe`, end to end.** It is what a customer
    experiences, and the one thing in the pack that has still never been run on
    Windows from double-click to uninstall. Uninstall leaving nothing behind

@@ -58,6 +58,20 @@ type Entry struct {
 	VerifiedAt time.Time
 }
 
+// snapshot copies an entry so the caller can read it after the lock is gone.
+//
+// A shallow copy is a real snapshot here, and only because of a rule this
+// package keeps: the maps and slices inside an Entry are never mutated once
+// they are published. Peers is replaced wholesale by SetPeers, RelayRTT by
+// SetRelayRTT, and Local only by the Upsert that created the entry. Break
+// that rule and this stops being a snapshot silently — the race detector found
+// the last version of this, where the pointer itself was handed out.
+func (e *Entry) snapshot() *Entry {
+	copied := *e
+
+	return &copied
+}
+
 // NeedsVerify reports whether the peer set is old enough to be re-confirmed.
 func (e *Entry) NeedsVerify(ttl time.Duration) bool {
 	return e.VerifiedAt.IsZero() || time.Since(e.VerifiedAt) > ttl
@@ -224,8 +238,13 @@ func (r *Registry) Get(key [32]byte) (*Entry, bool) {
 	defer r.mu.RUnlock()
 
 	entry, ok := r.byKey[key]
+	if !ok {
+		return nil, false
+	}
 
-	return entry, ok
+	// A copy, not the live entry. Another goroutine re-verifying this device
+	// writes to it under the lock the caller no longer holds.
+	return entry.snapshot(), true
 }
 
 // PeersOf returns the online peers a device is allowed to learn about.
@@ -252,7 +271,7 @@ func (r *Registry) PeersOf(key [32]byte) []*Entry {
 		if _, mutual := peer.Peers[key]; !mutual {
 			continue
 		}
-		out = append(out, peer)
+		out = append(out, peer.snapshot())
 	}
 
 	return out

@@ -1,12 +1,14 @@
 {
-  "version": "1.9.1",
-  "released_at": "2026-09-22T09:00:00Z",
+  "version": "1.9.2",
+  "released_at": "2026-09-22T18:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Ten defects a real aaPanel deployment found in one evening, and the gate that would have found them: Apache with PHP-FPM, a browser install driven end to end, and a PHP whose Argon2 comes from libsodium. Fixes a 500 on every page under PHP-FPM, a webroot that served deploy/, docs/ and .git, an uploads/ directory that executed PHP, an installer that died creating the administrator, an Authorization header Apache never passed on, an agent that refused to start while waiting for approval, and a Windows clash check that refused the overlay because of the agent’s own adapter.",
+  "notes": "The one-click standard, applied to the installer, to the edge and to the agent itself. Eight defects two real Windows PCs on two real ISPs found: a setup.exe that would not upgrade an existing install, a coordinator peer list that froze at the first hello so every device already connected broke when a new one was added, a relay endpoint given as a name and never resolved so fallback never happened on the real internet, an installer wizard still reachable in production, a panel that showed Offline while devices were heartbeating, and Windows Firewall silently dropping every inbound packet on the overlay. Adds pre-approved join codes so a device can be authorised at enrolment by an admin's explicit choice, deploy/upgrade-edge.sh so the coordinator and relay upgrade in one command, and agent self-update over a signed release so the next fix does not mean visiting every PC.",
   "migrations": [
-    "2026_09_22_090000_relay_public_key_optional.php"
+    "2026_09_22_090000_relay_public_key_optional.php",
+    "2026_09_22_140000_join_code_pre_approved.php",
+    "2026_09_22_150000_device_connecting_state.php"
   ],
   "protected": [
     ".env",
