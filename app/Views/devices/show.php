@@ -132,7 +132,14 @@ declare(strict_types=1);
                 <p class="field-hint">Up to date as of <?= e(time_ago($updateChecked)) ?>.</p>
             <?php endif; ?>
         </dd></div>
-        <div><dt>Public endpoint</dt><dd><code><?= e($device['last_endpoint'] ?: '—') ?></code></dd></div>
+        <div><dt>Public endpoint</dt><dd>
+            <code><?= e($device['last_endpoint'] ?: '—') ?></code>
+            <?php if ((string) ($device['connection_type'] ?? '') === 'relay_https'): ?>
+                <p class="field-hint">This device is on the HTTPS path, so what the coordinator
+                    sees is the relay passing its messages on — not the customer's own address.
+                    The address they are seen as is in the agent's status file.</p>
+            <?php endif; ?>
+        </dd></div>
         <div><dt>LAN endpoint</dt><dd><code><?= e($device['last_lan_endpoint'] ?: '—') ?></code></dd></div>
         <div><dt>Latency</dt><dd><?= $device['latency_ms'] !== null ? e($device['latency_ms']) . ' ms' : '—' ?></dd></div>
         <div><dt>Traffic</dt><dd>↓ <?= e(format_bytes((int) $device['rx_bytes'])) ?> · ↑ <?= e(format_bytes((int) $device['tx_bytes'])) ?></dd></div>

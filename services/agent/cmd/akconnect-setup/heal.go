@@ -74,7 +74,10 @@ func heal(ui *console, dir string) {
 	// stops the new one being written.
 	stopTray()
 
-	if image := serviceImagePath(); image != "" && staleService(image, fileExists) {
+	image := serviceImagePath()
+	stale := image != "" && staleService(image, fileExists)
+
+	if stale {
 		ui.step("Clearing a previous installation that is no longer there")
 
 		// Not stopped first: there is nothing to stop, because the program it
@@ -84,9 +87,13 @@ func heal(ui *console, dir string) {
 
 	// A Wintun adapter left behind by a crash keeps the name, so the next one
 	// becomes "AKConnect #2" and every rule and route naming the first one
-	// points at a dead adapter. It is only safe to remove while nothing is
-	// using it, which is exactly the case when no agent is installed.
-	if !fileExists(filepath.Join(dir, "akconnect-agent.exe")) {
+	// points at a dead adapter.
+	//
+	// Removed only when nothing can be using it — which is the case on a
+	// half-installed machine and is not the case during an ordinary upgrade,
+	// where the service is about to be restarted onto the same adapter.
+	// Removing it there would tear a working tunnel down to no purpose.
+	if orphanedAdapter(image, stale, dir) {
 		if err := removeWintunAdapter(); err == nil {
 			ui.step("Removed a network adapter left behind by an earlier install")
 		}
@@ -98,6 +105,21 @@ func heal(ui *console, dir string) {
 	// installed. They are rewritten on every start, so removing them here
 	// costs nothing.
 	_ = removeNrptRules()
+}
+
+// orphanedAdapter decides whether a network adapter belongs to nothing.
+//
+// A decision rather than a Windows call, so it can be exercised here. Three
+// shapes count, and they are all "this machine has wreckage on it": no service
+// registered at all, a service registered against a program that is gone, and
+// a program that is not where this installer puts it. An ordinary upgrade —
+// service registered, program present — is none of them.
+func orphanedAdapter(image string, stale bool, dir string) bool {
+	if image == "" || stale {
+		return true
+	}
+
+	return !fileExists(filepath.Join(dir, "akconnect-agent.exe"))
 }
 
 func fileExists(path string) bool {

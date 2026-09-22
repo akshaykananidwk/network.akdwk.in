@@ -378,3 +378,44 @@ func TestTheUninstallerKnowsEveryFirewallRuleEverMade(t *testing.T) {
 		t.Error("the uninstaller no longer removes the rule versions up to 1.9.5 created")
 	}
 }
+
+// When a network adapter belongs to nothing and may be taken away.
+//
+// It has to go on a half-installed machine: an adapter left behind by a crash
+// keeps the name, the next one becomes "AKConnect #2", and every rule and
+// route naming the first points at something dead. It must NOT go during an
+// ordinary upgrade, where the service is about to be restarted onto the same
+// adapter and removing it would tear down a working tunnel to no purpose.
+func TestAnAdapterIsOnlyRemovedWhenItBelongsToNothing(t *testing.T) {
+	dir := t.TempDir()
+	agent := filepath.Join(dir, "akconnect-agent.exe")
+
+	installed := `"` + agent + `" service run`
+
+	// An ordinary upgrade: service registered, program present.
+	if err := os.WriteFile(agent, []byte("binary"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if orphanedAdapter(installed, false, dir) {
+		t.Error("an upgrade would remove the adapter its own service is using")
+	}
+
+	// Nothing registered at all.
+	if !orphanedAdapter("", false, dir) {
+		t.Error("an adapter with no service at all was kept")
+	}
+
+	// Registered against a program that is gone.
+	if !orphanedAdapter(installed, true, dir) {
+		t.Error("an adapter belonging to a stale service was kept")
+	}
+
+	// Registered, not stale, but this installer's program is not there —
+	// a folder somebody deleted by hand.
+	if err := os.Remove(agent); err != nil {
+		t.Fatal(err)
+	}
+	if !orphanedAdapter(installed, false, dir) {
+		t.Error("an adapter was kept although the program is not where it should be")
+	}
+}
