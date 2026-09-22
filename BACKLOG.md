@@ -245,3 +245,39 @@ things I would otherwise have done in the same session.
 - **B15 — `upgrade-edge.sh` is past 700 lines.** Over the ~400-line guideline
   and now carrying the hand-over, the skew fallback and the summary logic. Worth
   splitting once it stops changing every day.
+
+## Defect 23 — two devices behind one router (first in 1.9.5)
+
+Confirmed from the field: both PCs on one office router, one public IP. The
+laptop's hellos reach the coordinator from 150.129.167.50:51820 every twenty
+seconds, and the replies never come back — the laptop reports "Coordinator: not
+reachable" while its own log says it is announcing. The pair sat at
+"connecting" until one machine was moved to a different ISP.
+
+Root cause, confirmed in the code rather than guessed: `DefaultListenPort =
+51820` is fixed for every device and is not persisted anywhere, so behind a
+shared router exactly one agent can hold the public 51820 mapping. The agent
+requests no UPnP or NAT-PMP mapping itself — there is no such code — so the
+collision is the router's, and the agent has no way to notice or recover from
+it. The comment on that constant says a stable port "makes a router's port
+forwarding possible", which is the assumption that breaks the moment a site has
+two PCs.
+
+The lab could not have found this: every NAT topology put exactly one device
+behind each gateway.
+
+Done so far: `topology.sh shared [forward]` builds two agents on one LAN behind
+one public IP, with port-preserving masquerade (what a home router does, so the
+first device to send keeps 51820 and the second does not) and an optional stale
+forward of public :51820 to the first machine, which reproduces replies being
+delivered to the wrong PC.
+
+Still to do, in order:
+ 1. The scenario on that topology, plus a third device behind a second NAT;
+    all pairs connect within 30s. Must fail on 1.9.4.
+ 2. (b) A per-device listen port, chosen once and remembered in the agent's
+    state, replacing the fixed 51820. This is the root fix.
+ 3. (c) Hellos unacked for N intervals — sends succeeding, no reply — treated
+    like the dead-socket case, but rebinding on a NEW local port.
+ 4. (a) Prefer a same-subnet candidate when one exists, so two machines on one
+    LAN take the LAN path rather than hairpinning through the router.

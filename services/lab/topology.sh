@@ -29,7 +29,7 @@ teardown() {
     # natgw-alpha and cgnat-alpha are the two layers the CGNAT topology adds.
     # A namespace left behind makes the next "ip netns add" fail, and the
     # scenario then blames the product for a lab that did not clean up.
-    for ns in alpha beta natgw-a natgw-b natgw-alpha cgnat-alpha nvr office; do
+    for ns in alpha beta natgw-a natgw-b natgw-alpha cgnat-alpha natgw-s nvr office; do
         ip netns del "$ns" 2>/dev/null || true
     done
     ip link del "$BRIDGE" 2>/dev/null || true
@@ -44,7 +44,8 @@ teardown() {
     for link in br-alpha br-beta br-natgw-a br-natgw-b \
                 veth-alpha veth-beta wan-natgw-a wan-natgw-b \
                 lan-natgw-a lan-natgw-b lan-beta veth-nvr lan-alpha veth-office \
-                lan-local lan-local-far lan-office lan-office-far; do
+                lan-local lan-local-far lan-office lan-office-far \
+                wan-natgw-s br-natgw-s lan-natgw-s lan-shared; do
         ip link del "$link" 2>/dev/null || true
     done
 
@@ -452,6 +453,91 @@ build_collision() {
     note "alpha resolves through 192.168.10.1, which stands in for its ISP"
 }
 
+# Two devices on ONE router, which is what a customer site looks like.
+#
+# Defect 23: every agent binds the same fixed UDP port, so behind a shared
+# router exactly one of them can hold the public 51820 mapping. In the field
+# the laptop's hellos reached the coordinator from :51820 and the replies came
+# back to the OTHER PC — the laptop showed "Coordinator: not reachable" while
+# its own log said it was announcing every twenty seconds, and the pair sat at
+# "connecting" until one machine was moved to a different ISP.
+#
+# The lab had no topology where two agents share a router, so it could not have
+# seen any of it. Every NAT scenario here put exactly one device behind each
+# gateway.
+#
+#   alpha 192.168.30.2 ─┐
+#                       ├─ natgw-s 10.0.0.30 ── shared segment ── coordinator
+#   gamma 192.168.30.3 ─┘
+#
+# The gateway masquerades with port preservation (no --random-fully), which is
+# what a home router does: the first device to send from 51820 keeps 51820, and
+# the second is given something else. Add a stale forward with
+# `shared forward` to reproduce the rest of the field case, where inbound
+# traffic to :51820 is delivered to whichever machine the router decided owns
+# it rather than to the one whose flow created the mapping.
+build_shared() {
+    local stale=${1:-none}
+
+    teardown
+    ip link add "$BRIDGE" type bridge
+    ip link set "$BRIDGE" up
+    ip address add "$HOST_IP/24" dev "$BRIDGE"
+    ip netns add natgw-s
+
+    ip link add wan-natgw-s type veth peer name br-natgw-s
+    ip link set br-natgw-s master "$BRIDGE"
+    ip link set br-natgw-s up
+    ip link set wan-natgw-s netns natgw-s
+
+    ip netns exec natgw-s ip link set lo up
+    ip netns exec natgw-s ip address add 10.0.0.30/24 dev wan-natgw-s
+    ip netns exec natgw-s ip link set wan-natgw-s up
+    ip netns exec natgw-s ip route add default via "$HOST_IP"
+    ip netns exec natgw-s sysctl -qw net.ipv4.ip_forward=1
+
+    # One LAN, two machines on it — the part no other topology here has.
+    # Created INSIDE the namespace: a bridge cannot be moved into one
+    # afterwards ("The interface netns is immutable").
+    ip netns exec natgw-s ip link add lan-natgw-s type bridge
+    ip netns exec natgw-s ip address add 192.168.30.1/24 dev lan-natgw-s
+    ip netns exec natgw-s ip link set lan-natgw-s up
+
+    local host last
+    last=2
+    for host in alpha gamma; do
+        ip netns add "$host"
+        ip link add "veth-$host" type veth peer name "lan-$host"
+        ip link set "lan-$host" netns natgw-s
+        ip link set "veth-$host" netns "$host"
+
+        ip netns exec natgw-s ip link set "lan-$host" master lan-natgw-s
+        ip netns exec natgw-s ip link set "lan-$host" up
+
+        ip netns exec "$host" ip link set lo up
+        ip netns exec "$host" ip address add "192.168.30.$last/24" dev "veth-$host"
+        ip netns exec "$host" ip link set "veth-$host" up
+        ip netns exec "$host" ip route add default via 192.168.30.1
+        last=$((last + 1))
+    done
+
+    # Port-preserving masquerade: what a home router does, and the reason only
+    # one of the two can hold the public 51820.
+    ip netns exec natgw-s iptables -t nat -A POSTROUTING -s 192.168.30.0/24 \
+        -o wan-natgw-s -j MASQUERADE
+
+    if [ "$stale" = "forward" ]; then
+        # A forward of :51820 to the FIRST machine, of the kind a router keeps
+        # from an old UPnP request or a hand-made rule. Inbound replies meant
+        # for the other machine are delivered here instead.
+        ip netns exec natgw-s iptables -t nat -A PREROUTING -d 10.0.0.30 \
+            -p udp --dport 51820 -i wan-natgw-s -j DNAT --to-destination 192.168.30.2:51820
+        note "a stale forward sends public :51820 to alpha, whoever it was meant for"
+    fi
+
+    note "alpha 192.168.30.2 and gamma 192.168.30.3 share one router at 10.0.0.30"
+}
+
 case "${1:-up}" in
     up)        build_flat ;;
     nat)       build_nat ;;
@@ -460,6 +546,7 @@ case "${1:-up}" in
     mixed)     build_mixed "${2:-cone}" "${3:-symmetric}" ;;
     gateway)   build_gateway ;;
     collision) build_collision ;;
+    shared)    build_shared "${2:-none}" ;;
     down)      teardown ;;
     *)         die "unknown command: $1 (use up, nat, symmetric, cgnat, mixed, gateway, collision or down)" ;;
 esac
