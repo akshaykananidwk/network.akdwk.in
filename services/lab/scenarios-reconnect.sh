@@ -248,12 +248,16 @@ scenario_shared_router() {
     a_hellos="$(grep -c "hello from $UID_ALPHA" "$LOGS/coordinator.log" 2>/dev/null)" || a_hellos=0
     g_hellos="$(grep -c "hello from $UID_GAMMA" "$LOGS/coordinator.log" 2>/dev/null)" || g_hellos=0
 
-    if [ "$a_hellos" -le 4 ] && [ "$g_hellos" -le 4 ]; then
+    # At least one each: zero is not "settled", it is "never got a word out",
+    # and an earlier version of this check read 0 and 0 as a pass.
+    if [ "$a_hellos" -ge 1 ] && [ "$g_hellos" -ge 1 ] \
+        && [ "$a_hellos" -le 4 ] && [ "$g_hellos" -le 4 ]; then
         record "shared/acked" PASS \
             "both devices on the shared router are being answered (${a_hellos} and ${g_hellos} hellos)"
     else
         record "shared/acked" FAIL \
-            "a device is re-announcing unanswered: alpha ${a_hellos}, gamma ${g_hellos} hello(s)"
+            "alpha ${a_hellos} hello(s), gamma ${g_hellos} — 0 means it never reached the coordinator, \
+more than 4 means it is re-announcing unanswered"
     fi
 
     # The pair on one router. This is the case that must not go out to the

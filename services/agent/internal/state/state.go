@@ -11,11 +11,14 @@
 package state
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // State is the agent's persistent record.
@@ -27,6 +30,21 @@ type State struct {
 	DeviceToken string `json:"device_token,omitempty"`
 	VirtualIP   string `json:"virtual_ip,omitempty"`
 	Revision    int    `json:"revision,omitempty"`
+	// ListenPort is the UDP port this device uses, chosen once and kept.
+	//
+	// Defect 23: every agent used a fixed 51820, so at a site with several PCs
+	// behind one router only one of them could hold the external 51820 — and
+	// the others were mapped somewhere else, or not mapped at all. A laptop
+	// announced every twenty seconds for ever and reported "Coordinator: not
+	// reachable" while its own log said it was announcing, and the two PCs in
+	// one office could not reach each other until one was moved to a different
+	// ISP. Several PCs behind one router is the commonest customer layout
+	// there is.
+	//
+	// Kept rather than re-rolled because a port that changes on every start is
+	// a NAT mapping that changes on every start, and a firewall rule that has
+	// to be rewritten with it.
+	ListenPort int `json:"listen_port,omitempty"`
 }
 
 // Enrolled reports whether this machine has an identity on a panel.
@@ -34,6 +52,37 @@ func (s *State) Enrolled() bool { return s.DeviceUID != "" && s.PanelURL != "" }
 
 // Approved reports whether an admin has let the device in (R4).
 func (s *State) Approved() bool { return s.DeviceToken != "" }
+
+// ChooseListenPort returns this device's UDP port, picking one the first time.
+//
+// The range is the IANA dynamic range above 49152, avoiding the very top where
+// Windows' own ephemeral allocations cluster. Deliberately not 51820: that is
+// WireGuard's well-known port, it is what every other agent used, and a site
+// with two PCs is exactly where that collides.
+//
+// crypto/rand rather than math/rand seeded from the clock, because two PCs
+// imaged from the same disk and switched on together are precisely the pair
+// that would draw the same "random" port.
+func ChooseListenPort(current int) int {
+	if current >= 1024 && current <= 65535 {
+		return current
+	}
+
+	const (
+		low  = 49152
+		high = 60999
+	)
+
+	var buf [2]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// Losing the entropy source is not a reason to fail to start; the
+		// fallback still avoids 51820 and still differs per machine, because
+		// the nanosecond a device boots is not the nanosecond another one did.
+		return low + int(time.Now().UnixNano()%(high-low))
+	}
+
+	return low + int(binary.BigEndian.Uint16(buf[:]))%(high-low)
+}
 
 // Store reads and writes the state file.
 type Store struct{ path string }

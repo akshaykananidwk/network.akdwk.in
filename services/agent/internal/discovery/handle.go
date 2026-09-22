@@ -77,8 +77,69 @@ func (c *Client) handlePeers(header disco.Header, sealed []byte) {
 	}
 
 	for _, peer := range peers.Peers {
-		c.probe(peer)
+		c.probe(prefer(peer, c.opts.LocalEndpoints))
 	}
+}
+
+// prefer puts a candidate on one of our own subnets first.
+//
+// Two PCs in one shop are on one switch. Reaching each other across it is
+// faster, does not depend on the router hairpinning traffic back to itself —
+// which many consumer routers simply will not do — and does not consume one of
+// the external mappings they are already fighting over (defect 23).
+//
+// The coordinator already sends LAN addresses ahead of the public one, and
+// that is not enough: it does not know which of a peer's addresses is on the
+// same network as us. Only we know that.
+//
+// Ordering only. Every candidate is still tried, because a peer that looks
+// same-subnet may be a different site using the same private range, and that
+// is the case that would otherwise never reach anybody.
+func prefer(peer disco.PeerInfo, ours []netip.AddrPort) disco.PeerInfo {
+	if len(peer.Candidates) < 2 || len(ours) == 0 {
+		return peer
+	}
+
+	near := make([]netip.AddrPort, 0, len(peer.Candidates))
+	far := make([]netip.AddrPort, 0, len(peer.Candidates))
+
+	for _, candidate := range peer.Candidates {
+		if sameSubnet(candidate.Addr(), ours) {
+			near = append(near, candidate)
+			continue
+		}
+		far = append(far, candidate)
+	}
+
+	peer.Candidates = append(near, far...)
+
+	return peer
+}
+
+// sameSubnet reports whether an address looks like it is on one of ours.
+//
+// A /24 for IPv4 rather than the real prefix length, because the agent is not
+// told its own mask here and /24 is what a home or shop network is. Getting it
+// wrong costs an ordering preference, not a connection: every candidate is
+// still tried.
+func sameSubnet(addr netip.Addr, ours []netip.AddrPort) bool {
+	if !addr.Is4() {
+		return false
+	}
+
+	for _, mine := range ours {
+		self := mine.Addr()
+		if !self.Is4() {
+			continue
+		}
+
+		a, b := addr.As4(), self.As4()
+		if a[0] == b[0] && a[1] == b[1] && a[2] == b[2] {
+			return true
+		}
+	}
+
+	return false
 }
 
 // probe sends a punch to every candidate address for a peer.

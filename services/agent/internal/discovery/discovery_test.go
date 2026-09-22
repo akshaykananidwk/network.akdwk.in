@@ -425,3 +425,49 @@ func TestARebindThatDidNotHelpIsNotReportedAsRecovered(t *testing.T) {
 		t.Fatal("the problem is still reported after a real recovery")
 	}
 }
+
+// Defect 23: two PCs in one shop are on one switch, and reaching each other
+// across it must not depend on the router hairpinning traffic back to itself —
+// which many consumer routers will not do — nor consume one of the external
+// mappings the two of them are already fighting over.
+func TestACandidateOnOurOwnSubnetIsTriedFirst(t *testing.T) {
+	ours := []netip.AddrPort{netip.MustParseAddrPort("192.168.30.2:51820")}
+
+	peer := disco.PeerInfo{
+		Candidates: []netip.AddrPort{
+			netip.MustParseAddrPort("203.0.113.7:41000"),  // the public one
+			netip.MustParseAddrPort("10.8.0.4:51820"),     // another network
+			netip.MustParseAddrPort("192.168.30.3:51820"), // next door
+		},
+	}
+
+	got := prefer(peer, ours).Candidates
+
+	if got[0] != netip.MustParseAddrPort("192.168.30.3:51820") {
+		t.Fatalf("the same-subnet candidate is not first: %v", got)
+	}
+
+	// And nothing is dropped: a peer that looks same-subnet may be a different
+	// site using the same private range, and that is the case that would
+	// otherwise never reach anybody.
+	if len(got) != 3 {
+		t.Fatalf("candidates were lost: %v", got)
+	}
+}
+
+func TestOrderingIsLeftAloneWhenNothingIsNear(t *testing.T) {
+	ours := []netip.AddrPort{netip.MustParseAddrPort("192.168.30.2:51820")}
+
+	peer := disco.PeerInfo{
+		Candidates: []netip.AddrPort{
+			netip.MustParseAddrPort("203.0.113.7:41000"),
+			netip.MustParseAddrPort("10.8.0.4:51820"),
+		},
+	}
+
+	got := prefer(peer, ours).Candidates
+
+	if got[0] != netip.MustParseAddrPort("203.0.113.7:41000") || len(got) != 2 {
+		t.Fatalf("an unrelated list was reordered: %v", got)
+	}
+}

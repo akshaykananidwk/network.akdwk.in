@@ -32,7 +32,10 @@ func runUp(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	verbose := fs.Bool("verbose", false, "log WireGuard handshakes")
 	iface := fs.String("iface", "", "interface name")
-	port := fs.Int("port", tunnel.DefaultListenPort, "UDP listen port")
+	// Zero means "use this device's own port", which is chosen once and kept
+	// in the state file. A number on the command line still wins, for an
+	// operator who needs a specific port for a firewall rule.
+	port := fs.Int("port", 0, "UDP listen port (default: this device's own)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -169,6 +172,21 @@ func newSession(iface string, port int, verbose bool, logf func(string, ...any))
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// Defect 23: a fixed port for every device means a site with two PCs has
+	// two devices fighting over one external mapping. The port is chosen once,
+	// written down, and used for the life of the install.
+	if port == 0 {
+		chosen := state.ChooseListenPort(st.ListenPort)
+		if chosen != st.ListenPort {
+			st.ListenPort = chosen
+			if err := stateSt.Save(st); err != nil {
+				logf("could not record this device's port: %v", err)
+			}
+			logf("this device will use UDP %d", chosen)
+		}
+		port = chosen
 	}
 
 	return &session{

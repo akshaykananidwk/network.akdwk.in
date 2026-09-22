@@ -528,31 +528,30 @@ build_shared() {
         -o wan-natgw-s -j MASQUERADE
 
     if [ "$stale" = "forward" ]; then
-        # A STATIC map of :51820, which is what the field router did and what a
-        # plain DNAT cannot model.
+        # One LAN host may use external :51820, and no other.
         #
-        # The first version of this used an ordinary DNAT and the scenario
-        # passed on the defective code: Linux answers an established flow from
-        # conntrack, so the forward never applied to the replies and both
-        # devices worked. A drill that passes on the defect is worth nothing.
+        # This models a router that will not create a second mapping for a port
+        # another machine has already leased — a stale UPnP lease, or a
+        # hand-made forward. Traffic from a second host using that source port
+        # is dropped rather than mapped.
         #
-        # NOTRACK makes the translation stateless, which is how a consumer
-        # router's port-forward actually behaves: traffic on :51820 belongs to
-        # whichever machine the router says owns it, whoever sent it. Both LAN
-        # machines are pinned to source port 51820 on the way out, and
-        # everything coming back to :51820 goes to alpha. A device that assumes
-        # it owns a fixed port is then broken exactly as the laptop was.
-        ip netns exec natgw-s iptables -t raw -A PREROUTING -i wan-natgw-s \
-            -p udp --dport 51820 -j CT --notrack
-        ip netns exec natgw-s iptables -t raw -A PREROUTING -i lan-natgw-s \
-            -p udp --sport 51820 -j CT --notrack
-
-        ip netns exec natgw-s iptables -t nat -A POSTROUTING -s 192.168.30.0/24 \
-            -o wan-natgw-s -p udp --sport 51820 -j SNAT --to-source 10.0.0.30:51820
+        # What it models exactly: a device cannot assume it owns a fixed
+        # external port, and must notice and move when it does not.
+        #
+        # What it does NOT model: the field router delivered the second
+        # device's REPLIES to the first machine rather than dropping them. That
+        # cannot be built with iptables — NAT is conntrack-based, so an
+        # established flow is always answered correctly, and taking conntrack
+        # away (NOTRACK) disables SNAT with it, which broke the first two
+        # versions of this topology and made the drill test nothing. The
+        # observable failure for the device is the same either way: its
+        # announcements go unanswered for ever while it holds that port.
         ip netns exec natgw-s iptables -t nat -A PREROUTING -d 10.0.0.30 \
             -p udp --dport 51820 -i wan-natgw-s -j DNAT --to-destination 192.168.30.2:51820
+        ip netns exec natgw-s iptables -A FORWARD -i lan-natgw-s \
+            -p udp --sport 51820 ! -s 192.168.30.2 -j DROP
 
-        note "public :51820 is statically owned by alpha; anything else sent from :51820 is lost"
+        note "external :51820 is leased to alpha; another host using it is not mapped"
     fi
 
     # And a third machine behind a router of its own, because "two PCs at one
