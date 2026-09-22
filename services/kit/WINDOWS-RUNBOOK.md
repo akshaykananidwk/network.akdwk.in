@@ -808,6 +808,78 @@ netsh advfirewall firewall show rule name="AKConnect Agent (WireGuard UDP)" | Se
 
 ---
 
+## Stage 16 — The one-click test, on two PCs · 10 min
+
+This is the only stage that needs two machines, and it is the one the product
+is judged on. Run it on two PCs on **different** internet connections — ideally
+one on a phone hotspot, which is carrier-grade NAT and the hard case.
+
+Nothing in this stage uses PowerShell. That is the point of it.
+
+1. On PC A: double-click `akconnect-setup.exe`, type the join code, click OK.
+2. On PC B: the same, with the same code.
+3. Wait one minute.
+
+**Expect:** both PCs show **Online** in the panel, each with an overlay address
+beginning `10.`.
+
+Then, on PC A, in an ordinary Command Prompt — no administrator needed:
+
+```
+ping 10.50.0.3
+```
+
+substituting PC B's overlay address as the panel shows it, and the same in
+reverse from PC B.
+
+**Expect:** replies, both ways. Direct or relayed does not matter here; the
+panel's device page says which, and either is a pass.
+
+**If it fails**, this is the one thing worth collecting before anything else:
+
+```powershell
+.\collect.ps1 -Stage 16-oneclick
+Get-Content "$env:ProgramData\AKConnectgent.log" -Tail 100
+```
+
+The log is where the answer is: "no known endpoint for peer" repeated means
+the two machines were never introduced to each other, and "relay" appearing
+nowhere at all means the relay was never tried.
+
+---
+
+## Stage 17 — Self-update · 10 min
+
+Only once an administrator has published a newer agent from the panel.
+
+```powershell
+.kconnect-agent.exe update --check
+```
+
+**Expect:** it names the running version, the panel it asked, and either the
+version offered or "Nothing newer is offered to this device."
+
+```powershell
+.kconnect-agent.exe update
+```
+
+**Expect:** each step printed — fetching, the byte count, verifying, then
+`Verified : the digest is signed by this panel's controller key`, then
+`Installed`. A release that is not signed by the panel's controller key must be
+**refused**, and the agent must keep running the old binary.
+
+```powershell
+.kconnect-agent.exe version
+.\collect.ps1 -Stage 17-selfupdate
+```
+
+**Expect:** the new version, and the service still running. This path has never
+been run on Windows — if the restart does not happen, the new binary is on disk
+and takes over at the next start, which is worth reporting exactly as it
+behaves.
+
+---
+
 ## Finish — send the results · 2 min
 
 ```powershell
@@ -843,3 +915,5 @@ to include them, and I check for that.
 | 13g | Two LANs both on 192.168.1.0/24, both still reachable | (in 13) |
 | 14 | Names resolve, and the machine's own DNS is untouched | 15 |
 | 15 | **The installer: one file, one code, and a clean uninstall** | 20 |
+| 16 | **Two PCs, two ISPs, double-click only — the acceptance test** | 10 |
+| 17 | Self-update, and that an unsigned release is refused | 10 |
