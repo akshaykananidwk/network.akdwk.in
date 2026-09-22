@@ -221,6 +221,37 @@ An entry belongs here only if it is **measured**, **not a correctness bug**, and
 it is found — that is what the eight defects in `VERIFICATION_REPORT.md` were,
 and none of them was ever a candidate for this list.
 
+## Deferred from 1.9.5 (2026-09-22)
+
+Not cut for time. Each of these is a thing I cannot do from here, or a thing I
+decided not to do, and each says which.
+
+- **Code signing.** The pack builder signs every executable when
+  `AKCONNECT_SIGN_CMD` is set, and prints "UNSIGNED" in capitals when it is
+  not. There is no certificate. An OV or EV code-signing certificate is bought
+  from a certificate authority, with identity documents, and until there is one
+  every customer meets SmartScreen's "Windows protected your PC" naming an
+  unknown publisher. This is the single biggest remaining gap between this and
+  looking like a normal product, and no amount of code closes it.
+
+- **A branded tray icon.** The tray loads `akconnect.ico` and
+  `akconnect-warning.ico` from the program folder when they are there and falls
+  back to a stock Windows icon when they are not. Nobody has drawn them.
+
+- **The tray shows no per-peer detail.** It says how many computers are
+  reachable, not which. That is the right amount for a shopkeeper; a technician
+  wants the list, and the panel has it.
+
+- **Alerts are WhatsApp-shaped only in configuration.** The transport is a
+  configured HTTP request, so it will drive any API — but nothing has been
+  sent through bulk.akdwk.in, because the account's field names and token are
+  AK's to fill in. Test it with the button on the Alerts page before relying
+  on it.
+
+- **B12 from 1.9.4 is only half fixed.** Unanswered announcements now move the
+  agent to a different port. The one-off `address family not supported by
+  protocol` remains undiagnosed, and it is not the same fault.
+
 ## Deferred from 1.9.4 (2026-09-22)
 
 Cut to get 1.9.4 out quickly. None of these block a release; all of them are
