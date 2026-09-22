@@ -110,7 +110,13 @@ lab::release() {
 # own shell and killed the run doing it.
 lab::reap() {
     local port pids
-    for port in "$PANEL_PORT" "$COORD_PORT" "$RELAY_PORT" "$RELAY_B_PORT"; do
+    # WS_PROXY_PORT is in the list for a reason worth keeping. A run that died
+    # inside the proxy's own start had already overwritten the variable holding
+    # the previous proxy's pid, so its cleanup killed the one that had just
+    # failed and left the one that was working — which then held the port
+    # against every run after it.
+    for port in "$PANEL_PORT" "$COORD_PORT" "$RELAY_PORT" "$RELAY_B_PORT" \
+                "$WS_PORT" "$WS_PROXY_PORT"; do
         pids="$(ss -lunpH "sport = :$port" 2>/dev/null; ss -ltnpH "sport = :$port" 2>/dev/null)"
         pids="$(printf '%s\n' "$pids" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)"
         [ -n "$pids" ] || continue
