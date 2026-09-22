@@ -97,11 +97,21 @@ func (s *Server) handleHello(ctx context.Context, header disco.Header, sealed []
 	// about the return path, and it is the one fault a device cannot report
 	// about itself — it does not know its replies are missing, only that it
 	// has not been answered yet.
-	if s.talking.noteHello(hello.DeviceUID, time.Now()) {
-		s.opts.Logf("%s has said hello %d times without ever pinging: it is not receiving our "+
-			"replies at %s. Something between here and that machine is dropping them — a "+
-			"firewall on its network, or its router",
-			hello.DeviceUID, unansweredAfter, from)
+	if unanswered, remapping := s.talking.noteHello(hello.DeviceUID, from.String(), time.Now()); unanswered {
+		if remapping {
+			s.opts.Logf("%s has said hello %d times without ever pinging, and its address keeps "+
+				"changing (now %s): the router in front of it is re-mapping the port between "+
+				"announcements, so every reply we send goes to a mapping it has already thrown "+
+				"away. Nothing on that machine can fix this",
+				hello.DeviceUID, unansweredAfter, from)
+		} else {
+			s.opts.Logf("%s has said hello %d times without ever pinging: it is not receiving our "+
+				"replies at %s, which has not changed. The replies are reaching that address and "+
+				"something at that end is dropping them — its own firewall, or another product "+
+				"on it",
+				hello.DeviceUID, unansweredAfter, from)
+		}
+
 		s.noteUnanswered(hello.DeviceUID, true)
 	}
 

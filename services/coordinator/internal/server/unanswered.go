@@ -53,6 +53,19 @@ type talker struct {
 	lastAt    time.Time
 	reported  bool
 	lastReset time.Time
+	// lastFrom is where the previous announcement came from, and remapped
+	// counts how many times that has changed inside one run.
+	//
+	// This is the difference between two faults that look identical from a
+	// customer's chair. If the address we see stays put, the replies are going
+	// to a place that exists and something at that end is eating them — the
+	// machine's own firewall, or another product on it. If it MOVES between
+	// announcements, the router in front of that machine is re-mapping the
+	// port every few seconds, so every reply we send is addressed to a mapping
+	// that has already been thrown away. Nothing on the machine can fix the
+	// second one.
+	lastFrom string
+	remapped int
 }
 
 func newTalkers() *talkers { return &talkers{seen: map[string]*talker{}} }
@@ -61,27 +74,35 @@ func newTalkers() *talkers { return &talkers{seen: map[string]*talker{}} }
 // said hello enough times, without ever pinging, to call the return path
 // broken. It reports true once per run, not on every hello after the
 // threshold: the panel does not need the same sentence every five seconds.
-func (t *talkers) noteHello(deviceUID string, now time.Time) bool {
+func (t *talkers) noteHello(deviceUID, from string, now time.Time) (bool, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	entry := t.seen[deviceUID]
 	if entry == nil || now.Sub(entry.firstAt) > unansweredWindow {
-		t.seen[deviceUID] = &talker{hellos: 1, firstAt: now, lastAt: now}
+		t.seen[deviceUID] = &talker{hellos: 1, firstAt: now, lastAt: now, lastFrom: from}
 
-		return false
+		return false, false
 	}
 
 	entry.hellos++
 	entry.lastAt = now
 
+	if entry.lastFrom != "" && from != "" && from != entry.lastFrom {
+		entry.remapped++
+	}
+	entry.lastFrom = from
+
 	if entry.hellos < unansweredAfter || entry.reported {
-		return false
+		return false, false
 	}
 
 	entry.reported = true
 
-	return true
+	// Half the announcements in this run arriving from somewhere new is not a
+	// device that moved — a device that moves does it once — it is a router
+	// handing out a fresh mapping each time.
+	return true, entry.remapped*2 >= entry.hellos
 }
 
 // notePing records that the device heard us. A ping is only ever sent by an
@@ -105,6 +126,7 @@ func (t *talkers) notePing(deviceUID string, now time.Time) bool {
 	entry.lastAt = now
 	entry.reported = false
 	entry.lastReset = now
+	entry.remapped = 0
 
 	return recovered
 }
