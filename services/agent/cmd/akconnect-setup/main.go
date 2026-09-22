@@ -54,6 +54,23 @@ const (
 	serviceName = "AKConnectAgent"
 )
 
+// What Apps & features, the Start menu and the tray call this. Stamped at
+// build time like defaultPanel, so the brand lives in one configured place
+// rather than being spelled out in a dozen files:
+//
+//	-ldflags "-X main.displayName=AK Connect -X main.publisher=AK Computer"
+//
+// productName stays as it is: it is the folder name, the service name and the
+// registry key, and those are identifiers rather than words on a screen.
+var (
+	displayName = "AK Connect"
+	publisher   = "AK Computer"
+)
+
+// aboutURL is the panel this pack belongs to, shown in Apps & features as the
+// place to go for help. Empty when nothing was stamped, and then omitted.
+func aboutURL() string { return defaultPanel }
+
 func main() {
 	var (
 		uninstall = flag.Bool("uninstall", false, "remove the agent and everything it installed")
@@ -61,8 +78,14 @@ func main() {
 		panelURL  = flag.String("panel", "", "panel address, when it is not the one built in")
 		name      = flag.String("name", "", "device name to show in the panel (default: this computer's name)")
 		silent    = flag.Bool("silent", false, "no dialogs; for deployment tools")
+		force     = flag.Bool("force", false, "install even when a newer version is already here")
 		showVer   = flag.Bool("version", false, "print the version and exit")
 	)
+
+	// /S /CODE=ABCD-1234 as well as -silent -code=ABCD-1234, because every
+	// deployment tool on Windows speaks the first dialect. See args.go.
+	os.Args = append(os.Args[:1], normaliseArgs(os.Args[1:])...)
+
 	flag.Parse()
 
 	if *showVer {
@@ -73,7 +96,13 @@ func main() {
 
 	ui := &console{silent: *silent}
 
-	if err := runSetup(ui, *uninstall, *code, *panelURL, *name); err != nil {
+	if err := runSetup(ui, options{
+		uninstall: *uninstall,
+		code:      *code,
+		panelURL:  *panelURL,
+		name:      *name,
+		force:     *force,
+	}); err != nil {
 		ui.fail(err.Error())
 		os.Exit(1)
 	}
@@ -81,7 +110,20 @@ func main() {
 
 // runSetup is the whole flow, separated from flag parsing so it can be read in
 // one screen and tested on any platform.
-func runSetup(ui *console, uninstall bool, code, panelURL, name string) error {
+// options is what the customer or their deployment tool asked for.
+//
+// A struct rather than five positional arguments, because the fifth one was
+// about to be a bool next to another bool, and a call site reading
+// (ui, false, "", "", "", true) is a bug waiting for somebody to transpose it.
+type options struct {
+	uninstall bool
+	code      string
+	panelURL  string
+	name      string
+	force     bool
+}
+
+func runSetup(ui *console, opt options) error {
 	if err := requireWindows(); err != nil {
 		return err
 	}
@@ -97,7 +139,7 @@ func runSetup(ui *console, uninstall bool, code, panelURL, name string) error {
 		return relaunchElevated()
 	}
 
-	if uninstall {
+	if opt.uninstall {
 		return runUninstall(ui)
 	}
 
@@ -105,9 +147,22 @@ func runSetup(ui *console, uninstall bool, code, panelURL, name string) error {
 		return err
 	}
 
+	// Before anything is written, and before the customer is asked anything:
+	// running an older installer over a newer install must not quietly take a
+	// working computer backwards. See version.go for why this happens.
+	if installed := installedVersion(); isDowngrade(version, installed) && !opt.force {
+		return fmt.Errorf(
+			"this computer already has %s %s, which is newer than this installer (%s).\n\n"+
+				"Nothing has been changed. To go back to %s on purpose, uninstall %s first "+
+				"from Settings \u2192 Apps, then run this again.",
+			displayName, installed, version, version, displayName)
+	}
+
 	// Everything that can fail is settled before a single file is written. A
 	// failure after the copy leaves a half-install that a customer cannot
 	// reason about and an uninstaller has to guess at.
+	panelURL, code := opt.panelURL, opt.code
+
 	if panelURL == "" {
 		panelURL = defaultPanel
 	}
@@ -137,7 +192,7 @@ func runSetup(ui *console, uninstall bool, code, panelURL, name string) error {
 		return err
 	}
 
-	return runInstall(ui, code, panelURL, name)
+	return runInstall(ui, code, panelURL, opt.name)
 }
 
 // checkPanelURL refuses an address that cannot work, before anything is

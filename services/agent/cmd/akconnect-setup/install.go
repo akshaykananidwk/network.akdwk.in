@@ -91,6 +91,28 @@ func runInstall(ui *console, code, panelURL, name string) error {
 		return err
 	}
 
+	// The notification-area icon, when this pack carries one. It is what the
+	// person using the computer actually sees, and it runs as them rather
+	// than as SYSTEM — see cmd/akconnect-tray.
+	if hasTray() {
+		if err := writeFile(filepath.Join(dir, "akconnect-tray.exe"), trayBinary, 0o755); err != nil {
+			// The customer's own copy may be running and holding it open. The
+			// agent is what matters; the icon catches up at the next sign-in.
+			ui.step("Keeping the existing tray icon (in use)")
+		}
+	}
+
+	// A copy of this installer stays behind, because it is also the
+	// uninstaller. The original was run from a Downloads folder, a USB stick
+	// or a network share, and Apps & features needs to be able to call
+	// something that is still there in a year's time.
+	setupPath := filepath.Join(dir, "akconnect-setup.exe")
+	if err := copySelf(setupPath); err != nil {
+		restore()
+
+		return err
+	}
+
 	ui.step("Joining the network")
 
 	args := []string{"enroll", "--join-code", code, "--wait=false"}
@@ -143,6 +165,19 @@ func runInstall(ui *console, code, panelURL, name string) error {
 
 		return fmt.Errorf("%s was installed but its service is not running.\n\n%v\n\n%s",
 			productName, err, firstLines(status, 6))
+	}
+
+	// Listed in Settings → Apps like any other program, with a working
+	// uninstall button. Done after the service is up rather than before, so a
+	// failed install does not leave an entry for something that is not there.
+	if err := registerInPrograms(dir, setupPath); err != nil {
+		// Not fatal. The software works; it is the removal that would be
+		// awkward, and uninstall.txt says how.
+		ui.step("Installed, but not listed in Settings \u2192 Apps: " + err.Error())
+	}
+
+	if err := createShortcuts(dir, setupPath); err != nil {
+		ui.step("Installed, but the Start menu entry could not be created: " + err.Error())
 	}
 
 	status, _ := runAgentOutput(dir, "status")
@@ -206,9 +241,34 @@ func alreadyRunning(out string) bool {
 		strings.Contains(lower, "1056")
 }
 
-const uninstallNote = "To remove AKConnect, run akconnect-setup.exe -uninstall as administrator.\r\n" +
-	"It removes the service, the firewall rule, the DNS policy rules, the Wintun\r\n" +
-	"adapter and this folder.\r\n"
+const uninstallNote = "To remove AKConnect: Windows Settings \u2192 Apps \u2192 installed apps \u2192\r\n" +
+	"AK Connect \u2192 Uninstall. That is all; nothing needs typing.\r\n" +
+	"\r\n" +
+	"It removes the service, the firewall rules, the DNS policy rules, the Wintun\r\n" +
+	"adapter, this folder and the saved identity, and lists what it removed.\r\n"
+
+// copySelf leaves a copy of this installer in the program folder.
+//
+// It is the uninstaller too, so Apps & features has to be able to find it
+// after the file the customer double-clicked is long gone.
+func copySelf(dest string) error {
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("could not work out where this installer is: %w", err)
+	}
+
+	if strings.EqualFold(self, dest) {
+		// Already the installed copy — somebody ran the one in Program Files.
+		return nil
+	}
+
+	content, err := os.ReadFile(self)
+	if err != nil {
+		return fmt.Errorf("could not read this installer: %w", err)
+	}
+
+	return writeFile(dest, content, 0o755)
+}
 
 // writeFile replaces a file even when one is already there.
 func writeFile(path string, content []byte, mode os.FileMode) error {

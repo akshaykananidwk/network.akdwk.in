@@ -65,6 +65,13 @@ echo "$WINTUN_ZIP_SHA  $WINTUN_ZIP" | sha256sum -c - >/dev/null \
 rm -rf "$STAGE" "$OUT"
 mkdir -p "$STAGE/arm64"
 
+# The brand, in one place. Everything that shows a name to a customer — Apps &
+# features, the Start menu, the tray, the dialogs — is stamped from here rather
+# than spelling it out in a dozen Go files.
+BRAND_NAME="${BRAND_NAME:-AK Connect}"
+ORG_NAME="${ORG_NAME:-AK Computer}"
+BRAND_FLAGS="-X 'main.displayName=$BRAND_NAME' -X 'main.publisher=$ORG_NAME'"
+
 echo "  building the agent"
 (
     cd "$ROOT/services/agent"
@@ -75,6 +82,19 @@ echo "  building the agent"
         go build -trimpath -ldflags "-s -w -X main.version=$VERSION" \
         -o "$STAGE/arm64/akconnect-agent.exe" ./cmd/akconnect-agent
 )
+
+echo "  building the tray icon"
+# windowsgui here too: the tray is an icon, not a program with a window, and a
+# console flashing up at every sign-in is what it must not do.
+(
+    cd "$ROOT/services/agent"
+    GOTOOLCHAIN=local GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+        go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$VERSION $BRAND_FLAGS" \
+        -o "$STAGE/akconnect-tray.exe" ./cmd/akconnect-tray
+    GOTOOLCHAIN=local GOOS=windows GOARCH=arm64 CGO_ENABLED=0 \
+        go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$VERSION $BRAND_FLAGS" \
+        -o "$STAGE/arm64/akconnect-tray.exe" ./cmd/akconnect-tray
+) || die "could not build the tray icon"
 
 echo "  unpacking Wintun"
 TMP="$(mktemp -d)"
@@ -97,11 +117,13 @@ PAYLOAD="$ROOT/services/agent/cmd/akconnect-setup/payload"
 restore_payload() {
     printf 'AKCONNECT-PLACEHOLDER-NOT-A-REAL-BINARY\n' > "$PAYLOAD/akconnect-agent.exe"
     printf 'AKCONNECT-PLACEHOLDER-NOT-A-REAL-BINARY\n' > "$PAYLOAD/wintun.dll"
+    printf 'AKCONNECT-PLACEHOLDER-NOT-A-REAL-BINARY\n' > "$PAYLOAD/akconnect-tray.exe"
 }
 trap 'rm -rf "$TMP"; restore_payload' EXIT
 
 cp "$STAGE/akconnect-agent.exe" "$PAYLOAD/akconnect-agent.exe"
 cp "$STAGE/wintun.dll"          "$PAYLOAD/wintun.dll"
+cp "$STAGE/akconnect-tray.exe"  "$PAYLOAD/akconnect-tray.exe"
 
 (
     cd "$ROOT/services/agent"
@@ -109,18 +131,19 @@ cp "$STAGE/wintun.dll"          "$PAYLOAD/wintun.dll"
     # window. Everything a customer sees is a dialog.
     GOTOOLCHAIN=local GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
         go build -trimpath \
-        -ldflags "-s -w -H=windowsgui -X main.version=$VERSION -X main.defaultPanel=$PANEL_URL" \
+        -ldflags "-s -w -H=windowsgui -X main.version=$VERSION -X main.defaultPanel=$PANEL_URL $BRAND_FLAGS" \
         -o "$STAGE/akconnect-setup.exe" ./cmd/akconnect-setup
 ) || die "could not build the installer"
 
 cp "$STAGE/arm64/akconnect-agent.exe" "$PAYLOAD/akconnect-agent.exe"
 cp "$STAGE/arm64/wintun.dll"          "$PAYLOAD/wintun.dll"
+cp "$STAGE/arm64/akconnect-tray.exe"  "$PAYLOAD/akconnect-tray.exe"
 
 (
     cd "$ROOT/services/agent"
     GOTOOLCHAIN=local GOOS=windows GOARCH=arm64 CGO_ENABLED=0 \
         go build -trimpath \
-        -ldflags "-s -w -H=windowsgui -X main.version=$VERSION -X main.defaultPanel=$PANEL_URL" \
+        -ldflags "-s -w -H=windowsgui -X main.version=$VERSION -X main.defaultPanel=$PANEL_URL $BRAND_FLAGS" \
         -o "$STAGE/arm64/akconnect-setup.exe" ./cmd/akconnect-setup
 ) || die "could not build the arm64 installer"
 
@@ -133,6 +156,13 @@ grep -qa -- "$PANEL_URL" "$STAGE/akconnect-setup.exe" \
     || die "the panel URL is not in the built installer; the -X stamp did not take"
 grep -qa -- "$PANEL_URL" "$STAGE/arm64/akconnect-setup.exe" \
     || die "the panel URL is not in the arm64 installer"
+
+# The brand has to have taken too, or Apps & features lists the built-in
+# default instead of the name on the invoice.
+grep -qa -- "$BRAND_NAME" "$STAGE/akconnect-setup.exe" \
+    || die "\"$BRAND_NAME\" is not in the built installer; the brand stamp did not take"
+grep -qa -- "$BRAND_NAME" "$STAGE/akconnect-tray.exe" \
+    || die "\"$BRAND_NAME\" is not in the built tray icon; the brand stamp did not take"
 
 setup_size="$(stat -c%s "$STAGE/akconnect-setup.exe")"
 agent_size="$(stat -c%s "$STAGE/akconnect-agent.exe")"

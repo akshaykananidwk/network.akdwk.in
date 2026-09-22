@@ -78,6 +78,48 @@ func quoteArg(arg string) string {
 	return `"` + strings.ReplaceAll(arg, `"`, `\"`) + `"`
 }
 
+// relaunchFromTemp restarts this uninstaller from a copy outside the program
+// folder, and reports whether it did.
+//
+// Because the uninstaller is inside the folder it has to delete. Windows will
+// not delete a running program, so an uninstall started from Settings — which
+// runs the copy in Program Files, by design — would remove everything except
+// itself and then report a folder it could not remove. Every real installer
+// does this; it is why an uninstall briefly shows a program running from a
+// temporary folder.
+func relaunchFromTemp() (bool, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return false, nil
+	}
+
+	dir := installDir()
+	if !strings.HasPrefix(strings.ToLower(self), strings.ToLower(dir)) {
+		// Already running from somewhere else — the customer's Downloads
+		// folder, or the temporary copy this function made a moment ago.
+		return false, nil
+	}
+
+	content, err := os.ReadFile(self)
+	if err != nil {
+		return false, fmt.Errorf("could not read %s: %w", self, err)
+	}
+
+	temp := filepath.Join(os.TempDir(), productName+"-uninstall.exe")
+	if err := os.WriteFile(temp, content, 0o755); err != nil {
+		return false, fmt.Errorf("could not write %s: %w", temp, err)
+	}
+
+	cmd := exec.Command(temp, os.Args[1:]...)
+	if err := cmd.Start(); err != nil {
+		return false, fmt.Errorf("could not start %s: %w", temp, err)
+	}
+
+	// Not waited for. This process has to exit for its own file to become
+	// deletable, which is the entire point.
+	return true, nil
+}
+
 // removeServiceDirectly deletes the service without needing our binary.
 //
 // The agent's own `service uninstall` is tried first and is the better path,

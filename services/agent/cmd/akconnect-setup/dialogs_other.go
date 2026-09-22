@@ -43,6 +43,8 @@ func prompt(title, text string) (string, error) {
 
 func hideWindow(*exec.Cmd) {}
 
+func relaunchFromTemp() (bool, error) { return false, nil }
+
 func removeServiceDirectly() error { return errNotWindows }
 func removeFirewallRule() error    { return errNotWindows }
 

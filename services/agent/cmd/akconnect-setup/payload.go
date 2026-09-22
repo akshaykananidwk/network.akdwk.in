@@ -21,6 +21,9 @@ var (
 
 	//go:embed payload/wintun.dll
 	wintunDLL []byte
+
+	//go:embed payload/akconnect-tray.exe
+	trayBinary []byte
 )
 
 // placeholder is what the committed stand-ins contain. They exist so the tree
@@ -49,4 +52,11 @@ func checkPayload() error {
 	}
 
 	return nil
+}
+
+// hasTray reports whether this pack carries the notification-area icon. It is
+// optional: a pack built without it installs a working agent that simply has
+// no icon, which is worth shipping and not worth refusing to install.
+func hasTray() bool {
+	return len(trayBinary) >= 4096 && !bytes.Contains(trayBinary, []byte(placeholder))
 }
