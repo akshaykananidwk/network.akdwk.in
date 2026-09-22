@@ -64,6 +64,13 @@ final class NotificationService
 
         Logger::info('app', 'Platform alert raised', ['title' => $title, 'level' => $level, 'recipients' => $sent]);
 
+        // And a telephone, for the ones that cannot wait until somebody opens
+        // their email: a relay that has stopped responding, a backup that
+        // failed, an update that rolled back. Off unless it is configured, and
+        // it never throws — an alerting channel that can break the thing
+        // raising the alert is worse than no channel at all.
+        WhatsAppAlerts::send($level, $title, $body);
+
         return $sent;
     }
 

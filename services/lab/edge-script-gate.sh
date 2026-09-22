@@ -715,6 +715,7 @@ echo "%s ${AKCONNECT_STUB_VERSION:-0.0.0}"
 esac
 GOSTUB
     printf '#!/usr/bin/env bash
+echo "$@" >> "${AKCONNECT_SYSTEMCTL_LOG:-/dev/null}"
 [ "${1:-}" = "is-active" ] && { echo active; exit 0; }
 exit 0
 '         > "$SKEW/stub/systemctl"
@@ -755,7 +756,7 @@ AKCONNECT_COORDINATOR_SECRET=$CAP_SECRET
 ENVFILE
 
         AKCONNECT_STUB_VERSION="$SKEW_VERSION" \
-    env PATH="$SKEW/stub:$PATH" HOME="$WORK"         AKCONNECT_ETC="$WORK/etc4" AKCONNECT_SRC="$SKEW/src"         AKCONNECT_BIN_DIR="$SKEW/bin" AKCONNECT_REEXEC=1         WINTUN_ZIP="$WORK/wintun.zip"         "$SCRIPT" >"$WORK/skew.out" 2>&1
+    env PATH="$SKEW/stub:$PATH" HOME="$WORK"         AKCONNECT_ETC="$WORK/etc4" AKCONNECT_SRC="$SKEW/src"         AKCONNECT_BIN_DIR="$SKEW/bin" AKCONNECT_REEXEC=1         WINTUN_ZIP="$WORK/wintun.zip"         AKCONNECT_SYSTEMD_DIR="$WORK/units" AKCONNECT_SYSTEMCTL_LOG="$WORK/systemctl.log"         "$SCRIPT" >"$WORK/skew.out" 2>&1
     SKEW_CODE=$?
 
     # First: did the run even get there? Three assertions below passed the
@@ -784,6 +785,58 @@ ENVFILE
     else
         bad "the checkout is dirty after a legacy pack build"             "$(printf '%s' "$DIRT" | head -3 | tr '
 ' ' ')"
+    fi
+
+    # 11. The timer, which is the default from 1.9.5.
+    #
+    # An edge that is only upgraded when somebody remembers to log in runs an
+    # old coordinator for months, and the operator finds out when two
+    # customers cannot connect rather than when the release is published. So
+    # the run above passed no arguments at all, and the timer must be there.
+    if [ -f "$WORK/units/akconnect-upgrade.timer" ] && [ -f "$WORK/units/akconnect-upgrade.service" ]; then
+        ok "a run with no arguments installs the upgrade timer"
+    else
+        bad "no timer was installed by a run with no arguments" \
+            "the edge would only ever be upgraded by hand"
+    fi
+
+    if grep -q "enable --now akconnect-upgrade.timer" "$WORK/systemctl.log" 2>/dev/null; then
+        ok "and enables it, rather than writing units nothing starts"
+    else
+        bad "the timer units were written but never enabled" \
+            "$(head -5 "$WORK/systemctl.log" 2>/dev/null | tr '\n' ' ')"
+    fi
+
+    # And --no-timer is honoured, visibly. An operator who turned it off
+    # months ago should be able to see in the table why their edge is not
+    # keeping itself current.
+    rm -rf "$WORK/units2"
+        AKCONNECT_STUB_VERSION="$SKEW_VERSION" \
+    env PATH="$SKEW/stub:$PATH" HOME="$WORK" \
+        AKCONNECT_ETC="$WORK/etc4" AKCONNECT_SRC="$SKEW/src" \
+        AKCONNECT_BIN_DIR="$SKEW/bin" AKCONNECT_REEXEC=1 \
+        WINTUN_ZIP="$WORK/wintun.zip" \
+        AKCONNECT_SYSTEMD_DIR="$WORK/units2" \
+        "$SCRIPT" --no-timer >"$WORK/notimer.out" 2>&1
+
+    if [ -f "$WORK/units2/akconnect-upgrade.timer" ]; then
+        bad "--no-timer installed the timer anyway" "the option does nothing"
+    else
+        ok "--no-timer installs no timer"
+    fi
+
+    if grep -qE "upgrade timer +INFO" "$WORK/notimer.out"; then
+        ok "and says so in the table, as INFO rather than as a failure"
+    else
+        bad "--no-timer left no trace in the summary" \
+            "an operator cannot see why the edge is not keeping itself current"
+    fi
+
+    if grep -qE "upgrade timer +FAIL" "$WORK/notimer.out"; then
+        bad "a deliberately skipped step is printed as a FAIL" \
+            "the table contradicts its own summary line"
+    else
+        ok "and not as a red row the failure count knows nothing about"
     fi
 
     # The summary must not claim the edge is unchanged when the services were

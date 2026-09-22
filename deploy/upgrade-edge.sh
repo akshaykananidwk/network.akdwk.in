@@ -12,8 +12,15 @@
 # stamped for that panel and publishes it there — printing the address a
 # customer can be sent.
 #
-#   --install-timer   also install a systemd timer that does all of the above
-#                     whenever the panel moves to a new release
+# It also installs a systemd timer that does all of the above whenever the
+# panel moves to a new release. That is the default from 1.9.5, because an
+# edge that is only upgraded when somebody remembers to log in is an edge that
+# runs an old coordinator for months — and the operator finds out when two
+# customers cannot connect, not when the release is published.
+#
+#   --no-timer        do not install or enable the timer (it is left alone if
+#                     it is already there — this does not remove one)
+#   --install-timer   accepted and ignored; the timer is the default now
 #   --check           say whether an upgrade is needed and exit
 #   --skip-pack       skip the Windows installer (faster; services only)
 #
@@ -45,7 +52,9 @@ WINTUN_ZIP="${WINTUN_ZIP:-/var/cache/akconnect/wintun.zip}"
 # lacking the revision also lacks the guard.
 SCRIPT_REVISION=2
 
-INSTALL_TIMER=0
+# On by default since 1.9.5. --no-timer turns it off for an operator who
+# manages their own scheduling.
+INSTALL_TIMER=1
 CHECK_ONLY=0
 SKIP_PACK=0
 
@@ -86,6 +95,12 @@ TEMP_PATHS=()
 
 pass() { RESULTS+=("PASS|$1|${2:-}"); }
 fail() { RESULTS+=("FAIL|$1|${2:-}"); FAILED=$((FAILED + 1)); }
+# info records something an operator should see that is neither a success nor
+# a failure — a step deliberately not taken. It must never be printed red: the
+# summary printer used to treat anything that was not PASS as FAIL, so a row
+# like this would have shown as a failure the count knew nothing about, which
+# is a table that contradicts its own summary line.
+info() { RESULTS+=("INFO|$1|${2:-}"); }
 step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
 say()  { printf '  %s\n' "$*"; }
 
@@ -108,11 +123,11 @@ summary() {
         name="${line#*|}"; name="${name%%|*}"
         detail="${line##*|}"
 
-        if [ "$result" = "PASS" ]; then
-            printf '  \033[32m%-34s %-6s\033[0m %s\n' "$name" "PASS" "$detail"
-        else
-            printf '  \033[31m%-34s %-6s\033[0m %s\n' "$name" "FAIL" "$detail"
-        fi
+        case "$result" in
+            PASS) printf '  \033[32m%-34s %-6s\033[0m %s\n' "$name" "PASS" "$detail" ;;
+            INFO) printf '  \033[33m%-34s %-6s\033[0m %s\n' "$name" "INFO" "$detail" ;;
+            *)    printf '  \033[31m%-34s %-6s\033[0m %s\n' "$name" "FAIL" "$detail" ;;
+        esac
     done
 
     if [ "${#RESULTS[@]}" -eq 0 ]; then
@@ -200,12 +215,16 @@ keep() { TEMP_PATHS+=("$1"); }
 # Now die() handles it, which records a FAIL and lets the trap print the table.
 while [ $# -gt 0 ]; do
     case "$1" in
+        # Kept so an existing runbook, cron entry or muscle memory does not
+        # start failing on an unknown option.
         --install-timer) INSTALL_TIMER=1; shift ;;
+        --no-timer)      INSTALL_TIMER=0; shift ;;
         --check)         CHECK_ONLY=1; shift ;;
         --skip-pack)     SKIP_PACK=1; shift ;;
         --src)           SRC_DIR="${2:-}"; shift 2 ;;
         *) die "unknown option: $1
-    Valid options are --check, --skip-pack, --install-timer and --src <path>." ;;
+    Valid options are --check, --skip-pack, --no-timer, --install-timer
+    and --src <path>." ;;
     esac
 done
 
@@ -436,8 +455,14 @@ publish_artifact() {
 # authenticates to the panel.
 install_timer() {
     local self="$SRC_DIR/deploy/upgrade-edge.sh"
+    # Overridable so the gate can install the units into a temporary directory
+    # and read them back. It is not a configuration option: an operator has no
+    # reason to move these, and the default is the only place systemd looks.
+    local units="${AKCONNECT_SYSTEMD_DIR:-/etc/systemd/system}"
 
-    cat > /etc/systemd/system/akconnect-upgrade.service <<UNIT
+    mkdir -p "$units" || return 1
+
+    cat > "$units/akconnect-upgrade.service" <<UNIT
 [Unit]
 Description=Bring the AKConnect edge up to the panel's release
 Documentation=https://github.com/akshaykananidwk/network.akdwk.in/blob/main/DEPLOY.md
@@ -461,7 +486,7 @@ ExecStart=$self
 TimeoutStartSec=1800
 UNIT
 
-    cat > /etc/systemd/system/akconnect-upgrade.timer <<UNIT
+    cat > "$units/akconnect-upgrade.timer" <<UNIT
 [Unit]
 Description=Check hourly whether the AKConnect panel has moved to a new release
 
@@ -889,6 +914,11 @@ if [ "$INSTALL_TIMER" -eq 1 ]; then
     else
         fail "upgrade timer" "could not install the systemd units"
     fi
+else
+    # Recorded rather than silent: an operator who passed --no-timer months
+    # ago and has forgotten should be able to see, in this table, why their
+    # edge is not keeping itself current.
+    info "upgrade timer" "not installed (--no-timer); this edge upgrades only when you run this"
 fi
 
 if [ -n "$PACK_URL" ] && [ "$FAILED" -eq 0 ]; then

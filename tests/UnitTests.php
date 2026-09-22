@@ -14,6 +14,7 @@ use App\Models\UpdateSetting;
 use App\Services\AclService;
 use App\Services\IpamService;
 use App\Services\RouteService;
+use App\Services\WhatsAppAlerts;
 use App\Updater\ArchiveExtractor;
 use App\Updater\GithubClient;
 use App\Updater\Manifest;
@@ -46,6 +47,7 @@ final class UnitTests
         self::sqlSplitter();
         self::totp();
         self::lanSuggestion();
+        self::whatsAppAlerts();
     }
 
     private static function crypto(): void
@@ -822,6 +824,80 @@ final class UnitTests
         }
 
         TestCase::assertSame('', RouteService::suggestLan(null), 'and nothing at all is not a crash');
+    }
+
+    /**
+     * 1.9.5: the alert that reaches a telephone.
+     *
+     * Two things matter here and neither is "did it send". One is that a
+     * message containing a quotation mark cannot break the JSON around it —
+     * which is exactly what an error message does, on the one day anybody
+     * needs this. The other is that the number is a number: a typing mistake
+     * in the recipients box must be dropped, not turned into a message to a
+     * stranger.
+     */
+    private static function whatsAppAlerts(): void
+    {
+        TestCase::group('Unit — alerts to a telephone (1.9.5)');
+
+        $fill = static function (string $template, string $to, string $text, string $type): string {
+            $method = new \ReflectionMethod(WhatsAppAlerts::class, 'fill');
+            $method->setAccessible(true);
+
+            return (string) $method->invoke(null, $template, $to, $text, $type);
+        };
+
+        $template = '{"to": "{{to}}", "message": "{{text}}"}';
+
+        // The message a failing backup actually produces.
+        $filled = $fill($template, '+919876543210', 'Backup failed: can\'t write to "/var/backups"', 'application/json');
+        TestCase::assert(
+            json_decode($filled, true) !== null,
+            'a message with quotation marks in it still produces valid JSON',
+            $filled
+        );
+        $decoded = json_decode($filled, true);
+        TestCase::assertContains(
+            'can\'t write',
+            (string) ($decoded['message'] ?? ''),
+            'and the message survives the escaping intact'
+        );
+
+        // A form-encoded API, and a URL template.
+        TestCase::assertContains(
+            'Backup%20failed',
+            $fill('to={{to}}&text={{text}}', '+91', 'Backup failed', 'application/x-www-form-urlencoded'),
+            'a form-encoded body is percent-encoded, not left with spaces in it'
+        );
+
+        // A newline in a message must not become a header or a second line of
+        // a form body.
+        $multi = $fill($template, '+91', "line one\nline two", 'application/json');
+        TestCase::assert(
+            !str_contains($multi, "\n"),
+            'a newline in a message does not reach the request as a literal newline'
+        );
+
+        $flatten = new \ReflectionMethod(WhatsAppAlerts::class, 'flatten');
+        $flatten->setAccessible(true);
+        TestCase::assertSame(
+            'Scheduled backup failed — The scheduled backup did not complete.',
+            (string) $flatten->invoke(null, 'Scheduled backup failed', "The scheduled backup did not complete.\n\nPDOException: ..."),
+            'the telephone gets the headline and the first line, not the stack trace'
+        );
+
+        // And it is off unless somebody configured it. A half-configured alert
+        // channel that silently does nothing is the failure this has to avoid,
+        // so "enabled" means all three parts are present.
+        TestCase::assert(
+            !WhatsAppAlerts::enabled(),
+            'nothing is sent anywhere until an endpoint and a number are configured'
+        );
+
+        TestCase::assert(
+            WhatsAppAlerts::send('critical', 'Test', 'Body') === false,
+            'and sending while unconfigured is a no-op rather than an error'
+        );
     }
 
 }

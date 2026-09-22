@@ -222,6 +222,7 @@ code.inline-command { margin-left: .4rem; white-space: normal; word-break: break
 .nav-icon[data-icon="download"]::before { content: "⇩"; }
 .nav-icon[data-icon="archive"]::before { content: "⬓"; }
 .nav-icon[data-icon="globe"]::before { content: "◍"; }
+.nav-icon[data-icon="bell"]::before { content: "◔"; }
 
 .sidebar-foot { padding: var(--space-3); border-top: 1px solid var(--border); }
 .nav-avatar {

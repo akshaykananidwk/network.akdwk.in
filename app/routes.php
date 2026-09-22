@@ -147,6 +147,12 @@ $router->group('/admin', ['maintenance', 'auth'], static function (Router $route
 
     // ----------------------------------------------------- System → Updates
     // Settings → Coordinator. DEPLOY.md Stage 3a sends an operator here.
+    // Alerts that reach a telephone, for the failures that cannot wait until
+    // somebody opens their email.
+    $router->get('/alerts', 'Admin\AlertsController@index', ['can:platform.settings'], 'admin.alerts');
+    $router->post('/alerts', 'Admin\AlertsController@update', ['csrf', 'can:platform.settings']);
+    $router->post('/alerts/test', 'Admin\AlertsController@test', ['csrf', 'can:platform.settings']);
+
     $router->get('/coordinator', 'Admin\CoordinatorController@index', ['can:platform.settings'], 'admin.coordinator');
     $router->post('/coordinator', 'Admin\CoordinatorController@update', ['csrf', 'can:platform.settings']);
 
