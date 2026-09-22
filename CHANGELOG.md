@@ -6,6 +6,49 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.4] — 2026-09-22
+
+Reconnection, and the tooling that delivers it.
+
+### Fixed
+
+**Two machines that rebooted never found each other again.** The relay learns
+each side's address from its first data packet and then drops anything from a
+different host; `bind()` refused to update an address once learned. Each guard
+is defensible, together they made a side's address permanent — so a device that
+came back somewhere else had everything it sent discarded, while the other
+end's traffic went to an address that was nobody's. Both ends bound, both
+healthy in every log, no packet able to cross. A bind whose host differs is now
+a move, authoritative because its ticket is signed by the coordinator and names
+both ends.
+
+**The agent announced into a closed socket every twenty seconds, forever.**
+`use of closed network connection`, logged and retried against the same dead
+descriptor. It now counts failures, reopens the socket after three, re-announces,
+reports `discovery.unreachable` to the panel — and never claims a recovery it
+has not had.
+
+**An older release could be offered as an update.** Up-to-date was decided by
+comparing commits, so a panel on an untagged head was offered the newest tag
+even when that tag was an older release. The version decides now, on every
+channel but edge.
+
+**`deploy/upgrade-edge.sh`** dirtied its own checkout so it ran once per clone;
+ran the previous release's copy of itself; left the checkout on a detached
+HEAD; downgraded to an older copy of itself; passed an empty argument when
+given none; exited without a summary on a bad option; and looked in the wrong
+directory when the target's pack builder predated `AKCONNECT_BUILD_DIR`. All
+fixed, all gated. A run that upgraded the services and failed later now says
+PARTIAL and names what is and is not done.
+
+### Gates
+
+`reconnect` and `reconnect-both` restart a peer on a new public address, on the
+CGNAT topology where hole punching cannot paper over a missing introduction.
+The edge-script gate grew to 33 checks.
+
+---
+
 ## [1.9.3] — 2026-09-22
 
 Three defects, and one of them is why the others reached a live panel.

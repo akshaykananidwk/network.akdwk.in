@@ -165,6 +165,20 @@ final class UpdateManager
 
         $upToDate = $currentCommit !== '' && hash_equals($currentCommit, $latest['sha']);
 
+        // A newer commit is not the same thing as a newer release.
+        //
+        // Defect 29: up-to-date was decided by comparing commits, so a panel
+        // sitting on an untagged head — which is every panel that was updated
+        // before releases became tags — is told the newest TAG is an update
+        // and offered a move backwards. Applying that would install an older
+        // release over a newer one, with migrations already run.
+        //
+        // On a tagged channel the version decides. Edge is left alone: there
+        // the whole point is to follow the branch wherever it goes.
+        if (!$upToDate && $channel !== 'edge' && $manifest->version() !== '') {
+            $upToDate = version_compare($manifest->version(), $currentVersion, '<=');
+        }
+
         $comparison = null;
         if (!$upToDate && $currentCommit !== '') {
             try {

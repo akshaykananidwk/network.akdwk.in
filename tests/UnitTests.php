@@ -691,6 +691,21 @@ final class UnitTests
         // that matters: a beta panel on 1.9.3-rc1 must still be offered 1.9.3.
         TestCase::assertSame(-1, version_compare('1.9.3-rc1', '1.9.3'),
             'and older than the release it is a candidate for');
+
+        // Defect 29: a panel on an untagged head — which is every panel that
+        // was updated before releases became tags — had up-to-date decided by
+        // comparing COMMITS, so the newest tag looked like an update even when
+        // it was an older release, and applying it would have installed 1.9.2
+        // over 1.9.3 with the migrations already run.
+        //
+        // The rule that closes it, stated as the code states it.
+        $offered = static fn (string $target, string $running): bool
+            => version_compare($target, $running, '>');
+
+        TestCase::assert(!$offered('1.9.2', '1.9.3'), 'an older tag is not offered as an update');
+        TestCase::assert(!$offered('1.9.3', '1.9.3'), 'nor the release already running');
+        TestCase::assert($offered('1.9.4', '1.9.3'), 'a newer tag is offered');
+        TestCase::assert($offered('1.10.0', '1.9.10'), 'and the comparison is by version, not by string');
     }
 
     private static function sqlSplitter(): void
