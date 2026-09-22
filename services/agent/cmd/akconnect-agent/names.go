@@ -192,6 +192,21 @@ func (s *session) problems() []panel.Problem {
 		})
 	}
 
+	// A socket that cannot send is the one fault that makes every other
+	// signal lie: the device heartbeats, the panel shows it Online, and no
+	// peer can reach it because nothing it announces ever leaves the machine.
+	if s.discovery != nil {
+		if detail := s.discovery.TransportProblem(); detail != "" {
+			out = append(out, panel.Problem{
+				Code: "discovery.unreachable",
+				Detail: "This device cannot send to the coordinator, so its peers are not being " +
+					"told where it is and it cannot be introduced to theirs. The agent is " +
+					"reopening its socket; if this persists, restart the AKConnect service. " +
+					detail,
+			})
+		}
+	}
+
 	for _, prefix := range s.refused {
 		code := "route.clash"
 		detail := fmt.Sprintf(

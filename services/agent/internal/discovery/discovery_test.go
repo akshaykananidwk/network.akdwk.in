@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"crypto/rand"
+	"net"
 	"net/netip"
 	"sync"
 	"testing"
@@ -16,6 +17,9 @@ import (
 type fakeTransport struct {
 	mu   sync.Mutex
 	sent []sentPacket
+	// failWith is returned by SendTo instead of sending, so a socket that has
+	// died underneath the agent can be reproduced.
+	failWith error
 }
 
 type sentPacket struct {
@@ -24,6 +28,15 @@ type sentPacket struct {
 }
 
 func (f *fakeTransport) SendTo(pkt []byte, to netip.AddrPort) error {
+	f.mu.Lock()
+	if f.failWith != nil {
+		err := f.failWith
+		f.mu.Unlock()
+
+		return err
+	}
+	f.mu.Unlock()
+
 	header, _, err := disco.ParseHeader(pkt)
 	if err != nil {
 		return nil
@@ -34,6 +47,21 @@ func (f *fakeTransport) SendTo(pkt []byte, to netip.AddrPort) error {
 	f.sent = append(f.sent, sentPacket{to: to, kind: header.Type})
 
 	return nil
+}
+
+// count is how many packets of one kind were sent.
+func (f *fakeTransport) count(kind disco.MessageType) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	n := 0
+	for _, pkt := range f.sent {
+		if pkt.kind == kind {
+			n++
+		}
+	}
+
+	return n
 }
 
 func (f *fakeTransport) SetHandler(disconn.Handler) {}
@@ -247,5 +275,95 @@ func TestRefusesAnOverlayAddressAsAPath(t *testing.T) {
 	defer h.peers.mu.Unlock()
 	if len(h.peers.endpoints) != 0 {
 		t.Errorf("adopted an overlay address as a peer endpoint: %v", h.peers.endpoints)
+	}
+}
+
+// The field log that prompted this, from a Windows laptop, verbatim:
+//
+//	12:21:06 discovery: announcing to the coordinator failed: use of closed network connection
+//	12:21:26 discovery: announcing to the coordinator failed: use of closed network connection
+//	12:21:46 discovery: announcing to the coordinator failed: use of closed network connection
+//	12:22:06 discovery: announcing to the coordinator failed: use of closed network connection
+//
+// Every twenty seconds, for as long as anyone watched. Something below the
+// agent had closed the shared socket; the agent logged it and tried the same
+// dead socket again on the next tick. The machine heartbeated, the panel
+// showed it Online, its peers were never told where it was, and only a manual
+// service restart fixed it.
+func TestADeadSocketIsReopenedRatherThanLoggedForever(t *testing.T) {
+	h := newHarness(t)
+
+	rebinds := 0
+	h.client.opts.Rebind = func() error {
+		rebinds++
+		h.transport.mu.Lock()
+		h.transport.failWith = nil
+		h.transport.mu.Unlock()
+
+		return nil
+	}
+
+	h.transport.mu.Lock()
+	h.transport.failWith = net.ErrClosed
+	h.transport.mu.Unlock()
+
+	// Two failures are bad luck: a lost packet, an interface coming up.
+	// Nothing should be torn down for those.
+	h.client.announce(true)
+	h.client.announce(true)
+
+	if rebinds != 0 {
+		t.Fatalf("the socket was reopened after %d failure(s); a transient must not churn it", rebinds)
+	}
+
+	if h.client.TransportProblem() == "" {
+		t.Fatal("a failing socket is not being reported to the panel")
+	}
+
+	// The third is a dead socket.
+	h.client.announce(true)
+
+	if rebinds != 1 {
+		t.Fatalf("the socket was reopened %d time(s), want 1", rebinds)
+	}
+
+	// And the agent must re-announce afterwards rather than waiting out the
+	// keepalive: the coordinator has heard nothing from it for a minute.
+	if h.transport.count(disco.TypeHello) == 0 {
+		t.Fatal("nothing was announced after the socket was reopened")
+	}
+
+	if h.client.TransportProblem() != "" {
+		t.Fatalf("the problem is still reported after recovery: %q", h.client.TransportProblem())
+	}
+}
+
+// A rebind that does not help must be tried again, not attempted once and
+// given up on: the socket is still dead and the device is still unreachable.
+func TestARebindThatDoesNotHelpIsTriedAgain(t *testing.T) {
+	h := newHarness(t)
+
+	rebinds := 0
+	h.client.opts.Rebind = func() error { rebinds++; return nil }
+
+	h.transport.mu.Lock()
+	h.transport.failWith = net.ErrClosed
+	h.transport.mu.Unlock()
+
+	for i := 0; i < 9; i++ {
+		h.client.announce(true)
+	}
+
+	// The property, not a count. Each rebind is followed by a re-announcement
+	// that also fails, so the exact number depends on how that is scheduled —
+	// asserting it would be asserting the implementation. What matters is that
+	// a socket which stays dead keeps being reopened rather than being given
+	// up on after one attempt.
+	if rebinds < 2 {
+		t.Fatalf("the socket was reopened %d time(s) and then abandoned while still dead", rebinds)
+	}
+
+	if h.client.TransportProblem() == "" {
+		t.Fatal("the panel is not being told the device is unreachable")
 	}
 }

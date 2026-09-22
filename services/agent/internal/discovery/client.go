@@ -53,6 +53,14 @@ type Options struct {
 	Transport Transport
 	Peers     PeerSetter
 	Logf      func(string, ...any)
+	// Rebind reopens the shared socket. Optional; when it is nil a dead
+	// socket is still reported, but nothing can be done about it.
+	//
+	// Needed because of what a dead socket looked like in the field: the agent
+	// logged "use of closed network connection" every twenty seconds for as
+	// long as anyone watched, was reachable by nobody, showed no fault
+	// anywhere, and came back only when the service was restarted by hand.
+	Rebind func() error
 }
 
 // Client keeps this agent announced and its peers reachable.
@@ -72,6 +80,13 @@ type Client struct {
 	// the only message that carries a token and therefore the only one that
 	// makes the coordinator re-ask who this device may reach.
 	forceHello bool
+	// sendFailures counts consecutive announcement failures. A single one is
+	// ordinary — a lost packet, an interface coming up — and a run of them
+	// means the socket underneath is gone and will not heal on its own.
+	sendFailures int
+	// transportProblem is what to tell the panel about it, so a device nobody
+	// can reach says so rather than looking healthy.
+	transportProblem string
 	// candidates is every address currently being tried for a peer, so a punch
 	// reply can be matched back to the peer it proves.
 	candidates map[[32]byte][]netip.AddrPort
@@ -357,8 +372,77 @@ func (c *Client) announce(full bool) {
 	}
 
 	if err := c.opts.Transport.SendTo(pkt, c.opts.Coordinator); err != nil {
-		c.opts.Logf("discovery: announcing to the coordinator failed: %v", err)
+		c.noteSendFailure(err)
+
+		return
 	}
+
+	c.mu.Lock()
+	recovered := c.sendFailures > 0
+	c.sendFailures = 0
+	c.transportProblem = ""
+	c.mu.Unlock()
+
+	if recovered {
+		c.opts.Logf("discovery: the socket is working again; announcements are getting out")
+	}
+}
+
+// rebindAfter is how many consecutive failures mean the socket is gone rather
+// than momentarily unhappy. Three, at a twenty-second keepalive, is about a
+// minute of silence — long enough not to churn on a transient, short enough
+// that a customer does not notice.
+const rebindAfter = 3
+
+// noteSendFailure decides whether this is bad luck or a dead socket.
+//
+// The whole point is that it does something. Until 1.9.4 this was a log line
+// and nothing else, so an agent whose socket had been closed underneath it —
+// by a network change, an adapter rebuild, a laptop waking up — announced into
+// a closed file descriptor every twenty seconds forever. The coordinator never
+// heard from it, its peers were never told where it was, and its own log was
+// the only place the fault existed.
+func (c *Client) noteSendFailure(err error) {
+	c.mu.Lock()
+	c.sendFailures++
+	failures := c.sendFailures
+	c.transportProblem = err.Error()
+	c.mu.Unlock()
+
+	// Every failure is logged. A quiet agent that cannot be reached is worse
+	// than a noisy one that says why.
+	c.opts.Logf("discovery: announcing to the coordinator failed: %v (%d in a row)", err, failures)
+
+	if failures < rebindAfter || c.opts.Rebind == nil {
+		return
+	}
+
+	c.opts.Logf("discovery: %d announcements in a row could not be sent; reopening the socket", failures)
+
+	if err := c.opts.Rebind(); err != nil {
+		c.opts.Logf("discovery: reopening the socket failed: %v", err)
+
+		return
+	}
+
+	// Counted from zero again so a rebind that did not help is retried rather
+	// than attempted once and given up on.
+	c.mu.Lock()
+	c.sendFailures = 0
+	c.mu.Unlock()
+
+	c.opts.Logf("discovery: socket reopened; re-announcing")
+
+	c.Rehello()
+}
+
+// TransportProblem is why announcements are not getting out, or "" when they
+// are. Reported to the panel with the other problems.
+func (c *Client) TransportProblem() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.transportProblem
 }
 
 // Reflexive is this agent's public address as the coordinator sees it, or the

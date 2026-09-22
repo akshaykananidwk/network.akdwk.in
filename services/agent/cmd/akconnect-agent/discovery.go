@@ -60,6 +60,9 @@ func (s *session) startDiscovery(ctx context.Context, cfg *panel.Config, priv wg
 		Transport:      s.tun.Transport(),
 		Peers:          s.tun,
 		Logf:           s.logf,
+		// So a socket that dies underneath the agent is reopened rather than
+		// logged about forever. See discovery.noteSendFailure.
+		Rebind: s.tun.Rebind,
 	})
 	if err != nil {
 		s.logf("discovery: %v", err)

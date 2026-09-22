@@ -178,6 +178,35 @@ func (t *Tunnel) SetPeerEndpointAddr(publicKeyBase64 string, at netip.AddrPort) 
 // ListenPort is the UDP port in use.
 func (t *Tunnel) ListenPort() int { return t.port }
 
+// Rebind reopens the UDP socket the tunnel and discovery share.
+//
+// This exists because of what a closed socket looked like in the field. The
+// agent's log read
+//
+//	discovery: announcing to the coordinator failed: use of closed network connection
+//
+// every twenty seconds for as long as anyone watched. Something below us —
+// wireguard-go's bind being closed on a network change, an adapter torn down
+// and rebuilt — had left the socket dead, and nothing in the agent noticed:
+// the announcement failed, the error was logged, and the next tick tried the
+// same dead socket again. The device was reachable by nobody, showed no fault,
+// and only a service restart fixed it.
+//
+// BindUpdate closes the current bind and opens a new one on the same port,
+// re-attaching wireguard-go's receive routines to it. The discovery client
+// holds the *Bind wrapper rather than the socket, so it needs no notification:
+// its next send goes out of the new one.
+func (t *Tunnel) Rebind() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.closed {
+		return fmt.Errorf("tunnel is closed")
+	}
+
+	return t.dev.BindUpdate()
+}
+
 // Apply pushes a vetted configuration into the device and brings it up.
 func (t *Tunnel) Apply(priv wgkey.Private, cfg *panel.Config, plan *netcfg.Plan) error {
 	t.mu.Lock()
