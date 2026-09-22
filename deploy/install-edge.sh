@@ -145,6 +145,8 @@ step "the HTTPS fallback"
 . "$(dirname "$0")/lib-edge-apache.sh"
 # shellcheck source=lib-edge-vhost.sh
 . "$(dirname "$0")/lib-edge-vhost.sh"
+# shellcheck source=lib-edge-probe.sh
+. "$(dirname "$0")/lib-edge-probe.sh"
 
 # This script is run by hand, once, by somebody installing the edge — so it
 # configures Apache. The hourly upgrade timer does not; see UNATTENDED in
@@ -175,8 +177,12 @@ case "$apache_state" in
         say "server's 127.0.0.1:9443."
         ;;
     3)
-        say "this Apache does not serve $PANEL over TLS, so there is no virtual host to"
-        say "add the fallback to. Issue a certificate for the site and run this again."
+        say "there is no TLS virtual host of its own for this panel's domain, so there is"
+        say "nothing to add the fallback to. The message above says which case it is."
+        ;;
+    4)
+        say "you said no, so Apache was not changed. Run this again, or"
+        say "deploy/upgrade-edge.sh --configure-apache, whenever you want it."
         ;;
     *)
         die "Apache is here but would not take the fallback configuration, and everything

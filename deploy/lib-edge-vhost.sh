@@ -1,29 +1,28 @@
 #!/usr/bin/env bash
 #
-# Put the fallback in front of ONE site, and prove the others still answer.
+# Put the fallback in front of ONE virtual host, and prove it went nowhere else.
 #
-# This file exists because of a production server with thirty-odd live
-# websites on one Apache. The first version of this dropped its configuration
-# into the server-level directory and added an include to httpd.conf — which
-# works, and which also publishes /fallback on every site on the machine,
-# because a ProxyPass at server level is inherited by every virtual host that
-# does not override it. Nobody asked for that and nobody would have noticed
-# until they did.
+# This file exists because of a production server with thirty-odd live websites
+# on one Apache, and it has been rewritten once already after an adversarial
+# review found three ways the first version could write into somebody else's
+# site. All three came from the same mistake: matching text in a file instead
+# of parsing the blocks in it.
 #
-# So the directives go inside one virtual host, the one serving the panel, and
-# nothing else on the machine is edited except the module loader — which loads
-# code and proxies nothing by itself.
+#   - a file was chosen because the domain appeared anywhere in it, on a
+#     ServerName or a ServerAlias. aaPanel lets any site bind any domain, so a
+#     parked alias on another customer's site captured the proxy;
+#   - the TLS block was the first one in the file whose body mentioned SSL,
+#     whichever host that block served;
+#   - and "mentioned SSL" included commented-out lines, which is exactly the
+#     shape aaPanel writes: a #SSL-START … #SSL-END stanza inside the :80
+#     block. The include went into port 80, where the tunnel would have run in
+#     cleartext and the wss:// address would have answered nothing.
 #
-# The other half is the same caution pointed the other way: after Apache
-# reloads, every site on the box is asked for a status code and compared
-# against what it said before. A single difference puts everything back.
+# So: blocks are parsed, comments are not configuration, and the target must be
+# a TLS block whose own ServerName is exactly the panel's domain. An alias
+# match on somebody else's site is refused rather than used.
 
-# akconnect_vhost_dirs lists where this machine keeps per-site configuration,
-# most specific first.
-#
-# Printed as candidates rather than resolved, because a server can have more
-# than one of these and the answer is "wherever the file naming this site
-# actually is".
+# akconnect_vhost_dirs lists where this machine keeps per-site configuration.
 akconnect_vhost_dirs() {
     printf '%s\n' \
         /www/server/panel/vhost/apache \
@@ -34,16 +33,73 @@ akconnect_vhost_dirs() {
         /etc/httpd/sites-available
 }
 
-# akconnect_vhost_file finds the file that serves one domain.
+# akconnect_vhost_blocks parses one file into its virtual hosts.
 #
-#   $1  the domain, e.g. network.akdwk.in
+# Prints one tab-separated row per block:
 #
-# Matched on ServerName or ServerAlias as a whole word, so example.com does
-# not match notexample.com, and prints nothing when there is no such site —
-# which is a refusal, not a reason to create one. Creating a virtual host on a
-# server somebody else's sites are on is not this script's business.
-akconnect_vhost_file() {
-    local domain=$1 dir file
+#   file <TAB> opening-line <TAB> closing-line <TAB> tls|plain <TAB> ServerName <TAB> alias,alias
+#
+# A line whose first non-blank character is # is not configuration and is
+# skipped entirely — including a commented </VirtualHost>, which would
+# otherwise end a block that is still open.
+akconnect_vhost_blocks() {
+    local file=$1
+
+    [ -f "$file" ] || return 1
+
+    awk -v path="$file" '
+        function flush(  kind) {
+            if (!start) return
+            kind = tls ? "tls" : "plain"
+            printf "%s\t%d\t%d\t%s\t%s\t%s\n", path, start, NR, kind, name, aliases
+            start = 0; tls = 0; name = ""; aliases = ""
+        }
+
+        # Comments are not configuration.
+        /^[[:space:]]*#/ { next }
+
+        /^[[:space:]]*<VirtualHost/ {
+            flush()
+            start = NR; tls = 0; name = ""; aliases = ""
+            next
+        }
+
+        !start { next }
+
+        /^[[:space:]]*<\/VirtualHost>/ { flush(); next }
+
+        /^[[:space:]]*SSLEngine[[:space:]]+[Oo][Nn][[:space:]]*$/ { tls = 1 }
+        /^[[:space:]]*SSLCertificateFile[[:space:]]/              { tls = 1 }
+
+        /^[[:space:]]*ServerName[[:space:]]/ {
+            name = $2
+            next
+        }
+
+        /^[[:space:]]*ServerAlias[[:space:]]/ {
+            for (i = 2; i <= NF; i++) {
+                aliases = aliases (aliases == "" ? "" : ",") $i
+            }
+            next
+        }
+
+        END { flush() }
+    ' "$file"
+}
+
+# akconnect_vhost_target finds the block the fallback belongs in.
+#
+#   $1  the panel domain
+#
+# Prints "file<TAB>opening-line" for the TLS virtual host whose own ServerName
+# is exactly that domain, and nothing at all otherwise.
+#
+# Exactly that, and nothing more forgiving. A domain that appears only as a
+# ServerAlias on another site IS served by that site — and writing a proxy into
+# a virtual host somebody else's customers reach is the failure this whole file
+# is shaped around. Refusing and saying so is the only safe answer.
+akconnect_vhost_target() {
+    local domain=$1 dir file row
 
     [ -n "$domain" ] || return 1
 
@@ -53,50 +109,51 @@ akconnect_vhost_file() {
         for file in "$dir"/*.conf; do
             [ -f "$file" ] || continue
 
-            if grep -Eq "^[[:space:]]*Server(Name|Alias)[[:space:]]+([^[:space:]]+[[:space:]]+)*${domain//./\\.}([[:space:]]|$)" "$file"; then
-                printf '%s\n' "$file"
+            while IFS=$'\t' read -r path start end kind name aliases; do
+                [ "$kind" = tls ] || continue
+                [ "$name" = "$domain" ] || continue
+
+                printf '%s\t%s\n' "$path" "$start"
 
                 return 0
-            fi
+            done < <(akconnect_vhost_blocks "$file")
         done
     done < <(akconnect_vhost_dirs)
 
     return 1
 }
 
-# akconnect_vhost_tls_line prints the line number of the opening tag of the
-# virtual host that serves TLS in a file, or nothing.
+# akconnect_vhost_alias_only reports the file and host that serve this domain
+# as an alias, when no virtual host names it directly.
 #
-# The TLS one specifically. The fallback address is wss://, so a site whose
-# only virtual host is port 80 cannot carry it, and saying so is better than
-# installing directives into a block that will never see the traffic.
-#
-# Found by walking the blocks rather than by matching ":443" on the opening
-# tag, because a virtual host can be declared on a port that is not 443 and
-# still be the TLS one — and on aaPanel frequently is not written the obvious
-# way.
-akconnect_vhost_tls_line() {
-    local file=$1
+# For the refusal message. "There is no virtual host for this domain" and
+# "another customer's site claims it as an alias" need completely different
+# responses, and only one of them is something to go and fix.
+akconnect_vhost_alias_only() {
+    local domain=$1 dir file
 
-    awk '
-        /^[[:space:]]*<VirtualHost/ { start = NR; body = ""; depth = 1; next }
-        start && /^[[:space:]]*<\/VirtualHost>/ {
-            if (body ~ /SSLEngine[[:space:]]+on/ || body ~ /SSLCertificateFile/) {
-                print start
-                exit
-            }
-            start = 0
-            next
-        }
-        start { body = body "\n" $0 }
-    ' "$file"
+    while read -r dir; do
+        [ -d "$dir" ] || continue
+
+        for file in "$dir"/*.conf; do
+            [ -f "$file" ] || continue
+
+            while IFS=$'\t' read -r path start end kind name aliases; do
+                case ",$aliases," in
+                    *",$domain,"*)
+                        printf '%s\t%s\n' "$path" "$name"
+
+                        return 0
+                        ;;
+                esac
+            done < <(akconnect_vhost_blocks "$file")
+        done
+    done < <(akconnect_vhost_dirs)
+
+    return 1
 }
 
 # The markers that make our edit findable and removable.
-#
-# A marker rather than matching the directive, so the directive can change
-# between releases without leaving the old one behind, and so a human reading
-# somebody else's virtual host knows at a glance what put it there.
 AKCONNECT_VHOST_BEGIN='# BEGIN AK Connect HTTPS fallback — managed by deploy/upgrade-edge.sh'
 AKCONNECT_VHOST_END='# END AK Connect HTTPS fallback'
 
@@ -105,26 +162,91 @@ akconnect_vhost_has() {
     grep -qF "$AKCONNECT_VHOST_BEGIN" "$1" 2>/dev/null
 }
 
-# akconnect_vhost_insert puts an include inside the TLS virtual host.
+# akconnect_vhost_files_with lists every file on this machine carrying our
+# block, so a stale one in a site we no longer use can be found and removed.
+akconnect_vhost_files_with() {
+    local dir file
+
+    while read -r dir; do
+        [ -d "$dir" ] || continue
+
+        for file in "$dir"/*.conf; do
+            [ -f "$file" ] || continue
+            akconnect_vhost_has "$file" && printf '%s\n' "$file"
+        done
+    done < <(akconnect_vhost_dirs)
+
+    return 0
+}
+
+# akconnect_vhost_write replaces a file's contents atomically.
+#
+# Through a temporary file in the same directory and a rename, never by
+# truncating the original. A production virtual host that is cut in half by an
+# interrupt or a full disk keeps serving from memory and fails at the next
+# reload — which may be aaPanel's, for an unrelated site, hours later, and may
+# be a restart rather than a reload. Then thirty websites are down and nothing
+# connects it to us.
+akconnect_vhost_write() {
+    local file=$1 source=$2 tmp
+
+    tmp="$(mktemp "$file.akconnect.XXXXXX")" || return 1
+
+    if ! cat "$source" > "$tmp"; then
+        rm -f "$tmp"
+
+        return 1
+    fi
+
+    # The original's mode and ownership, not the temporary file's.
+    chmod --reference="$file" "$tmp" 2>/dev/null
+    chown --reference="$file" "$tmp" 2>/dev/null
+
+    mv -f "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+}
+
+# akconnect_vhost_tls_line_for prints the opening line of the TLS block in one
+# file whose own ServerName is the given domain.
+akconnect_vhost_tls_line_for() {
+    local file=$1 domain=$2
+
+    while IFS=$'\t' read -r path start end kind name aliases; do
+        [ "$kind" = tls ] || continue
+        [ "$name" = "$domain" ] || continue
+
+        printf '%s\n' "$start"
+
+        return 0
+    done < <(akconnect_vhost_blocks "$file")
+
+    return 1
+}
+
+# akconnect_vhost_insert puts an include inside one virtual host.
 #
 #   $1  the vhost file
-#   $2  the file to include
+#   $2  the domain whose TLS block it goes in
+#   $3  the file to include
 #
-# Idempotent: an existing block is replaced rather than added to. The include
-# is one line, and the directives live in our own file — so an aaPanel that
-# rewrites the site's configuration costs us one line we put back on the next
-# run, and never touches what that line points at.
+# Idempotent: any existing block is removed first, and the target line is
+# worked out AFTER that — removing three lines moves every line below them, so
+# a line number taken beforehand points somewhere else by the time it is used.
+#
+# The include is one line and the directives live in our own file, so an
+# aaPanel that rewrites the site's configuration costs one line, and never
+# touches what that line points at.
 akconnect_vhost_insert() {
-    local file=$1 include=$2 line
+    local file=$1 domain=$2 include=$3 work line
 
-    akconnect_vhost_remove "$file"
+    akconnect_vhost_remove "$file" || return 1
 
-    line="$(akconnect_vhost_tls_line "$file")"
+    line="$(akconnect_vhost_tls_line_for "$file" "$domain")" || return 1
     [ -n "$line" ] || return 1
 
+    work="$(mktemp)" || return 1
+
     # "target" and not "include": gawk reserves the word include as a builtin
-    # and refuses a variable of that name outright, which is a failure that
-    # reads like a bug in the configuration rather than in the script.
+    # and refuses a variable of that name outright.
     awk -v at="$line" -v begin="$AKCONNECT_VHOST_BEGIN" -v end="$AKCONNECT_VHOST_END" \
         -v target="$include" '
         { print }
@@ -133,83 +255,32 @@ akconnect_vhost_insert() {
             print "    IncludeOptional " target
             print "    " end
         }
-    ' "$file" > "$file.akconnect-new" || return 1
+    ' "$file" > "$work" || { rm -f "$work"; return 1; }
 
-    cat "$file.akconnect-new" > "$file" && rm -f "$file.akconnect-new"
+    akconnect_vhost_write "$file" "$work"
+    local status=$?
+    rm -f "$work"
+
+    return $status
 }
 
-# akconnect_vhost_remove takes our block back out, leaving everything else.
+# akconnect_vhost_remove takes our block out, leaving everything else.
 akconnect_vhost_remove() {
-    local file=$1
+    local file=$1 work status
 
     akconnect_vhost_has "$file" || return 0
+
+    work="$(mktemp)" || return 1
 
     awk -v begin="$AKCONNECT_VHOST_BEGIN" -v end="$AKCONNECT_VHOST_END" '
         index($0, begin) { skipping = 1 }
         !skipping { print }
         index($0, end) { skipping = 0 }
-    ' "$file" > "$file.akconnect-new" || return 1
+    ' "$file" > "$work" || { rm -f "$work"; return 1; }
 
-    cat "$file.akconnect-new" > "$file" && rm -f "$file.akconnect-new"
-}
+    akconnect_vhost_write "$file" "$work"
+    status=$?
+    rm -f "$work"
 
-# akconnect_site_names lists every name this Apache serves.
-#
-# Both ServerName and ServerAlias, from every per-site file, deduplicated.
-# This is the population that has to be unchanged afterwards, and it is read
-# from the machine rather than from a list somebody keeps up to date.
-akconnect_site_names() {
-    local dir file
-
-    while read -r dir; do
-        [ -d "$dir" ] || continue
-
-        for file in "$dir"/*.conf; do
-            [ -f "$file" ] || continue
-
-            sed -nE 's/^[[:space:]]*Server(Name|Alias)[[:space:]]+(.*)$/\2/p' "$file"
-        done
-    done < <(akconnect_vhost_dirs) \
-        | tr -s '[:space:]' '\n' \
-        | sed 's/[[:space:]]*$//' \
-        | grep -E '^[A-Za-z0-9_*.-]+$' \
-        | grep -v '^\*' \
-        | sort -u
-}
-
-# akconnect_site_probe prints "name code" for every site on this machine.
-#
-#   $1  an optional file to write to; stdout otherwise
-#
-# Resolved to this machine explicitly, so the answer is what THIS Apache says
-# and not what a load balancer, a CDN or somebody else's DNS says. The
-# certificate is not verified: a site whose certificate is wrong is wrong
-# identically before and afterwards, and the question here is only whether a
-# reload changed anything.
-#
-# A name that cannot be reached at all gets a code of 000, which compares
-# equal to itself — an unreachable site that is still unreachable is not a
-# regression this change caused.
-akconnect_site_probe() {
-    local out=${1:-/dev/stdout} name code
-
-    while read -r name; do
-        [ -n "$name" ] || continue
-
-        code="$(curl -k -s -o /dev/null --max-time 8 \
-            --resolve "$name:443:127.0.0.1" --resolve "$name:80:127.0.0.1" \
-            -w '%{http_code}' "https://$name/" 2>/dev/null)"
-
-        printf '%s %s\n' "$name" "${code:-000}"
-    done < <(akconnect_site_names) > "$out"
-}
-
-# akconnect_sites_changed prints the sites whose answer moved, one per line,
-# as "name before after". Nothing printed means nothing changed.
-akconnect_sites_changed() {
-    local before=$1 after=$2
-
-    join -j 1 -o '0,1.2,2.2' \
-        <(sort -k1,1 "$before") <(sort -k1,1 "$after") 2>/dev/null \
-        | awk '$2 != $3'
+    return $status
 }

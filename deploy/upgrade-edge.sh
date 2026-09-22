@@ -863,6 +863,8 @@ step "the HTTPS fallback"
 . "$SRC_DIR/deploy/lib-edge-apache.sh"
 # shellcheck source=lib-edge-vhost.sh
 . "$SRC_DIR/deploy/lib-edge-vhost.sh"
+# shellcheck source=lib-edge-probe.sh
+. "$SRC_DIR/deploy/lib-edge-probe.sh"
 
 if ss -ltn 2>/dev/null | grep -q '127.0.0.1:9443 '; then
     pass "relay fallback listener" "127.0.0.1:9443"
@@ -882,14 +884,16 @@ elif [ "$CONFIGURE_APACHE" -eq 1 ]; then
     case "$?" in
         0) pass "Apache proxy" "/fallback → 127.0.0.1:9443, on that site only" ;;
         1) info "Apache proxy" "no Apache here; proxy it wherever the panel is served" ;;
-        3) fail "Apache proxy" "this Apache does not serve $(akconnect_panel_host "$PANEL") over TLS" ;;
-        *) fail "Apache proxy" "Apache would not take the fallback configuration" ;;
+        3) fail "Apache proxy" "no TLS virtual host of its own is named $(akconnect_panel_host "$PANEL")" ;;
+        4) hold "Apache proxy" "not configured — you said no" ;;
+        *) fail "Apache proxy" "the change did not hold and has been undone" ;;
     esac
 else
     hold "Apache proxy" "not configured yet — run this by hand with --configure-apache"
     say "Apache fallback not configured yet."
-    say "This run is unattended and will not edit a web server that is serving other"
-    say "sites. Run it once by hand, with the output in front of you:"
+    say "Nothing here edits a web server that is serving other people's sites unless"
+    say "somebody asks it to, in person, at a terminal. Run it once by hand, with the"
+    say "output in front of you — it shows the exact file and the exact lines first:"
     say ""
     say "    sudo $SRC_DIR/deploy/upgrade-edge.sh --configure-apache"
     say ""

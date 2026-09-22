@@ -167,9 +167,14 @@ final class CoordinatorSettings
 
         $fallbackUrl = trim((string) ($input['fallback_url'] ?? ''));
         if ($fallbackUrl !== '' && !self::plausibleFallbackUrl($fallbackUrl)) {
+            // The example is this panel's own address, worked out rather than
+            // written down. It used to be a literal hostname that had never
+            // existed, which meant the correction offered to somebody who had
+            // just mistyped the field was itself unreachable.
             $errors['fallback_url'] = 'That must be a wss:// address, for example '
-                . 'wss://net.akdwk.in/fallback. It is where agents go when the network they are '
-                . 'on passes nothing but the port a browser uses.';
+                . (self::defaultFallbackUrl() ?: 'wss://your-panel-domain/fallback')
+                . '. It is where agents go when the network they are on passes nothing but '
+                . 'the port a browser uses.';
         }
 
         $sharedSecret = trim((string) ($input['shared_secret'] ?? ''));

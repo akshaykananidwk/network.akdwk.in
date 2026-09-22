@@ -15,7 +15,7 @@ use App\Services\EdgeRelease;
  * separate message with a code, and a telephone call when the customer types
  * the code with a lowercase L in it. This is one address —
  *
- *     https://net.akdwk.in/join/ABCD-1234
+ *     https://network.akdwk.in/join/ABCD-1234
  *
  * — that shows a download button, the code in large type next to it, and three
  * sentences. Nothing to sign in to, nothing to configure.

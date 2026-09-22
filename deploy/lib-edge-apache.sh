@@ -72,49 +72,83 @@ akconnect_apache_layout() {
     return 1
 }
 
-# akconnect_apache_backup keeps a timestamped copy of one file and prints
-# where it went.
+# A backup set is a directory of numbered copies plus a manifest naming what
+# each one was.
 #
-# Kept, not cleaned up. The whole point of a copy of somebody's production
-# Apache configuration is that it is still there in a month when they want to
-# see what changed.
-akconnect_apache_backup() {
-    local file=$1 stamp=$2 dest
+# Numbered, and not the original path with the slashes turned into
+# underscores, which is what this did before. That mapping is not invertible:
+# /a/vhosts/panel_ssl.conf and /a/vhosts/panel/ssl.conf flatten to the same
+# name, and restoring turned every underscore back into a slash — so a file
+# with an underscore anywhere in its path was "restored" to a path that does
+# not exist, the loop skipped it, and the caller printed "it has been put back
+# as it was". A rollback that silently does nothing, on a production web
+# server, reported as success.
+AKCONNECT_MANIFEST=MANIFEST
 
-    [ -f "$file" ] || return 0
+# akconnect_apache_backup keeps a copy of one file and records where it came
+# from. A file that does not exist yet is recorded too, as "absent", so a
+# rollback removes what this run created rather than leaving it behind.
+#
+# Returns non-zero if anything could not be kept. Callers must check: editing a
+# file whose backup failed is how an edit becomes permanent.
+akconnect_apache_backup() {
+    local file=$1 stamp=$2 dest index
 
     dest="$AKCONNECT_APACHE_BACKUPS/$stamp"
     mkdir -p "$dest" || return 1
 
-    # The full path, flattened, so two files of the same name from different
-    # directories cannot overwrite each other.
-    cp -p "$file" "$dest/$(printf '%s' "${file#/}" | tr '/' '_')" || return 1
+    # Counted without a redirect from a file that may not be there: bash
+    # reports a failed input redirection before the command's own 2>/dev/null
+    # can take effect, so the "suppressed" error lands on the operator's
+    # console in the middle of a change to their web server.
+    if [ -f "$dest/$AKCONNECT_MANIFEST" ]; then
+        index="$(printf '%03d' "$(( $(wc -l "$dest/$AKCONNECT_MANIFEST" | awk '{print $1}') + 1 ))")"
+    else
+        index=001
+    fi
 
-    printf '%s\n' "$dest"
+    if [ -f "$file" ]; then
+        cp -p "$file" "$dest/$index" || return 1
+        printf '%s\t%s\tpresent\n' "$index" "$file" >> "$dest/$AKCONNECT_MANIFEST" || return 1
+    else
+        printf '%s\t%s\tabsent\n' "$index" "$file" >> "$dest/$AKCONNECT_MANIFEST" || return 1
+    fi
 }
 
-# akconnect_apache_rollback puts every file in one backup directory back where
-# it came from.
-akconnect_apache_rollback() {
-    local dest=$1 copy original
-
-    [ -d "$dest" ] || return 1
-
-    for copy in "$dest"/*; do
-        [ -f "$copy" ] || continue
-
-        original="/$(basename "$copy" | tr '_' '/')"
-        [ -f "$original" ] || continue
-
-        cp -p "$copy" "$original" || return 1
-    done
-}
-
-# akconnect_apache_service names the unit to reload for a given layout.
+# akconnect_apache_rollback puts every file in one backup set back.
 #
-# aaPanel's Apache is usually a systemd unit called httpd, and is sometimes
-# only its own init script. Reloading is attempted both ways by the caller, so
-# this only has to get the common case right.
+# Every file, and it does not stop at the first failure — the alphabetically
+# first thing in the set used to abort the loop, leaving the production virtual
+# host untouched while the caller announced a full restore. It now tries all of
+# them, prints what it could not do, and returns the number of failures.
+akconnect_apache_rollback() {
+    local dest=$1 index original state failures=0
+
+    [ -d "$dest" ] && [ -f "$dest/$AKCONNECT_MANIFEST" ] || return 1
+
+    while IFS=$'\t' read -r index original state; do
+        [ -n "$original" ] || continue
+
+        if [ "$state" = absent ]; then
+            rm -f "$original" || { printf 'could not remove %s\n' "$original" >&2; failures=$((failures + 1)); }
+
+            continue
+        fi
+
+        if ! cp -p "$dest/$index" "$original"; then
+            printf 'could not restore %s\n' "$original" >&2
+            failures=$((failures + 1))
+        fi
+    done < "$dest/$AKCONNECT_MANIFEST"
+
+    return "$failures"
+}
+
+# akconnect_apache_load_module makes one module loadable, in place.
+#
+# Uncommented where a commented line exists, appended only where the .so is
+# really present — a LoadModule naming a file that is not there stops Apache
+# starting, which on this machine means thirty websites.
 akconnect_apache_load_module() {
     local conf=$1 module=$2
 
@@ -166,26 +200,22 @@ akconnect_apache_has_module() {
     "$ctl" -M 2>/dev/null | grep -q "[[:space:]]${want}_module"
 }
 
-# akconnect_apache_fallback installs the proxy configuration for ONE site.
+# akconnect_apache_fallback installs the proxy configuration for ONE virtual
+# host, after showing exactly what it will do and being told to go ahead.
 #
 #   $1  the deploy/apache directory holding both forms of it
 #   $2  the panel URL, which names the site this belongs to
 #   $3  a function to print progress with, e.g. say
 #
-# Returns 0 when the fallback is configured and every other site still answers
-# exactly as it did, 1 when Apache is not on this machine (which is not a
-# failure — the relay may be on its own server), 2 when Apache is here and the
-# change did not hold, and 3 when Apache is here and does not serve this site
-# over TLS, which is a thing for a person to decide rather than for a script to
-# invent.
-#
-# Nothing outside the panel's own virtual host is edited except the module
-# loader, which loads code and proxies nothing by itself. Every file touched is
-# copied first, and the copies are kept.
+# Returns 0 when the fallback is configured, every other site still answers
+# exactly as it did, and no site but the panel's answers /fallback; 1 when
+# Apache is not on this machine; 2 when the change did not hold and has been
+# undone; 3 when this Apache does not serve that domain in a virtual host of
+# its own; 4 when the operator said no.
 akconnect_apache_fallback() {
     local conf_dir=$1 panel=$2 report=${3:-echo}
     local service enabler ctl mainconf layout version source_conf mods
-    local domain vhost stamp backup before after changed
+    local domain target vhost line stamp backup before after changed leaked
 
     layout="$(akconnect_apache_layout)" || {
         $report "no Apache on this machine, so the HTTPS fallback is not proxied here"
@@ -202,28 +232,28 @@ akconnect_apache_fallback() {
         return 3
     }
 
-    vhost="$(akconnect_vhost_file "$domain")" || {
-        $report "no virtual host on this Apache serves $domain, so there is nothing to add the"
-        $report "fallback to. Create the site first, or configure the fallback on whichever"
-        $report "machine serves it."
+    target="$(akconnect_vhost_target "$domain")" || {
+        local claimed
+        if claimed="$(akconnect_vhost_alias_only "$domain")"; then
+            $report "no virtual host on this Apache is named $domain. It is served as an alias of"
+            $report "$(cut -f2 <<<"$claimed") in $(cut -f1 <<<"$claimed")."
+            $report "Refusing: that is somebody else's site, and putting a proxy inside it would"
+            $report "publish /fallback on their domain. Give $domain a site of its own."
+        else
+            $report "no TLS virtual host on this Apache is named $domain, so there is nothing to"
+            $report "add the fallback to. The fallback is a wss:// address, so the site needs a"
+            $report "certificate — create it, or configure this on whichever machine serves it."
+        fi
 
         return 3
     }
 
-    [ -n "$(akconnect_vhost_tls_line "$vhost")" ] || {
-        $report "$domain is served by $vhost, which has no TLS virtual host. The fallback is a"
-        $report "wss:// address, so it needs one — issue a certificate for the site first."
-
-        return 3
-    }
+    IFS=$'\t' read -r vhost line <<<"$target"
 
     version="$(akconnect_apache_version "$ctl")" || version=0
 
     # mod_proxy_wstunnel is deprecated from 2.4.47, where mod_proxy_http
-    # carries the upgrade itself, and some builds no longer ship it. Choosing
-    # by version rather than writing one file and hoping is the difference
-    # between a configuration that works on this VPS and one that works on a
-    # customer's.
+    # carries the upgrade itself, and some builds no longer ship it.
     if [ "$version" -ge 2004047 ]; then
         source_conf="$conf_dir/akconnect-fallback-upgrade.conf"
         mods="proxy proxy_http"
@@ -238,22 +268,68 @@ akconnect_apache_fallback() {
         return 2
     }
 
-    # What every site on this machine says right now. Taken before anything is
-    # touched, because it is the only thing the result can be compared against.
+    # Exactly what is about to change, before anything changes.
+    #
+    # Named files and named lines, because the person reading this is about to
+    # let a script edit the web server thirty other businesses are served by,
+    # and "configuring Apache" is not something anybody can agree to.
+    $report ""
+    $report "This will add three lines to ONE virtual host:"
+    $report ""
+    $report "  file : $vhost"
+    $report "  block: the <VirtualHost> opening at line $line, ServerName $domain, TLS"
+    $report ""
+    $report "      $AKCONNECT_VHOST_BEGIN"
+    $report "      IncludeOptional $AKCONNECT_APACHE_CONF"
+    $report "      $AKCONNECT_VHOST_END"
+    $report ""
+    $report "and write $AKCONNECT_APACHE_CONF, which holds the proxy directives."
+    if [ "$mainconf" != "-" ]; then
+        $report "It may also uncomment LoadModule lines in $mainconf for: ${mods// /, }."
+        $report "Loading a module changes no site's behaviour by itself."
+    fi
+    $report ""
+    $report "Nothing else on this server is edited. A copy of every file it touches is kept,"
+    $report "and deploy/remove-apache-fallback.sh undoes all of it."
+    $report ""
+
+    akconnect_confirm "Go ahead?" || {
+        $report "nothing was changed"
+
+        return 4
+    }
+
+    # What every site on this machine says right now, including whether it
+    # answers /fallback — which is the question the scope requirement is
+    # really about, and the one the first version of this never asked.
     stamp="$(date -u +%Y%m%d-%H%M%S)"
+    backup="$AKCONNECT_APACHE_BACKUPS/$stamp"
     before="$(mktemp)"
     after="$(mktemp)"
     akconnect_site_probe "$before"
     $report "$(wc -l < "$before") site(s) on this Apache answered before the change"
 
-    backup="$AKCONNECT_APACHE_BACKUPS/$stamp"
-    akconnect_apache_backup "$vhost" "$stamp" >/dev/null || {
-        $report "could not keep a copy of $vhost"
+    # Every file that is about to be written, including our own configuration
+    # file — which this used to install without a copy and delete on rollback,
+    # so a re-run that tripped the check destroyed a working proxy.
+    local file ok=1
+    for file in "$vhost" "$AKCONNECT_APACHE_CONF"; do
+        akconnect_apache_backup "$file" "$stamp" || ok=0
+    done
+    [ "$mainconf" != "-" ] && { akconnect_apache_backup "$mainconf" "$stamp" || ok=0; }
+
+    if [ "$ok" -ne 1 ]; then
+        $report "could not keep a copy of every file this would edit, so nothing was edited"
         rm -f "$before" "$after"
 
         return 2
-    }
-    [ "$mainconf" != "-" ] && akconnect_apache_backup "$mainconf" "$stamp" >/dev/null
+    fi
+
+    # From here until the end, an interrupt puts everything back. Without this
+    # a dropped ssh session leaves a virtual host carrying an untested include
+    # that nothing has syntax-checked, until aaPanel reloads Apache hours later
+    # for an unrelated reason.
+    trap 'akconnect_apache_rollback "'"$backup"'" >/dev/null 2>&1; trap - INT TERM EXIT' INT TERM EXIT
 
     for mod in $mods; do
         akconnect_apache_has_module "$ctl" "$mod" && continue
@@ -265,13 +341,9 @@ akconnect_apache_fallback() {
         fi
     done
 
-    # Enabled is not the same as loaded, and only loaded carries a websocket.
-    # Asked again after the attempt, because "a2enmod said yes" and "Apache is
-    # serving with it" are different claims and only the second one matters.
     for mod in $mods; do
         akconnect_apache_has_module "$ctl" "$mod" || {
-            $report "mod_$mod is not loaded, so the fallback would accept nothing"
-            akconnect_apache_rollback "$backup"
+            akconnect_apache_undo "$backup" "$report" "mod_$mod is not loaded, so the fallback would accept nothing"
             rm -f "$before" "$after"
 
             return 2
@@ -281,71 +353,75 @@ akconnect_apache_fallback() {
 
     mkdir -p "$(dirname "$AKCONNECT_APACHE_CONF")"
     install -m 644 "$source_conf" "$AKCONNECT_APACHE_CONF" || {
-        akconnect_apache_rollback "$backup"
+        akconnect_apache_undo "$backup" "$report" "could not write $AKCONNECT_APACHE_CONF"
         rm -f "$before" "$after"
 
         return 2
     }
 
-    akconnect_vhost_insert "$vhost" "$AKCONNECT_APACHE_CONF" || {
-        $report "could not add the fallback to $vhost"
-        akconnect_apache_rollback "$backup"
+    akconnect_vhost_insert "$vhost" "$domain" "$AKCONNECT_APACHE_CONF" || {
+        akconnect_apache_undo "$backup" "$report" "could not add the fallback to $vhost"
         rm -f "$before" "$after"
 
         return 2
     }
     $report "added to the $domain virtual host in $vhost, and to nothing else"
 
-    # Tested before it is reloaded, always. A broken configuration here would
-    # take thirty other websites down with it.
     if ! akconnect_apache_test "$ctl"; then
-        akconnect_apache_rollback "$backup"
-        rm -f "$AKCONNECT_APACHE_CONF"
-        $report "Apache refused the configuration, so it has been put back as it was"
+        akconnect_apache_undo "$backup" "$report" "Apache refused the configuration"
         rm -f "$before" "$after"
 
         return 2
     fi
 
     akconnect_apache_reload "$service" "$ctl" || {
-        akconnect_apache_rollback "$backup"
-        rm -f "$AKCONNECT_APACHE_CONF"
+        akconnect_apache_undo "$backup" "$report" "Apache would not reload"
         akconnect_apache_reload "$service" "$ctl"
-        $report "Apache would not reload, so it has been put back as it was"
         rm -f "$before" "$after"
 
         return 2
     }
 
-    # And the question this whole file exists to answer: is every other site on
-    # this machine still saying exactly what it said a minute ago?
+    # Two questions now, not one. Did anything change, and did the tunnel
+    # appear anywhere it should not have.
     akconnect_site_probe "$after"
     changed="$(akconnect_sites_changed "$before" "$after")"
 
     if [ -n "$changed" ]; then
         # Asked once more before anything is undone. A site that answered
         # differently because a cron job happened to be running is not a
-        # regression this change caused, and rolling back somebody's production
-        # server over one is its own kind of harm.
+        # regression this change caused, and rolling back somebody's
+        # production server over one is its own kind of harm.
         akconnect_site_probe "$after"
         changed="$(akconnect_sites_changed "$before" "$after")"
     fi
 
-    if [ -n "$changed" ]; then
-        $report "another site on this server changed what it answers:"
-        printf '%s\n' "$changed" | while read -r line; do $report "    $line"; done
+    # The panel's own /fallback is expected to change — that is the change.
+    changed="$(grep -v "^$domain /fallback " <<<"$changed" | grep -v '^$')"
 
-        akconnect_apache_rollback "$backup"
-        rm -f "$AKCONNECT_APACHE_CONF"
+    leaked="$(akconnect_fallback_exclusive "$domain" "$after")" || true
+
+    if [ -n "$changed" ] || [ -n "$leaked" ]; then
+        [ -n "$changed" ] && {
+            $report "another site on this server changed what it answers:"
+            printf '%s\n' "$changed" | while read -r row; do $report "    $row"; done
+        }
+        [ -n "$leaked" ] && {
+            $report "the tunnel is not confined to $domain:"
+            printf '%s\n' "$leaked" | while read -r row; do $report "    $row"; done
+        }
+
+        akconnect_apache_undo "$backup" "$report" "putting everything back"
         akconnect_apache_reload "$service" "$ctl"
-
-        $report "everything has been put back and Apache reloaded again"
         rm -f "$before" "$after"
 
         return 2
     fi
 
+    trap - INT TERM EXIT
+
     $report "all $(wc -l < "$after") site(s) answer exactly as they did before"
+    $report "and only $domain answers /fallback, over TLS and not on port 80"
     $report "a copy of every file changed is in $backup"
     $report "Apache proxies https://$domain/fallback to the relay on 127.0.0.1:9443"
 
@@ -354,29 +430,84 @@ akconnect_apache_fallback() {
     return 0
 }
 
+# akconnect_apache_undo puts everything back and says so honestly.
+#
+# Honestly is the point. The first version printed "it has been put back as it
+# was" whatever happened, including when the restore had failed and left a
+# production virtual host edited. An operator who is told the server was
+# restored will not go and look.
+akconnect_apache_undo() {
+    local backup=$1 report=$2 why=$3 failures
+
+    $report "$why"
+
+    if akconnect_apache_rollback "$backup"; then
+        trap - INT TERM EXIT
+        $report "everything this run changed has been put back"
+
+        return 0
+    fi
+
+    failures=$?
+    trap - INT TERM EXIT
+
+    $report "WARNING: $failures file(s) could NOT be put back. This server is part-way"
+    $report "through a change. The copies are in $backup and"
+    $report "$backup/MANIFEST says where each one belongs."
+    $report "Restore them by hand before reloading Apache."
+
+    return 1
+}
+
 # akconnect_may_configure_apache answers the one question that keeps an hourly
 # timer out of somebody's production web server.
 #
-#   $1  what an option asked for: 1, 0, or empty for "decide"
+#   $1  what an option asked for: 1, 0, or empty for "nothing was asked"
 #   $2  whether this run is unattended: 1 or 0
 #
 # A function rather than three lines inline, because this decision is the whole
-# of requirement 2 and a decision that cannot be exercised is a decision
+# of the requirement and a decision that cannot be exercised is a decision
 # nobody checks. The gate calls exactly this.
-#
-# An explicit option always wins, in both directions: somebody who types
-# --configure-apache from a cron entry has said what they want, and somebody
-# who types --no-configure-apache by hand has too. With no option it comes
-# down to whether anybody is watching.
 akconnect_may_configure_apache() {
     local asked=${1:-} unattended=${2:-0}
 
-    case "$asked" in
-        1) printf '1\n'; return 0 ;;
-        0) printf '0\n'; return 0 ;;
-    esac
+    # Unattended never, whatever was asked for. A --configure-apache in a cron
+    # entry is still a job nobody is watching reaching into a web server that
+    # serves other people's websites, and the flag is not a reason to allow it.
+    [ "$unattended" = "1" ] && { printf '0\n'; return 0; }
 
-    if [ "$unattended" = "1" ]; then printf '0\n'; else printf '1\n'; fi
+    # And otherwise only when asked. There is no default that configures
+    # Apache: this step came within one commented-out SSL stanza of carrying
+    # customer tunnels in cleartext on port 80, and one parked ServerAlias of
+    # writing a proxy into a stranger's virtual host. A change with that
+    # failure mode is one somebody types on purpose.
+    [ "$asked" = "1" ] && { printf '1\n'; return 0; }
+
+    printf '0\n'
+}
+
+# akconnect_confirm asks, on the terminal, and refuses when there is not one.
+#
+# The absence of a terminal is itself an answer: nobody is there to confirm, so
+# nothing is done. That is the second lock on the same door as the decision
+# above, and it holds for a cron entry, a CI runner, and an ssh command with no
+# tty — none of which can be talked out of it by an option.
+akconnect_confirm() {
+    local prompt=$1 reply
+
+    if [ ! -r /dev/tty ]; then
+        printf '  refusing: there is no terminal here to confirm on.\n' >&2
+
+        return 1
+    fi
+
+    printf '\n  %s [y/N] ' "$prompt" > /dev/tty
+    read -r reply < /dev/tty || return 1
+
+    case "$reply" in
+        y|Y|yes|YES) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # akconnect_apache_configured reports whether the fallback is already proxied
@@ -389,14 +520,15 @@ akconnect_may_configure_apache() {
 # that would answer nothing — a file nothing includes, or an include pointing
 # at a file that is not there.
 akconnect_apache_configured() {
-    local domain vhost
+    local domain target vhost
 
     [ -f "$AKCONNECT_APACHE_CONF" ] || return 1
 
     domain="$(akconnect_panel_host "${1:-}")"
     [ -n "$domain" ] || return 1
 
-    vhost="$(akconnect_vhost_file "$domain")" || return 1
+    target="$(akconnect_vhost_target "$domain")" || return 1
+    vhost="$(cut -f1 <<<"$target")"
 
     akconnect_vhost_has "$vhost"
 }
@@ -418,16 +550,6 @@ akconnect_panel_host() {
 # httpd, so refusing when it is not understood is both safe and correct.
 akconnect_apache_test() {
     "$1" -t >/dev/null 2>&1
-}
-
-# akconnect_apache_restore puts the main configuration back.
-akconnect_apache_restore() {
-    local conf=$1 backup=${2:-}
-
-    [ "$conf" = "-" ] && return 0
-    [ -n "$backup" ] && [ -f "$backup" ] || return 0
-
-    cp -p "$backup" "$conf" && rm -f "$backup"
 }
 
 # akconnect_apache_reload asks Apache to re-read its configuration.
