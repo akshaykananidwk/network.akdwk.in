@@ -28,6 +28,20 @@ ETC_DIR="${AKCONNECT_ETC:-/etc/akconnect}"
 WINTUN_URL="https://www.wintun.net/builds/wintun-0.14.1.zip"
 WINTUN_ZIP="${WINTUN_ZIP:-/var/cache/akconnect/wintun.zip}"
 
+# SCRIPT_REVISION is how this script decides whether another copy of itself is
+# newer. It goes up whenever the script changes in a way that matters, and it
+# is compared numerically — never by version string, file date or "they
+# differ".
+#
+# It exists because "they differ" was the rule, and it handed a VPS whose
+# checkout was ahead of the panel over to the PANEL's older copy — which still
+# had the empty-timestamp defect, and which does not know the hand-over
+# protocol, so it would not have handed back. A copy with no SCRIPT_REVISION
+# line reads as 0 and is therefore never handed over to, which is exactly the
+# property wanted: the guard and the revision were added together, so anything
+# lacking the revision also lacks the guard.
+SCRIPT_REVISION=2
+
 INSTALL_TIMER=0
 CHECK_ONLY=0
 SKIP_PACK=0
@@ -35,15 +49,6 @@ SKIP_PACK=0
 # Kept so the script can hand them to its own replacement. See "re-exec" below.
 ORIGINAL_ARGS=("$@")
 
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --install-timer) INSTALL_TIMER=1; shift ;;
-        --check)         CHECK_ONLY=1; shift ;;
-        --skip-pack)     SKIP_PACK=1; shift ;;
-        --src)           SRC_DIR="${2:-}"; shift 2 ;;
-        *) printf '  unknown option: %s\n' "$1" >&2; exit 2 ;;
-    esac
-done
 
 # ------------------------------------------------------------------ reporting
 #
@@ -150,6 +155,30 @@ trap on_exit EXIT
 
 # keep registers a temporary path for the trap to remove.
 keep() { TEMP_PATHS+=("$1"); }
+
+# ------------------------------------------------------------------ options
+#
+# Parsed AFTER the trap is installed, deliberately. It used to come first, so
+# an unrecognised option printed one line to stderr and exited 2 with no
+# summary at all — no table, no PASS, no FAIL. An operator saw
+#
+#   unknown option:
+#
+# and nothing else, from a script whose entire contract is that it ends in one
+# of two lines. A silent exit is the same false-pass class as a wrong PASS: in
+# both cases the run did not do its job and did not say so.
+#
+# Now die() handles it, which records a FAIL and lets the trap print the table.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --install-timer) INSTALL_TIMER=1; shift ;;
+        --check)         CHECK_ONLY=1; shift ;;
+        --skip-pack)     SKIP_PACK=1; shift ;;
+        --src)           SRC_DIR="${2:-}"; shift 2 ;;
+        *) die "unknown option: $1
+    Valid options are --check, --skip-pack, --install-timer and --src <path>." ;;
+    esac
+done
 
 # ------------------------------------------------------------------ preflight
 
@@ -498,14 +527,31 @@ if [ -z "${AKCONNECT_REEXEC:-}" ]; then
     THEIRS="$(mktemp /tmp/akconnect-upgrade-edge.XXXXXX.sh)"
 
     if git show "$REF:deploy/upgrade-edge.sh" > "$THEIRS" 2>/dev/null && [ -s "$THEIRS" ]; then
-        if ! cmp -s "$THEIRS" "$0"; then
-            chmod +x "$THEIRS"
-            say "the release carries a newer copy of this script; handing over to it"
+        # Read out of the file, not sourced: sourcing it would run it.
+        THEIR_REVISION="$(sed -n 's/^SCRIPT_REVISION=\([0-9][0-9]*\)$/\1/p' "$THEIRS" | head -1)"
+        THEIR_REVISION="${THEIR_REVISION:-0}"
 
-            # Not "keep"-ed: the EXIT trap belongs to the process that is about
-            # to be replaced, and exec means it never runs. The replacement
-            # removes it itself, below.
-            AKCONNECT_REEXEC="$THEIRS" exec "$THEIRS" "${ORIGINAL_ARGS[@]:-}"
+        if [ "$THEIR_REVISION" -gt "$SCRIPT_REVISION" ]; then
+            chmod +x "$THEIRS"
+            say "the release carries a newer copy of this script (revision $THEIR_REVISION); handing over"
+
+            # Zero arguments must arrive as zero arguments.
+            #
+            # This was "${ORIGINAL_ARGS[@]:-}", which expands to ONE EMPTY
+            # STRING when the array is empty — so a plain `upgrade-edge.sh`
+            # with no options handed its replacement an argument of "", and
+            # the replacement answered "unknown option:" and stopped. The
+            # :- was put there to satisfy set -u and is the wrong fix; the
+            # right one is to not pass an array that has nothing in it.
+            if [ "${#ORIGINAL_ARGS[@]}" -gt 0 ]; then
+                AKCONNECT_REEXEC="$THEIRS" exec "$THEIRS" "${ORIGINAL_ARGS[@]}"
+            fi
+
+            AKCONNECT_REEXEC="$THEIRS" exec "$THEIRS"
+        fi
+
+        if [ "$THEIR_REVISION" -lt "$SCRIPT_REVISION" ]; then
+            say "the release's copy of this script is older (revision $THEIR_REVISION); keeping this one"
         fi
     fi
 

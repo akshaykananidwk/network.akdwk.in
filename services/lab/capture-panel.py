@@ -13,6 +13,7 @@ plenty of things produce a 401. What catches it is looking at the bytes that
 left the machine, which is what this is for.
 
     capture-panel.py <port> <capture-file> [--secret HEX]
+                     [--version V] [--commit SHA] [--branch NAME]
 
 It answers every request with a plausible /api/v1/edge/release body so the
 script under test carries on, and appends one JSON object per request to the
@@ -29,6 +30,19 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 CAPTURE = None
 SECRET = b""
+
+# What /api/v1/edge/release answers. Overridden by flags rather than by a
+# caller string-patching this file: a drill that did that produced JSON with
+# "branch" twice, the second occurrence won, and the scenario silently tested
+# something other than what it said it did.
+RELEASE = {
+    "version": "9.9.9-capture",
+    "commit": "0" * 40,
+    "current_commit": "0" * 40,
+    "repo": "example/example",
+    "branch": "main",
+    "panel_url": "http://127.0.0.1",
+}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -71,17 +85,7 @@ class Handler(BaseHTTPRequestHandler):
         self._answer()
 
     def _answer(self) -> None:
-        payload = json.dumps(
-            {
-                "data": {
-                    "version": "9.9.9-capture",
-                    "current_commit": "0" * 40,
-                    "repo": "example/example",
-                    "branch": "main",
-                    "panel_url": "http://127.0.0.1",
-                }
-            }
-        ).encode()
+        payload = json.dumps({"data": RELEASE}).encode()
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -105,6 +109,11 @@ def main() -> int:
 
     if "--secret" in sys.argv:
         SECRET = sys.argv[sys.argv.index("--secret") + 1].encode()
+
+    for field in ("version", "commit", "branch"):
+        flag = "--" + field
+        if flag in sys.argv:
+            RELEASE[field] = sys.argv[sys.argv.index(flag) + 1]
 
     open(CAPTURE, "w", encoding="utf-8").close()
 

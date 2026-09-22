@@ -353,12 +353,17 @@ git -C "$WORK/seed" checkout --quiet -B main 2>/dev/null
 # copy already on the box predates the hand-over and cannot do it, so that one
 # time the operator runs the old script and it behaves as it always did.
 # DEPLOY.md says so rather than leaving it to be found out.
+#
+# Its SCRIPT_REVISION is lowered to 1, because that is what makes it older.
+# "They differ" was the old rule and it is what defect 27 was: a checkout ahead
+# of the panel handed over to the panel's OLDER copy. The drill has to model a
+# genuine upgrade or it is asserting a hand-over that should not happen.
 mkdir -p "$WORK/seed/deploy"
 {
     head -1 "$SCRIPT"
     echo 'echo I-AM-THE-OLD-SCRIPT'
     tail -n +2 "$SCRIPT"
-} > "$WORK/seed/deploy/upgrade-edge.sh"
+} | sed 's/^SCRIPT_REVISION=.*/SCRIPT_REVISION=1/' > "$WORK/seed/deploy/upgrade-edge.sh"
 chmod +x "$WORK/seed/deploy/upgrade-edge.sh"
 printf '0.0.1
 ' > "$WORK/seed/VERSION"
@@ -382,17 +387,7 @@ git -C "$CLONE" checkout --quiet --detach HEAD~1 2>/dev/null
 
 # A panel that names that commit.
 CAP2="$WORK/capture2.jsonl"
-python3 - "$WORK/panel2.py" "$TARGET_SHA" <<'PYEOF'
-import sys
-open(sys.argv[1], "w").write(
-    open("services/lab/capture-panel.py").read().replace(
-        '"version": "9.9.9-capture"',
-        '"version": "9.9.9-capture", "commit": "%s", "branch": "main"' % sys.argv[2],
-    )
-)
-PYEOF
-
-python3 "$WORK/panel2.py" 8792 "$CAP2" --secret "$CAP_SECRET" >"$WORK/panel2.log" 2>&1 &
+python3 "$LAB/capture-panel.py" 8792 "$CAP2" --secret "$CAP_SECRET" --commit "$TARGET_SHA" --branch main >"$WORK/panel2.log" 2>&1 &
 CAP2_PID=$!
 trap 'kill "$CAP_PID" "$CAP2_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
 
@@ -423,11 +418,14 @@ env PATH="/usr/local/go/bin:$PATH" HOME="$WORK" \
 # below would be trivially true because nothing else ever ran.
 if ! grep -q "I-AM-THE-OLD-SCRIPT" "$WORK/reexec.out"; then
     bad "the drill never started the old copy" "it is testing nothing; see $WORK/reexec.out"
-elif grep -q "handing over to it" "$WORK/reexec.out"; then
+elif grep -q "handing over" "$WORK/reexec.out"; then
     ok "the old copy started and handed over to the release's own script"
 else
     bad "the previous release's script ran to the end" \
         "a fix to this file would not take effect until it had been run twice"
+    # A failure that does not show what happened makes the next person
+    # reproduce it before they can start reading it.
+    sed 's/^/      /' "$WORK/reexec.out" | head -14
 fi
 
 ON="$(git -C "$CLONE" rev-parse --abbrev-ref HEAD 2>/dev/null)"
@@ -501,6 +499,112 @@ if grep -q 'AKCONNECT_BUILD_DIR' "$REPO/services/kit/build-windows-pack.sh"; the
     ok "the pack build can write outside the source tree"
 else
     bad "the pack build always writes into services/kit" "it will dirty the checkout again"
+fi
+
+# 9. The panel is BEHIND the checkout, and no arguments are given.
+#
+# Defect 27, three faults in the hand-over added for defect 25, all in one run
+# on a real VPS:
+#
+#   target: 1.9.3 (55e6978be9fb ...)
+#   the release carries a newer copy of this script; handing over to it
+#   unknown option:
+#
+# and it stopped there. It handed over to the PANEL's copy although that copy
+# was OLDER than the one running — the panel was behind the checkout — so the
+# upgrade would have been driven by a script with a known signing defect and no
+# hand-over guard. The exec passed one empty string, because "${ARR[@]:-}" on
+# an empty array expands to exactly that, so the replacement was given an
+# argument of "" and refused it. And refusing it exited with one line to stderr
+# and no summary at all, from a script whose whole contract is ending in PASS
+# or FAIL.
+group "the panel is behind the checkout, and no arguments are given"
+
+BEHIND_CLONE="$WORK/behind"
+git clone --quiet "$ORIGIN" "$BEHIND_CLONE" 2>/dev/null
+
+# An older copy of this script: the real thing with its revision line taken
+# out, which is what every copy from before the hand-over existed looks like.
+# It also has to DIFFER in content, not only in revision. The first version of
+# this fixture built the older copy by stripping the SCRIPT_REVISION line —
+# which the code being tested against did not have either, so the two files
+# came out byte-identical, the old "they differ" rule never fired, and two of
+# the three assertions passed against the defect they were written for.
+{
+    grep -v '^SCRIPT_REVISION=' "$SCRIPT"
+    echo '# an older release of this script'
+} > "$WORK/seed/deploy/upgrade-edge.sh"
+chmod +x "$WORK/seed/deploy/upgrade-edge.sh"
+printf '1.9.3
+' > "$WORK/seed/VERSION"
+git -C "$WORK/seed" add -A >/dev/null
+git -C "$WORK/seed" -c user.email=g@l -c user.name=gate commit --quiet -m older
+git -C "$WORK/seed" push --quiet origin HEAD:refs/heads/older 2>/dev/null
+OLD_SHA="$(git -C "$WORK/seed" rev-parse HEAD)"
+
+# The checkout keeps the current script; the panel names the older commit.
+git -C "$BEHIND_CLONE" checkout --quiet main 2>/dev/null
+cp "$SCRIPT" "$BEHIND_CLONE/deploy/upgrade-edge.sh"
+git -C "$BEHIND_CLONE" -c user.email=g@l -c user.name=gate commit --quiet -am current >/dev/null 2>&1 || true
+
+python3 "$LAB/capture-panel.py" 8794 "$WORK/cap3.jsonl" --secret "$CAP_SECRET" --version 1.9.3 --commit "$OLD_SHA" --branch older >"$WORK/panel3.log" 2>&1 &
+CAP3_PID=$!
+trap 'kill "$CAP_PID" "$CAP2_PID" "$CAP3_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
+
+for _ in $(seq 1 40); do
+    (exec 3<>"/dev/tcp/127.0.0.1/8794") 2>/dev/null && break
+    sleep 0.25
+done
+
+mkdir -p "$WORK/etc3"
+cat > "$WORK/etc3/coordinator.env" <<ENVFILE
+AKCONNECT_PANEL_URL=http://127.0.0.1:8794
+AKCONNECT_COORDINATOR_SECRET=$CAP_SECRET
+ENVFILE
+
+# No arguments at all, exactly as reported.
+env PATH="/usr/local/go/bin:$PATH" HOME="$WORK" \
+    AKCONNECT_ETC="$WORK/etc3" AKCONNECT_SRC="$BEHIND_CLONE" \
+    "$BEHIND_CLONE/deploy/upgrade-edge.sh" >"$WORK/behind.out" 2>&1
+BEHIND_CODE=$?
+
+if grep -q "unknown option" "$WORK/behind.out"; then
+    bad "a run with no arguments was given one" \
+        "\"\${ARR[@]:-}\" on an empty array expands to one empty string"
+else
+    ok "a run with no arguments passes no arguments on"
+fi
+
+if grep -q "handing over" "$WORK/behind.out"; then
+    bad "it handed over to the panel's OLDER copy" \
+        "that copy has the defects this one fixes, and cannot hand back"
+else
+    ok "it did not downgrade to the panel's older copy of itself"
+fi
+
+if [ -n "${EDGE_GATE_VERBOSE:-}" ]; then
+    printf '      ── the run, for reference\n'
+    sed 's/^/      /' "$WORK/behind.out" | head -14
+fi
+
+if grep -qE 'edge is NOT upgraded|step\(s\), all clean' "$WORK/behind.out"; then
+    ok "and it printed a summary rather than exiting silently (exit $BEHIND_CODE)"
+else
+    bad "it exited without a summary (exit $BEHIND_CODE)" \
+        "a run that does not say what it did is the false-pass class; see $WORK/behind.out"
+fi
+
+kill "$CAP3_PID" 2>/dev/null
+
+# An unrecognised option must reach the table too, for the same reason.
+env PATH="/usr/local/go/bin:$PATH" HOME="$WORK" \
+    AKCONNECT_ETC="$WORK/etc3" AKCONNECT_SRC="$BEHIND_CLONE" \
+    "$SCRIPT" --nonsense >"$WORK/badopt.out" 2>&1
+
+if grep -q 'edge is NOT upgraded' "$WORK/badopt.out"; then
+    ok "an unrecognised option is reported as a FAIL, not a bare line on stderr"
+else
+    bad "an unrecognised option exits without a summary" "see $WORK/badopt.out"
 fi
 
 # --check is the other half of the contract: it reports and changes nothing.
