@@ -3,7 +3,7 @@
 What is built, what is stubbed, what is next. Kept honest — a plan that
 overstates itself is worse than no plan.
 
-Last updated: 2026-09-22 · version 1.9.2
+Last updated: 2026-09-22 · version 1.9.5
 
 ---
 
@@ -12,7 +12,9 @@ Last updated: 2026-09-22 · version 1.9.2
 `VERIFICATION_REPORT.md` records what was actually run, against a real
 installation and the real GitHub repository. The short version:
 
-* 641 automated assertions, all passing, repeatable across consecutive runs.
+* 553 PHP assertions offline, 171 more over HTTP, and the Go suites under
+  `-race` across four modules — all passing, repeatable across consecutive
+  runs.
 * Nine update runs through the panel's own pipeline, six of them rolled back.
 * A rollback that restores 213 of 213 files byte-for-byte and 20 of 20 tables.
 * Byte-exact recovery from damage severe enough that the panel could not boot.
@@ -288,6 +290,47 @@ Listed so nobody discovers them the hard way.
 
 ---
 
+## 1.9.5 — the Windows release
+
+The standard for this one was stated plainly: behave like ZeroTier or
+Tailscale on Windows. Double-click, enter a code, done, and keep working
+through reboots, sleep, Wi-Fi changes and several PCs behind one router, with
+nobody touching it.
+
+**Done and proved in the lab**
+
+* **Two PCs behind one router can reach each other** (defect 23). Every device
+  used UDP 51820, so the router leased that external port to the first one out
+  and dropped everything the second sent from it. Each device now picks and
+  remembers its own port, prefers a peer's LAN address when they are on one
+  network, and leaves a port that turns out to be unusable. A new scenario
+  proves it: red on 1.9.4, green on this.
+* **A machine whose network changes while it runs recovers in 15 seconds** —
+  same process, and it notices the change rather than waiting out a keepalive.
+* Reconnect after a reboot, and the panel following an address change, still
+  pass — now that the lab genuinely stops an agent, which it had never done.
+
+**Done, and only a Windows PC can prove it**
+
+* Listed in Settings → Apps, uninstallable from there, and the uninstaller
+  prints what it removed.
+* `setup.exe /S /CODE=`, and an MSI for `msiexec /qn`.
+* A notification-area icon: status, copy my address, open the panel, collect
+  diagnostics.
+* Downgrade refused; a reinstall on a machine the panel forgot rejoins.
+* Resume and network-change events accepted from the service manager.
+* The service configured to survive a reboot (defect 30).
+
+**Deliberately not done**
+
+* **Code signing.** The pipeline signs every executable when
+  `AKCONNECT_SIGN_CMD` is set and says "UNSIGNED" in capitals when it is not.
+  A certificate is bought, not built. Until there is one, every customer meets
+  SmartScreen's "unknown publisher", and that is the single biggest thing
+  between this and looking like a normal product.
+
+---
+
 ## Next
 
 0. **The gate now runs Apache.** `services/lab/release.sh` stands up Apache
@@ -297,11 +340,10 @@ Listed so nobody discovers them the hard way.
    closing it — but the class of defect that got through in 1.9.0 cannot get
    through the same way again.
 
-1. **The ONE-CLICK acceptance test, on the two PCs that failed it.** Update the
-   panel to 1.9.2, run `deploy/upgrade-edge.sh` once on the VPS, and
-   double-click the new `akconnect-setup.exe` on both machines. Everything in
-   1.9.2 exists for that one test, and nothing in this file claims it passes
-   until it has been run.
+1. **`docs/AK-MUST-VERIFY-ON-WINDOWS.md`, on AK's two PCs.** Forty click-only
+   lines covering install, two PCs behind one router, reboot, sleep, network
+   change, update and uninstall. Everything in 1.9.5 exists for that list, and
+   nothing in this file claims it passes until it has been run.
 2. **Stage 15 — the installer `.exe`, end to end.** It is what a customer
    experiences, and the one thing in the pack that has still never been run on
    Windows from double-click to uninstall. Uninstall leaving nothing behind

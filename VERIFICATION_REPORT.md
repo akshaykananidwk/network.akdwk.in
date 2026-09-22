@@ -1,6 +1,11 @@
 # Verification report
 
-**Version 1.9.2 · 22 September 2026**
+**Version 1.9.5 · 22 September 2026**
+
+**Read [§K](#k--195-two-pcs-behind-one-router-and-a-windows-program) first for
+1.9.5.** Everything before it is the record of 1.0.1 through 1.9.2 and is left
+as it was written; nothing in it has been re-run for this release except the
+gates listed in §K.
 
 What follows is what was actually run and what it actually produced. Where a
 requirement is met, the evidence is the command and its output. Where it is
@@ -108,6 +113,97 @@ relay-selection code, and another in 1.9.2's, on the first run of the new
 coordinator test: `Registry.Get` and `Registry.PeersOf` returned the stored
 `*Entry`, which every caller then read after the registry's lock was gone. See
 §J.
+
+---
+
+## K — 1.9.5: two PCs behind one router, and a Windows program
+
+What 1.9.5 set out to do: make the agent behave the way ZeroTier and Tailscale
+behave on Windows. Double-click, enter a code, done — and keep working through
+reboots, sleep, network changes and several PCs behind one router, with nobody
+touching it.
+
+### K.1 — What was proved here
+
+| Item | Result | Evidence |
+|------|--------|----------|
+| **Defect 23** — two PCs behind one router | **Pass** | New `shared-router` scenario: three devices, two behind one NAT. **Red on the pre-fix agent** (the second PC got 0 hellos out, neither pair connected), **green with it**, 5 of 5 |
+| Per-device UDP port | **Pass** | `ChooseListenPort` unit tests; the lab shows different ports per device (`10.0.0.21:31777`, `:52278`) |
+| Same-LAN peers prefer LAN addresses | **Pass** | `prefer()` unit tests; ordering only, nothing dropped |
+| Leaving a port the router will not carry | **Pass** | 5 unit tests, including the two that must NOT move a port: a quiet coordinator while a peer is reachable, and a dead socket |
+| **Defect 30** — service after a reboot | **Built, not proved** | Delayed auto-start, Tcpip/Dnscache dependencies, three recovery actions, non-crash failures included. Needs a Windows restart — checklist §4 |
+| **Defect 31** — health check | **Pass** | Coordinator-seen timestamp replaces a TCP probe that could not work from the panel |
+| Resume from sleep / network change | **Pass (lab)** | New `roaming` scenario: address changed under a **running** agent, traffic back in **15s** against a 30s budget, **same process**, and the log shows it noticed rather than waited |
+| Uninstall from Settings → Apps | **Built, not proved** | Registry entry written; uninstaller relaunches from a temp copy so it can delete its own folder |
+| `setup.exe /S /CODE=` | **Pass (logic)** | 12-case switch table test |
+| `msiexec /qn` | **Structure checked** | The MSI's tables are read back after every build: 14 checks, including the two traps this hit |
+| Downgrade refused | **Pass (logic)** | 12-case version-ordering test |
+| Tray icon | **Built, not proved** | Status wording tested against 9 states including a stale status file; the Win32 half has never drawn a pixel |
+| Diagnostics bundle redaction | **Pass** | Tokens, join codes, private keys and Bearer headers removed; ordinary lines and the overlay address survive |
+| Auto re-enrol after a panel deletion | **Pass** | 7 cases; only a clear "not enrolled" rejoins — a panel that is down, broken, or a hotel wifi portal keeps the identity |
+| Device page: uptime, last error, Update now | **Pass** | HTTP round trip, including that the update request is **consumed** and not repeated on every poll |
+| One-click LAN share | **Pass** | Suggestion tested for 9 inputs; nothing offered for a public, CGNAT or IPv6 address |
+| Install link with the code in it | **Pass** | HTTP: opens unauthenticated, shows the code, names nothing about the network |
+| Edge upgrade timer on by default | **Pass** | Edge gate: units written and enabled with no arguments; `--no-timer` leaves an INFO row |
+| Alerts to a telephone | **Pass (logic)** | Escaping, flattening and the off-by-default behaviour; no WhatsApp API has been called |
+| Second relay | **Built, not proved** | `deploy/add-relay.sh`; the coordinator's multi-relay selection is already drilled by `relay-failover` |
+
+### K.2 — Defects found while building 1.9.5
+
+Each of these was found by a test written for something else, which is the
+only reason they are in this list rather than in a customer's report.
+
+1. **The uninstaller removed other VPNs' network adapters.** It matched any
+   adapter whose name contained "Wintun" — the name of the *driver*, which
+   WireGuard's own client and Tailscale also build on. Uninstalling AKConnect
+   took their adapter with it.
+2. **The Windows gateway could share one LAN and not two.** One `New-NetNat`
+   instance per advertised prefix, each with the same internal prefix;
+   New-NetNat refuses an internal prefix that overlaps an existing one, and a
+   prefix overlaps itself.
+3. **`/join/CODE` was a 500 on every visit.** The router passes parameters as
+   an array; the controller asked for a string. The same TypeError class as
+   defect 19, found by the test rather than by a customer.
+4. **The alert escaping broke on a quotation mark.** `json_encode` ends an
+   escaped string with `\"`, and `trim($s, '"')` takes that quote and leaves
+   the backslash, which then escaped the template's closing quote. It produced
+   valid JSON right up until a message contained a quotation mark — which is
+   what an error message does.
+5. **The MSI's uninstall action was sequenced at 1**, ahead of
+   `InstallInitialize`, where a deferred action does not run at all. It was
+   numbered correctly until another action was added beside it.
+6. **A deferred custom action cannot read properties**, so the MSI's
+   `[JOINCODE]` would have reached the installer empty.
+7. **`lab::down_agent` never stopped anything.** It compared
+   `readlink /proc/<pid>/ns/net` with `readlink /var/run/netns/<name>`; the
+   second is a bind-mounted regular file, so readlink returns the empty string
+   and the comparison was never true. For as long as that was there, "this
+   machine goes away" removed a pid from an array and nothing else — the
+   reconnect scenarios were testing a weaker thing than they claimed. Both
+   scenarios were re-run after the fix and still pass.
+
+### K.3 — What is NOT proved, and cannot be from here
+
+Nothing in this environment runs Windows. Everything below builds, is
+cross-compiled for windows/amd64 and windows/arm64 on every gate run, and has
+its logic tested where logic exists — but none of it has been *seen*:
+
+- every dialog, the Apps & features entry, the Start menu shortcut, the tray
+  icon, the clipboard, and the diagnostics bundle landing on a Desktop;
+- the MSI under `msiexec`;
+- the service starting after a real restart (defect 30), and Windows actually
+  sending the power and network-binding events the agent now accepts;
+- gateway mode on Windows, including the NAT fix above;
+- code signing — the pipeline is ready and **no certificate exists**, so every
+  customer still meets SmartScreen's "unknown publisher".
+
+The one-page click-only list is `docs/AK-MUST-VERIFY-ON-WINDOWS.md`.
+
+**The ONE-CLICK ACCEPTANCE TEST has not been run, and 1.9.5 does not claim to
+pass it.** Two fresh Windows PCs, two ISPs, one behind CGNAT, double-click,
+code, OK, both online and pinging within sixty seconds — that is AK's test on
+AK's machines, and until it passes there, this release is unproven where it
+matters most.
 
 ---
 
