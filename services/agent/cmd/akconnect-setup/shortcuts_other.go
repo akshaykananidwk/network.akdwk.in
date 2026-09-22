@@ -6,4 +6,5 @@ package main
 
 func createShortcuts(string, string) error { return errNotWindows }
 func removeShortcuts() error               { return errNotWindows }
+func startTray(string)                     {}
 func stopTray()                            {}

@@ -137,6 +137,34 @@ func removeShortcuts() error {
 	return nil
 }
 
+// startTray shows the icon now, rather than at the next sign-in.
+//
+// A customer who has just been told the software is installed and running
+// should be able to see that in the corner of their screen immediately — the
+// Run entry above only fires when somebody signs in, and on a machine that is
+// never signed out of that could be weeks.
+//
+// Started detached and not waited for: it is a program with a message loop
+// that runs until the session ends, and an installer that waited for it would
+// never finish. Best-effort — a tray that did not start is an icon that
+// appears at the next sign-in, not an install that failed.
+func startTray(dir string) {
+	tray := filepath.Join(dir, "akconnect-tray.exe")
+	if _, err := os.Stat(tray); err != nil {
+		return
+	}
+
+	cmd := exec.Command(tray)
+	cmd.Dir = dir
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+
+	if err := cmd.Start(); err == nil {
+		// Released rather than waited on, so this process can exit without
+		// taking the icon with it.
+		_ = cmd.Process.Release()
+	}
+}
+
 // stopTray closes any tray icon still showing, so an uninstall does not leave
 // one behind pointing at software that is gone.
 func stopTray() {

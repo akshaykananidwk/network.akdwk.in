@@ -183,6 +183,9 @@ func runInstall(ui *console, code, panelURL, name string, managed bool) error {
 		ui.step("Installed, but the Start menu entry could not be created: " + err.Error())
 	}
 
+	// And the icon appears now rather than at the next sign-in.
+	startTray(dir)
+
 	status, _ := runAgentOutput(dir, "status")
 
 	ui.done(fmt.Sprintf(
