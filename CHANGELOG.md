@@ -6,6 +6,52 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.3] — 2026-09-22
+
+Two defects, and the second is why the first reached a live panel.
+
+### Fixed
+
+**Issuing a join code returned HTTP 500.** `$request->input('pre_approved',
+false)` passes a bool to a parameter typed `?string`; under
+`declare(strict_types=1)` that is checked at the call, so it threw on every
+request that reached the line — both buttons on the network page, including the
+ordinary "New code" one every customer uses.
+
+It shipped because nothing had ever posted that form. Pre-approved codes were
+new in 1.9.2 and were covered through the model and the enrolment path; the
+controller action that issues them had no test at all. Both buttons are now
+driven over HTTP exactly as the page drives them, and either one would have
+caught it.
+
+`Request::boolean()` now exists so there is a correct thing to write. It has no
+string default to get wrong, and it reads what a browser actually sends: an
+unchecked box sends nothing, a checked one sends `on`, the hidden-field idiom
+sends a literal `0`, and the string `"false"` — which `(bool)` reads as *true*
+— is false. A static check refuses any non-string literal default passed to
+`input()`, `query()` or `cookie()`, and fails on the exact line that shipped.
+
+**The update channel did nothing.** `channel` was stored, rendered in a
+dropdown and validated against `stable|beta` — and never consulted. The updater
+always installed the head of the configured branch, so a panel set to "Stable"
+was running whatever had been pushed most recently, and work in progress
+reached production by being committed.
+
+Releases are now tags:
+
+| Channel | Installs |
+|---|---|
+| **Stable** | the newest `vX.Y.Z` tag |
+| **Beta** | the newest tag including `vX.Y.Z-rc1` |
+| **Edge** | the head of the branch — the old behaviour, chosen deliberately |
+
+A channel with no tag offers nothing and says so. It does **not** fall back to
+the branch, because falling back is how the setting would quietly stop meaning
+anything again. The branch field now says it only applies to Edge, and the
+channel names say what they install rather than implying it.
+
+---
+
 ## [1.9.2] — 2026-09-22
 
 The one-click standard, applied to the installer, to the edge and to the agent

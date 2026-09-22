@@ -124,6 +124,45 @@ final class Request
         return is_scalar($value) ? (string) $value : $default;
     }
 
+    /**
+     * A checkbox, a toggle, a "1" in a hidden field.
+     *
+     * This exists because reading one through input() crashed production.
+     * `$request->input('pre_approved', false)` is the obvious thing to write
+     * and is a TypeError: the default is typed ?string, and under
+     * declare(strict_types=1) the check happens at the call, so it throws on
+     * every request whether the field was posted or not. Issuing a join code
+     * returned 500 from both buttons on the page.
+     *
+     * A boolean accessor has no string default to get wrong. It also reads
+     * what a browser actually sends: an unchecked checkbox sends nothing, a
+     * checked one sends "on" unless it is given a value, and the hidden-field
+     * idiom sends a literal "0" that (bool) would otherwise read as false by
+     * luck rather than by intent — while reading the string "false" as true.
+     */
+    public function boolean(string $key, bool $default = false): bool
+    {
+        $value = $this->post[$key] ?? $this->json()[$key] ?? $this->query[$key] ?? null;
+
+        if ($value === null) {
+            return $default;
+        }
+
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if (!is_scalar($value)) {
+            return $default;
+        }
+
+        return match (strtolower(trim((string) $value))) {
+            '1', 'true', 'on', 'yes' => true,
+            '0', 'false', 'off', 'no', '' => false,
+            default => $default,
+        };
+    }
+
     /** @return array<string,mixed> */
     public function all(): array
     {

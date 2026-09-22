@@ -166,7 +166,7 @@ final class NetworkController extends Controller
 
         $ttl = (int) $request->input('ttl_minutes', '60');
         $maxUses = (int) $request->input('max_uses', '0');
-        $preApproved = (bool) $request->input('pre_approved', false);
+        $preApproved = $request->boolean('pre_approved');
 
         // Pre-approval is a decision taken now, about a device that does not
         // exist yet, so it comes with its own limits rather than inheriting

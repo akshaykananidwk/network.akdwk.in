@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests;
 
 use App\Core\Crypto;
+use App\Core\Request;
 use App\Core\Logger;
 use App\Core\Totp;
 use App\Core\ValidationException;
@@ -13,6 +14,7 @@ use App\Models\UpdateSetting;
 use App\Services\AclService;
 use App\Services\IpamService;
 use App\Updater\ArchiveExtractor;
+use App\Updater\GithubClient;
 use App\Updater\Manifest;
 use App\Updater\MigrationRunner;
 use App\Updater\PathGuard;
@@ -30,6 +32,7 @@ final class UnitTests
     public static function run(): void
     {
         self::crypto();
+        self::requestBooleans();
         self::redaction();
         self::validation();
         self::ipam();
@@ -38,6 +41,7 @@ final class UnitTests
         self::archiveSafety();
         self::manifest();
         self::githubClient();
+        self::releaseTags();
         self::sqlSplitter();
         self::totp();
     }
@@ -91,6 +95,60 @@ final class UnitTests
         TestCase::assert(!Crypto::isValidCurve25519PublicKey(base64_encode(random_bytes(16))),
             'rejects a short key');
         TestCase::assert(!Crypto::isValidCurve25519PublicKey('not base64 %%%'), 'rejects non-base64');
+    }
+
+    /**
+     * Reading a form checkbox, which is how a 500 reached production.
+     *
+     * The write that crashed was `$request->input('pre_approved', false)`:
+     * a bool passed to a ?string default, which under strict_types throws at
+     * the call. Request::boolean() exists so there is a correct thing to
+     * write, and these are the values a browser actually sends.
+     */
+    private static function requestBooleans(): void
+    {
+        TestCase::group('Request::boolean — what a form actually posts');
+
+        $cases = [
+            // [posted value, expected, why]
+            ['1', true, 'a hidden field set to 1, which is what this panel posts'],
+            ['on', true, 'a checked checkbox with no value of its own'],
+            ['true', true, 'a JSON body that spells it out'],
+            ['yes', true, 'a form written by hand'],
+            ['0', false, 'the hidden-field-then-checkbox idiom, unchecked'],
+            ['off', false, 'an explicit off'],
+            ['false', false, 'the string "false", which (bool) would read as TRUE'],
+            ['', false, 'an empty value is not a yes'],
+        ];
+
+        foreach ($cases as [$posted, $expected, $why]) {
+            $_GET = [];
+            $_POST = ['flag' => $posted];
+            $_SERVER['REQUEST_METHOD'] = 'POST';
+
+            TestCase::assertSame($expected, Request::capture()->boolean('flag'), $why);
+        }
+
+        // The case that crashed: the field is simply not there.
+        $_POST = [];
+        TestCase::assertSame(false, Request::capture()->boolean('flag'),
+            'a field that was never posted is false, not an error');
+        TestCase::assertSame(true, Request::capture()->boolean('flag', true),
+            'and the default is honoured when there is one');
+
+        // An array posted where a scalar was expected — flag[]=1 — must not
+        // become true by being non-empty.
+        $_POST = ['flag' => ['1']];
+        TestCase::assertSame(false, Request::capture()->boolean('flag'),
+            'an array posted under a boolean name falls back to the default');
+
+        // Anything unrecognised falls back rather than guessing.
+        $_POST = ['flag' => 'maybe'];
+        TestCase::assertSame(false, Request::capture()->boolean('flag'),
+            'an unrecognised value is not silently true');
+
+        $_POST = [];
+        $_GET = [];
     }
 
     private static function redaction(): void
@@ -559,6 +617,80 @@ final class UnitTests
 
         $merged = $method->invoke(null, ['Accept: application/vnd.github+json'], []);
         TestCase::assertSame(1, count($merged), 'with no overrides the defaults pass through unchanged');
+    }
+
+    /**
+     * Which tags count as a release, and which channel gets them.
+     *
+     * Production defect: the `channel` setting was stored, shown and
+     * validated, and then never consulted — the updater installed the head of
+     * the branch whatever it said. An operator who chose "Stable" was running
+     * the most recent commit, and unfinished work reached a live panel.
+     *
+     * A tag is now the unit of release, so what counts as one has to be exact:
+     * a release candidate must not reach a stable panel by being the newest
+     * thing in the list, and a branch name that happens to look numeric must
+     * not be mistaken for a version.
+     */
+    private static function releaseTags(): void
+    {
+        TestCase::group('Updates — a release is a tag, not a commit');
+
+        $stable = [
+            'v1.9.2'   => '1.9.2',
+            '1.9.2'    => '1.9.2',
+            'v10.0.1'  => '10.0.1',
+        ];
+
+        foreach ($stable as $tag => $version) {
+            TestCase::assertSame($version, GithubClient::versionOfTag($tag, false),
+                $tag . ' is a release');
+        }
+
+        // Nothing here may reach a stable panel.
+        $notStable = [
+            'v1.9.3-rc1'   => 'a release candidate',
+            'v1.9.3-beta'  => 'a beta tag',
+            'nightly'      => 'a moving tag',
+            'v1.9'         => 'a two-part version',
+            'release-1.9.2' => 'a tag that only mentions a version',
+            'v1.9.2.1'     => 'a four-part version',
+            'main'         => 'a branch name',
+        ];
+
+        foreach ($notStable as $tag => $why) {
+            TestCase::assertSame(null, GithubClient::versionOfTag($tag, false),
+                $why . ' (' . $tag . ') is not a stable release');
+        }
+
+        // Beta takes prereleases as well, and only those that still name a
+        // complete version.
+        TestCase::assertSame('1.9.3-rc1', GithubClient::versionOfTag('v1.9.3-rc1', true),
+            'beta accepts a release candidate');
+        TestCase::assertSame('1.9.2', GithubClient::versionOfTag('v1.9.2', true),
+            'and still accepts a plain release');
+        TestCase::assertSame(null, GithubClient::versionOfTag('nightly', true),
+            'but not a moving tag');
+
+        // The ordering the updater relies on. GitHub's /tags is not documented
+        // as newest-first, so the newest is decided here.
+        $versions = ['1.9.2', '1.10.0', '1.9.10', '2.0.0', '1.9.3-rc1'];
+        usort($versions, static fn (string $a, string $b): int => version_compare($b, $a));
+
+        TestCase::assertSame('2.0.0', $versions[0], 'the newest release sorts first');
+        TestCase::assert(
+            array_search('1.10.0', $versions, true) < array_search('1.9.10', $versions, true),
+            '1.10.0 is newer than 1.9.10, which a string sort would get wrong'
+        );
+        TestCase::assert(
+            array_search('1.9.3-rc1', $versions, true) < array_search('1.9.2', $versions, true),
+            'a release candidate is newer than the release before it'
+        );
+
+        // And older than the release it is a candidate for, which is the half
+        // that matters: a beta panel on 1.9.3-rc1 must still be offered 1.9.3.
+        TestCase::assertSame(-1, version_compare('1.9.3-rc1', '1.9.3'),
+            'and older than the release it is a candidate for');
     }
 
     private static function sqlSplitter(): void

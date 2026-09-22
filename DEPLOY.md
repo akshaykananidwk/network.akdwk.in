@@ -588,6 +588,26 @@ above.
 
 ---
 
+## Which releases a panel installs
+
+**System → Updates → Channel** decides, and from 1.9.3 it actually does:
+
+| Channel | Installs | Use it when |
+|---|---|---|
+| **Stable** | the newest `vX.Y.Z` tag | always, on a panel with customers on it |
+| **Beta** | the newest tag, release candidates included | you are helping test one |
+| **Edge** | the head of the configured branch, finished or not | a fix is being written for you right now |
+
+Before 1.9.3 the channel was stored and displayed and then ignored: every panel
+followed the branch head, so any commit was offered as an update the moment it
+was pushed. If your panel is on Stable, the only thing it will offer you now is
+a tagged release.
+
+A channel with no published release offers nothing and says so. It will not
+quietly fall back to the branch.
+
+---
+
 ## Updating a panel that is already running
 
 Updates go through **System → Updates** in the panel, or `php cli/update.php`.

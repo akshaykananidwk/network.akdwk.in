@@ -54,6 +54,46 @@ final class UpdateManager
     // ------------------------------------------------------------ §9.2 check
 
     /**
+     * What this panel should install, for the channel it is on.
+     *
+     * Production defect (1.9.2): `channel` was stored, shown in a dropdown and
+     * validated, and then never consulted — the updater always installed the
+     * head of the branch. So every push was offered to every panel as an
+     * update the moment it landed, and an operator who had chosen "Stable" was
+     * running whatever was committed most recently. Unfinished work reached a
+     * live panel that way.
+     *
+     * Now the channel decides:
+     *
+     *   stable — the newest tag vX.Y.Z. A tag is a deliberate act.
+     *   beta   — the same, plus prereleases (vX.Y.Z-rc1).
+     *   edge   — the branch head, which is what the old behaviour was, chosen
+     *            on purpose and labelled as what it is.
+     *
+     * A channel with no tag returns null and offers nothing. It deliberately
+     * does not fall back to the branch: falling back is how the setting would
+     * quietly stop meaning anything again.
+     *
+     * @return array{commit:array<string,mixed>,release:?array<string,string>}|null
+     */
+    private function resolveTarget(GithubClient $client, string $channel, string $branch): ?array
+    {
+        if ($channel === 'edge') {
+            return ['commit' => $client->latestCommit($branch), 'release' => null];
+        }
+
+        $tag = $client->latestTag($channel === 'beta');
+        if ($tag === null) {
+            return null;
+        }
+
+        return [
+            'commit'  => $client->commit($tag['sha']),
+            'release' => ['tag' => $tag['name'], 'version' => $tag['version']],
+        ];
+    }
+
+    /**
      * Check GitHub for a newer revision.
      *
      * @param bool $force bypass the 15-minute result cache
@@ -89,7 +129,32 @@ final class UpdateManager
         );
 
         $branch = (string) ($settings['branch'] ?: 'main');
-        $latest = $client->latestCommit($branch);
+        $channel = (string) ($settings['channel'] ?: 'stable');
+
+        $target = $this->resolveTarget($client, $channel, $branch);
+        if ($target === null) {
+            return [
+                'configured'    => true,
+                'up_to_date'    => true,
+                'checked_at'    => gmdate('c'),
+                'from_cache'    => false,
+                'repo'          => $settings['repo_owner'] . '/' . $settings['repo_name'],
+                'branch'        => $branch,
+                'channel'       => $channel,
+                'release'       => null,
+                'current_version' => UpdateEnv::currentVersion($this->appRoot),
+                'current_commit'  => (string) ($settings['current_commit'] ?? ''),
+                'message'       => sprintf(
+                    'No release has been published on the %s channel yet. '
+                    . 'This panel updates to tagged releases, not to whatever is on "%s" — '
+                    . 'switch the channel to Edge under System → Updates if that is what you want.',
+                    $channel,
+                    $branch
+                ),
+            ];
+        }
+
+        $latest = $target['commit'];
         $currentCommit = (string) ($settings['current_commit'] ?? '');
         $currentVersion = UpdateEnv::currentVersion($this->appRoot);
 
@@ -126,6 +191,8 @@ final class UpdateManager
             'from_cache'       => false,
             'repo'             => $settings['repo_owner'] . '/' . $settings['repo_name'],
             'branch'           => $branch,
+            'channel'          => $channel,
+            'release'          => $target['release'],
             'current_version'  => $currentVersion,
             'current_commit'   => $currentCommit,
             'latest_commit'    => $latest,
@@ -197,7 +264,12 @@ final class UpdateManager
             throw new UpdateException((string) ($check['message'] ?? 'Updates are not configured.'));
         }
         if ($check['up_to_date'] ?? false) {
-            throw new UpdateException('You are already on the latest version.');
+            // A channel with no published release is also "nothing to
+            // install", but saying "you are already on the latest version"
+            // would be a lie an operator could act on for a long time.
+            throw new UpdateException(
+                (string) ($check['message'] ?? 'You are already on the latest version.')
+            );
         }
 
         $settings = UpdateSetting::current();

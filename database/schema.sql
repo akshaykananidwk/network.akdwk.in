@@ -672,7 +672,7 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__update_settings` (
   `branch` VARCHAR(120) NOT NULL DEFAULT 'main',
   -- AES-256-GCM ciphertext. Never rendered, never logged, never returned by the API.
   `token_encrypted` TEXT NULL,
-  `channel` ENUM('stable','beta') NOT NULL DEFAULT 'stable',
+  `channel` ENUM('stable','beta','edge') NOT NULL DEFAULT 'stable',
   `auto_check` TINYINT(1) NOT NULL DEFAULT 1,
   `auto_apply` TINYINT(1) NOT NULL DEFAULT 0,
   `check_interval_hours` INT NOT NULL DEFAULT 6,

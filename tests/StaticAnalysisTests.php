@@ -29,6 +29,7 @@ final class StaticAnalysisTests
         self::noRepeatedPlaceholders();
         self::noInterpolatedSql();
         self::viewsEscapeOutput();
+        self::stringAccessorDefaults();
         self::phpSyntax();
     }
 
@@ -54,6 +55,139 @@ final class StaticAnalysisTests
             TestCase::assert(class_exists($class) && !$class::isTenantScoped(),
                 $model . ' is platform-level, not tenant-scoped');
         }
+    }
+
+    /**
+     * Request::input(), query() and cookie() take a ?string default.
+     *
+     * Production defect (1.9.2): `$request->input('pre_approved', false)` is
+     * the obvious way to read a checkbox and is a TypeError. Under
+     * declare(strict_types=1) the argument is checked at the call, so it threw
+     * on every request that reached the line — both buttons on the join-code
+     * page returned 500, not just the one that omitted the field.
+     *
+     * PHP will not catch this until the line runs, so it is caught here:
+     * anything but a quoted string or null is refused. Booleans have
+     * Request::boolean(), which has no string default to get wrong.
+     */
+    private static function stringAccessorDefaults(): void
+    {
+        TestCase::group('Static — no non-string default reaches a ?string accessor');
+
+        $accessors = ['input', 'query', 'cookie'];
+        $offenders = [];
+
+        foreach (self::phpFiles(true) as $file) {
+            // Comments stripped first. The first version of this check
+            // reported its own docblock — which quotes the bad call on
+            // purpose — and Request::boolean()'s, which does the same. A
+            // static check that flags the explanation of the defect is one
+            // people turn off.
+            $source = self::withoutComments((string) file_get_contents($file));
+
+            foreach ($accessors as $accessor) {
+                $offset = 0;
+                while (($position = strpos($source, '->' . $accessor . '(', $offset)) !== false) {
+                    $offset = $position + 1;
+
+                    $arguments = self::balancedParens($source, $position + strlen('->' . $accessor));
+                    $default = self::secondArgument($arguments);
+
+                    if ($default === null || self::isStringLiteralOrNull($default)) {
+                        continue;
+                    }
+
+                    $line = substr_count(substr($source, 0, $position), "\n") + 1;
+                    $offenders[] = self::relative($file) . ':' . $line . ' — ' . $accessor . '(…, ' . $default . ')';
+                }
+            }
+        }
+
+        TestCase::assert(
+            $offenders === [],
+            'every input()/query()/cookie() default is a string or null',
+            implode('; ', array_slice($offenders, 0, 5))
+        );
+    }
+
+    /**
+     * The second argument of a call, or null when there is not one.
+     *
+     * Deliberately conservative: an argument list containing a nested call or
+     * an array is left alone rather than split wrongly, because a static check
+     * that reports the wrong line is one people learn to ignore.
+     */
+    private static function secondArgument(string $arguments): ?string
+    {
+        $inner = trim($arguments);
+        if (str_starts_with($inner, '(')) {
+            $inner = substr($inner, 1, -1);
+        }
+
+        $depth = 0;
+        $quote = '';
+
+        for ($i = 0, $length = strlen($inner); $i < $length; $i++) {
+            $char = $inner[$i];
+
+            if ($quote !== '') {
+                if ($char === '\\') {
+                    $i++;
+                } elseif ($char === $quote) {
+                    $quote = '';
+                }
+                continue;
+            }
+
+            if ($char === "'" || $char === '"') {
+                $quote = $char;
+            } elseif ($char === '(' || $char === '[') {
+                $depth++;
+            } elseif ($char === ')' || $char === ']') {
+                $depth--;
+            } elseif ($char === ',' && $depth === 0) {
+                return trim(substr($inner, $i + 1));
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Refuse a literal that is not a string.
+     *
+     * Only literals. A variable or a call is left alone — `query('period',
+     * UsageCounter::currentPeriod())` is correct and PHP enforces its type at
+     * the call — and the defect this exists for was always a literal: `false`
+     * written where the signature wanted `null`.
+     */
+    private static function isStringLiteralOrNull(string $argument): bool
+    {
+        $argument = trim($argument);
+
+        return !preg_match('/^(true|false|\d|\[|array\s*\()/i', $argument);
+    }
+
+    /** Source with comments removed, so a docblock cannot be a finding. */
+    private static function withoutComments(string $source): string
+    {
+        $out = '';
+
+        foreach (token_get_all($source) as $token) {
+            if (is_array($token)) {
+                // Replaced by their own newlines, so reported line numbers
+                // still point at the real line.
+                $out .= in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true)
+                    ? str_repeat("\n", substr_count($token[1], "\n"))
+                    : $token[1];
+
+                continue;
+            }
+
+            $out .= $token;
+        }
+
+        return $out;
     }
 
     private static function noRepeatedPlaceholders(): void

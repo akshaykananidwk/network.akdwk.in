@@ -57,6 +57,7 @@ final class HttpTests
             self::authorisation();
             self::crossTenantOverHttp();
             self::apiAuthentication();
+            self::joinCodeForms();
             self::agentEndpoints();
             self::rateLimiting();
             // 1.9.2: the edge's own upgrade path, end to end over HTTP.
@@ -817,6 +818,107 @@ final class HttpTests
         }
 
         $client->post($path, $body, $headers);
+    }
+
+    /**
+     * Both join-code buttons, driven exactly as the page drives them.
+     *
+     * Production defect (1.9.2): `$request->input('pre_approved', false)`
+     * passed a bool where the signature takes ?string. Under
+     * declare(strict_types=1) that is checked at the call, so it threw on
+     * every request reaching the line and both buttons on the page returned
+     * 500 — the ordinary "New code" one included, which is the one every
+     * customer uses.
+     *
+     * It shipped because nothing had ever posted this form. Pre-approved codes
+     * were new in 1.9.2 and were tested through the model and the enrolment
+     * path; the controller that issues them was reached by no test at all. So
+     * both buttons are driven here exactly as the page drives them — the page
+     * posts two separate forms rather than a checkbox — and the drill would
+     * have caught it with either one.
+     */
+    private static function joinCodeForms(): void
+    {
+        TestCase::group('HTTP — issuing a join code, both buttons (1.9.2)');
+
+        $client = self::signIn('alpha');
+        $networkId = (int) self::$fixtures['alpha']['network_id'];
+        $path = '/networks/' . $networkId . '/join-code';
+
+        // 1. "New code": no pre_approved field at all. This is the one that
+        //    500'd in production.
+        $client->get('/networks/' . $networkId);
+        TestCase::assertSame(200, $client->status(), 'the network page renders');
+
+        $client->post($path, ['_token' => (string) $client->csrfToken()]);
+        TestCase::assertSame(302, $client->status(),
+            'issuing an ordinary code does not fail', 'HTTP ' . $client->status());
+
+        $ordinary = self::latestJoinCode($networkId);
+        TestCase::assert($ordinary !== null, 'and a code was created');
+        TestCase::assertSame(0, (int) ($ordinary['pre_approved'] ?? 1),
+            'and it is not pre-approved');
+
+        // 2. "New pre-approved code": the hidden fields the page sends.
+        $client->get('/networks/' . $networkId);
+        $client->post($path, [
+            '_token'       => (string) $client->csrfToken(),
+            'pre_approved' => '1',
+            'max_uses'     => '1',
+            'ttl_minutes'  => '30',
+        ]);
+        TestCase::assertSame(302, $client->status(),
+            'issuing a pre-approved code does not fail', 'HTTP ' . $client->status());
+
+        $preApproved = self::latestJoinCode($networkId);
+        TestCase::assert($preApproved !== null && $preApproved['code'] !== ($ordinary['code'] ?? ''),
+            'and a second, different code was created');
+        TestCase::assertSame(1, (int) ($preApproved['pre_approved'] ?? 0),
+            'and this one is pre-approved (R4: the admin decided, in advance)');
+        TestCase::assertSame(1, (int) ($preApproved['max_uses'] ?? 0),
+            'single-use, so it is not a standing invitation');
+
+        // 3. A pre-approved code may not be issued unlimited or long-lived,
+        //    whatever the form asks for. The clamp is the whole reason
+        //    pre-approval does not break R4.
+        $client->get('/networks/' . $networkId);
+        $client->post($path, [
+            '_token'       => (string) $client->csrfToken(),
+            'pre_approved' => 'on',
+            'max_uses'     => '0',
+            'ttl_minutes'  => '10080',
+        ]);
+        TestCase::assertSame(302, $client->status(), 'a wide-open pre-approved request is accepted');
+
+        $clamped = self::latestJoinCode($networkId);
+        TestCase::assertSame(1, (int) ($clamped['pre_approved'] ?? 0),
+            'checkbox "on" is read as pre-approved, not ignored');
+        TestCase::assert((int) ($clamped['max_uses'] ?? 0) > 0,
+            'an unlimited pre-approved code is refused', 'max_uses=' . ($clamped['max_uses'] ?? '?'));
+        TestCase::assert(
+            strtotime((string) $clamped['expires_at']) - time() <= 121 * 60,
+            'and it cannot outlive two hours',
+            (string) $clamped['expires_at']
+        );
+    }
+
+    /** @return array<string,mixed>|null */
+    private static function latestJoinCode(int $networkId): ?array
+    {
+        $row = null;
+
+        TenantScope::asTenant(self::$fixtures['alpha']['tenant_id'], static function () use ($networkId, &$row): void {
+            \App\Core\Auth::setApiActor(null, self::$fixtures['alpha']['tenant_id'], ['*']);
+            $row = DB::selectOne(
+                'SELECT * FROM ' . DB::table('join_codes') . '
+                 WHERE network_id = :n ORDER BY id DESC LIMIT 1',
+                ['n' => $networkId]
+            );
+        });
+        \App\Core\Auth::reset();
+        TenantScope::reset();
+
+        return $row;
     }
 
     private static function agentEndpoints(): void

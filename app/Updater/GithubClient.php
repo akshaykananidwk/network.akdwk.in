@@ -109,6 +109,100 @@ final class GithubClient
     }
 
     /**
+     * One commit, by sha — the commit a tag points at.
+     *
+     * @return array{sha:string,message:string,author:string,date:string,url:string}
+     */
+    public function commit(string $sha): array
+    {
+        $commit = $this->request('GET', sprintf(
+            '/repos/%s/%s/commits/%s',
+            $this->owner,
+            $this->repo,
+            rawurlencode($sha)
+        ));
+
+        if (!isset($commit['sha'])) {
+            throw new UpdateException('Commit ' . substr($sha, 0, 12) . ' could not be read.');
+        }
+
+        return $this->normaliseCommit($commit);
+    }
+
+    /**
+     * The newest released tag, or null when the repository has none.
+     *
+     * This is what "stable" means. Until 1.9.3 the updater followed the branch
+     * head, so every push was immediately offered to every panel as an
+     * update — including a push made halfway through a piece of work. A tag is
+     * a deliberate act, which is the whole point: nothing reaches a production
+     * panel because somebody committed.
+     *
+     * Null rather than a fallback to the branch. Falling back is how the
+     * setting would quietly stop meaning anything again.
+     *
+     * @return array{name:string,sha:string,version:string}|null
+     */
+    public function latestTag(bool $includePrereleases = false): ?array
+    {
+        $tags = $this->request('GET', sprintf(
+            '/repos/%s/%s/tags?per_page=100',
+            $this->owner,
+            $this->repo
+        ));
+
+        $candidates = [];
+
+        foreach ($tags as $tag) {
+            if (!is_array($tag) || !isset($tag['name'], $tag['commit']['sha'])) {
+                continue;
+            }
+
+            $version = self::versionOfTag((string) $tag['name'], $includePrereleases);
+            if ($version === null) {
+                continue;
+            }
+
+            $candidates[] = [
+                'name'    => (string) $tag['name'],
+                'sha'     => (string) $tag['commit']['sha'],
+                'version' => $version,
+            ];
+        }
+
+        if ($candidates === []) {
+            return null;
+        }
+
+        // Sorted here rather than trusted from the API: /tags is documented as
+        // returning tags, not as returning them newest first, and "whichever
+        // one GitHub happened to list first" is not a release process.
+        usort($candidates, static fn (array $a, array $b): int => version_compare($b['version'], $a['version']));
+
+        return $candidates[0];
+    }
+
+    /**
+     * The version a tag names, or null when it does not name one.
+     *
+     * "v1.9.2" and "1.9.2" both count. "1.9.3-rc1" counts only on a channel
+     * that asked for prereleases, so a release candidate cannot arrive on a
+     * customer's panel by being the newest thing in the list.
+     */
+    public static function versionOfTag(string $tag, bool $includePrereleases): ?string
+    {
+        if (preg_match('/^v?(\d+\.\d+\.\d+)$/', $tag, $matches) === 1) {
+            return $matches[1];
+        }
+
+        if ($includePrereleases && preg_match('/^v?(\d+\.\d+\.\d+-[0-9A-Za-z.-]+)$/', $tag, $matches) === 1) {
+            return $matches[1];
+        }
+
+        return null;
+    }
+
+    /**
      * Compare two commits.
      *
      * @return array{ahead_by:int,behind_by:int,status:string,commits:list<array<string,mixed>>,files:array{added:int,modified:int,removed:int,list:list<array<string,mixed>>},total_size:int}
