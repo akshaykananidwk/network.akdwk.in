@@ -137,7 +137,12 @@ final class AgentController
         $knownRevision = (int) ($request->query('revision', '0') ?? 0);
         $currentRevision = (int) $network['config_revision'];
 
-        if ($knownRevision > 0 && $knownRevision === $currentRevision) {
+        // "Nothing has changed" is about the network. An administrator
+        // pressing Update now on one device is not a change to the network, so
+        // it has to be asked about separately — otherwise the agent is told
+        // nothing has changed and the click is never delivered.
+        if ($knownRevision > 0 && $knownRevision === $currentRevision
+            && !Device::hasUpdateRequest((int) $device['id'])) {
             return Response::api([
                 'changed'  => false,
                 'revision' => $currentRevision,

@@ -224,10 +224,33 @@ final class Device extends Model
     {
         DB::execute(
             'UPDATE ' . self::tableName() . '
-             SET update_requested_at = UTC_TIMESTAMP(), config_revision = config_revision + 1
+             SET update_requested_at = UTC_TIMESTAMP()
              WHERE id = :id',
             ['id' => $deviceId]
         );
+    }
+
+    /**
+     * Whether a request is outstanding, WITHOUT consuming it.
+     *
+     * The configuration endpoint answers "nothing has changed" whenever the
+     * agent's revision matches the network's, and it builds no configuration
+     * on that path. A request recorded here is not a change to the network, so
+     * without this the agent would be told nothing had changed and the
+     * administrator's click would sit unseen until something else moved.
+     *
+     * Not the same call as updateRequested(), which clears as it reads:
+     * clearing on the not-changed path would throw the request away and send
+     * nothing.
+     */
+    public static function hasUpdateRequest(int $deviceId): bool
+    {
+        $at = DB::scalar(
+            'SELECT update_requested_at FROM ' . self::tableName() . ' WHERE id = :id',
+            ['id' => $deviceId]
+        );
+
+        return $at !== null && $at !== '';
     }
 
     /**

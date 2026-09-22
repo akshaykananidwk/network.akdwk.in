@@ -948,14 +948,46 @@ final class HttpTests
         $client->post('/devices/' . $deviceId . '/update-now', ['_token' => (string) $client->csrfToken()]);
         TestCase::assertSame(302, $client->status(), 'pressing it is accepted');
 
-        // The agent collects it on its next configuration poll.
+        // The agent collects it on its next configuration poll — and a real
+        // agent sends the revision it already has, which is the case this got
+        // wrong. The endpoint answers "nothing has changed" whenever that
+        // matches the network's, and an Update now request is not a change to
+        // the network: without asking about it separately, the click was
+        // never delivered to any agent that had ever polled before.
         $api->get('/api/v1/agent/config', $agent);
         TestCase::assertSame(200, $api->status(), 'the agent fetches its configuration');
         $config = json_decode($api->body(), true);
         $data = is_array($config) ? ($config['data'] ?? []) : [];
+        $revision = (int) ($data['revision'] ?? 0);
         TestCase::assert(
             is_array($data) && ($data['update_requested'] ?? false) === true,
             'and is asked to check for an update'
+        );
+
+        // Again, as a settled agent asks: with its revision, which matches.
+        // The page is re-fetched first for a fresh CSRF token — the one from
+        // before was spent on the POST above.
+        $client->get('/devices/' . $deviceId);
+        $client->post('/devices/' . $deviceId . '/update-now', ['_token' => (string) $client->csrfToken()]);
+        TestCase::assertSame(302, $client->status(), 'a second Update now is accepted');
+
+        $api->get('/api/v1/agent/config?revision=' . $revision, $agent);
+        $config = json_decode($api->body(), true);
+        $data = is_array($config) ? ($config['data'] ?? []) : [];
+        TestCase::assert(
+            is_array($data) && ($data['update_requested'] ?? false) === true,
+            'a settled agent, sending the revision it holds, is asked too'
+        );
+
+        // And that path still answers "nothing has changed" when there is no
+        // request, or every settled agent would rebuild its configuration on
+        // every poll for ever.
+        $api->get('/api/v1/agent/config?revision=' . $revision, $agent);
+        $config = json_decode($api->body(), true);
+        $data = is_array($config) ? ($config['data'] ?? []) : [];
+        TestCase::assert(
+            is_array($data) && ($data['changed'] ?? true) === false,
+            'and with nothing outstanding it is still told nothing has changed'
         );
 
         // And once only. Without this, one click makes every poll for ever
