@@ -103,6 +103,26 @@ declare(strict_types=1);
         <div><dt>Latency</dt><dd><?= $device['latency_ms'] !== null ? e($device['latency_ms']) . ' ms' : '—' ?></dd></div>
         <div><dt>Traffic</dt><dd>↓ <?= e(format_bytes((int) $device['rx_bytes'])) ?> · ↑ <?= e(format_bytes((int) $device['tx_bytes'])) ?></dd></div>
         <div><dt>Last seen</dt><dd><?= e(local_time($device['last_seen_at'])) ?> <span class="text-muted">(<?= e(time_ago($device['last_seen_at'])) ?>)</span></dd></div>
+        <div><dt>Agent running since</dt><dd>
+            <?php if (($device['agent_started_at'] ?? null) !== null): ?>
+                <?= e(local_time($device['agent_started_at'])) ?>
+                <span class="text-muted">(<?= e(time_ago($device['agent_started_at'])) ?>)</span>
+            <?php else: ?>
+                <span class="text-muted">—</span>
+            <?php endif; ?>
+            <p class="field-hint">Resets when the computer restarts or the service does.</p>
+        </dd></div>
+        <div><dt>Last problem</dt><dd>
+            <?php if (($device['last_error'] ?? null) !== null && $device['last_error'] !== ''): ?>
+                <?= e((string) $device['last_error']) ?>
+                <span class="text-muted">(<?= e(time_ago($device['last_error_at'])) ?>)</span>
+                <p class="field-hint">
+                    Kept after it cleared. If nothing is listed above this, it is not happening now.
+                </p>
+            <?php else: ?>
+                <span class="text-muted">none reported</span>
+            <?php endif; ?>
+        </dd></div>
         <div><dt>Enrolled</dt><dd><?= e(local_time($device['created_at'])) ?></dd></div>
         <div><dt>Approved</dt><dd><?= $device['approved_at'] !== null ? e(local_time($device['approved_at'])) : '—' ?></dd></div>
         <div><dt>Public key</dt><dd>
@@ -146,6 +166,28 @@ declare(strict_types=1);
         </div>
     </form>
 </section>
+
+<?php if (can('device.update')): ?>
+<section class="card">
+    <header class="card-header"><h2>Agent</h2></header>
+
+    <div class="danger-row">
+        <div>
+            <strong>Update now</strong>
+            <p class="text-muted">
+                This device checks for a new agent every six hours by itself. Use this when
+                you are waiting on one: it picks the request up within a minute, downloads
+                what this panel offers, and installs it only if the signature verifies.
+                Running <?= e($device['agent_version'] ?: 'an unknown version') ?>.
+            </p>
+        </div>
+        <form method="post" action="<?= e(url('devices/' . $device['id'] . '/update-now')) ?>">
+            <?= csrf_field() ?>
+            <button type="submit" class="btn">Update now</button>
+        </form>
+    </div>
+</section>
+<?php endif; ?>
 
 <section class="card card-danger">
     <header class="card-header">

@@ -188,6 +188,99 @@ final class Device extends Model
                 'id' => $deviceId,
             ]
         );
+
+        // Kept after it clears, because problems_json holds what is wrong NOW
+        // and empties when it stops. The fault that was happening an hour ago,
+        // when the customer rang, otherwise leaves no trace by the time
+        // anybody looks at the page.
+        if ($problems !== []) {
+            $first = $problems[array_key_first($problems)];
+            $detail = is_array($first) ? (string) ($first['detail'] ?? '') : '';
+
+            if ($detail !== '') {
+                DB::execute(
+                    'UPDATE ' . self::tableName() . '
+                     SET last_error = :e, last_error_at = :at
+                     WHERE id = :id',
+                    [
+                        'e'  => mb_substr($detail, 0, 500),
+                        'at' => gmdate('Y-m-d H:i:s'),
+                        'id' => $deviceId,
+                    ]
+                );
+            }
+        }
+    }
+
+    /**
+     * Ask a device to check for an update now, instead of in six hours.
+     *
+     * Recorded rather than pushed. The agent asks the panel for its
+     * configuration on a short cycle and carries the request back on that —
+     * there is no channel from here to a PC behind a shop router, and
+     * inventing one would mean the panel could reach into customer machines.
+     */
+    public static function requestUpdate(int $deviceId): void
+    {
+        DB::execute(
+            'UPDATE ' . self::tableName() . '
+             SET update_requested_at = UTC_TIMESTAMP(), config_revision = config_revision + 1
+             WHERE id = :id',
+            ['id' => $deviceId]
+        );
+    }
+
+    /**
+     * Whether a request is outstanding, and consuming it if so.
+     *
+     * Cleared as it is read, because the alternative is an agent that checks
+     * for an update on every configuration poll for ever after one click.
+     * A request that is lost — the configuration fetched by an agent that then
+     * died — costs the administrator one more click, which is the right way
+     * for this to fail.
+     */
+    public static function updateRequested(int $deviceId): bool
+    {
+        $at = DB::scalar(
+            'SELECT update_requested_at FROM ' . self::tableName() . ' WHERE id = :id',
+            ['id' => $deviceId]
+        );
+
+        if ($at === null || $at === '') {
+            return false;
+        }
+
+        DB::execute(
+            'UPDATE ' . self::tableName() . ' SET update_requested_at = NULL WHERE id = :id',
+            ['id' => $deviceId]
+        );
+
+        return true;
+    }
+
+    /**
+     * When the agent process came up, as the agent reports it.
+     *
+     * "Has it restarted?" is where a support call starts, and a device that
+     * reboots nightly looks exactly like one that has been up for three weeks
+     * without this. Clamped: a machine with a wrong clock, or an agent that
+     * reports nonsense, must not put a date in the next century on the page.
+     */
+    public static function recordAgentStart(int $deviceId, int $uptimeSeconds): void
+    {
+        if ($uptimeSeconds <= 0 || $uptimeSeconds > 86400 * 365) {
+            return;
+        }
+
+        DB::execute(
+            'UPDATE ' . self::tableName() . '
+             SET agent_started_at = :at
+             WHERE id = :id',
+            [
+                'at' => gmdate('Y-m-d H:i:s', time() - $uptimeSeconds),
+                'id' => $deviceId,
+            ]
+        );
     }
 
     /**

@@ -131,6 +131,9 @@ type session struct {
 	lastRX    int64
 	lastTX    int64
 	startedAt time.Time
+	// updateRequested is an administrator having pressed "Update now" on this
+	// device's page, carried in the configuration the panel publishes.
+	updateRequested bool
 	// controllerKey is the panel's signing identity, taken from the last
 	// configuration it published. A release whose digest is not signed by it
 	// is not installed — see internal/selfupdate.
@@ -259,6 +262,14 @@ func (s *session) applyConfig(ctx context.Context, priv wgPrivate, cfg *panel.Co
 	// Kept from every configuration, not just the first: rotating the
 	// controller key must not leave running agents unable to verify a release.
 	s.controllerKey = cfg.Controller.PublicKey
+
+	// Latched rather than acted on here: the update check has its own place in
+	// the loop, with the grace period, the signature verification and the
+	// restart. Doing it from inside configuration application would be a
+	// second path to the same thing, which is how two paths drift apart.
+	if cfg.UpdateRequested {
+		s.updateRequested = true
+	}
 
 	plan, err := netcfg.Build(cfg)
 	if err != nil {

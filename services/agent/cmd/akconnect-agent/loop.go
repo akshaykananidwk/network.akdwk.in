@@ -76,7 +76,14 @@ func (s *session) loop(ctx context.Context, priv wgPrivate, pollAfter int) error
 
 // heartbeat reports liveness and the device's own view of its traffic.
 func (s *session) heartbeat(ctx context.Context) error {
-	hb := panel.Heartbeat{Revision: s.st.Revision, Problems: s.problems()}
+	hb := panel.Heartbeat{
+		Revision: s.st.Revision,
+		Problems: s.problems(),
+		// Rounded to whole seconds and always at least one, so a heartbeat
+		// sent in the first second of a restart still says "just started"
+		// rather than saying nothing, which the panel reads as unknown.
+		UptimeSeconds: max(1, int(time.Since(s.startedAt).Seconds())),
+	}
 
 	if s.tun != nil {
 		if peers, err := s.tun.Status(); err == nil {

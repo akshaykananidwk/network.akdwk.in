@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Core\NotFoundException;
 use App\Core\Request;
 use App\Core\Response;
 use App\Core\Session;
 use App\Core\Validator;
 use App\Models\Device;
 use App\Models\Network;
+use App\Services\AuditService;
 use App\Services\DeviceService;
 use App\Services\IpamService;
 
@@ -106,6 +108,42 @@ final class DeviceController extends Controller
         }
 
         return $this->redirect('devices/' . $deviceId, 'Device revoked. Its peers drop it within 10 seconds.');
+    }
+
+    /**
+     * Ask this device to check for an agent update now.
+     *
+     * The agent checks every six hours by itself, which is right for a
+     * rollout and useless for somebody standing in front of a machine trying
+     * to fix it. This does not push anything: it records a request the agent
+     * collects on its next configuration poll, and the agent still refuses a
+     * binary whose signature does not verify.
+     *
+     * @param array<string,string> $params
+     */
+    public function requestUpdate(Request $request, array $params): Response
+    {
+        $deviceId = (int) $params['id'];
+
+        // Through the model's scoped finder, so a device belonging to another
+        // customer is a 404 here as it is everywhere else.
+        $device = Device::find($deviceId);
+        if ($device === null) {
+            throw new NotFoundException('App\\Models\\Device #' . $deviceId . ' not found');
+        }
+
+        Device::requestUpdate($deviceId);
+        AuditService::log('device.update_requested', 'device', $deviceId);
+
+        if ($request->wantsJson()) {
+            return Response::api(['status' => 'requested']);
+        }
+
+        return $this->redirect(
+            'devices/' . $deviceId,
+            'Asked this device to check for an update. It picks the request up within a minute, '
+                . 'and only installs a release signed by this panel.'
+        );
     }
 
     /** @param array<string,string> $params */

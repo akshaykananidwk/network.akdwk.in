@@ -91,6 +91,7 @@ $router->group('', ['maintenance', 'auth'], static function (Router $router): vo
     $router->post('/devices/{id:int}', 'DeviceController@update', ['csrf', 'can:device.update']);
     $router->post('/devices/{id:int}/approve', 'DeviceController@approve', ['csrf', 'can:device.approve']);
     $router->post('/devices/{id:int}/revoke', 'DeviceController@revoke', ['csrf', 'can:device.revoke']);
+    $router->post('/devices/{id:int}/update-now', 'DeviceController@requestUpdate', ['csrf', 'can:device.update']);
     $router->post('/devices/{id:int}/disable', 'DeviceController@disable', ['csrf', 'can:device.update']);
     $router->post('/devices/{id:int}/delete', 'DeviceController@destroy', ['csrf', 'can:device.delete']);
     $router->post('/devices/bulk-approve', 'DeviceController@bulkApprove', ['csrf', 'can:device.approve']);

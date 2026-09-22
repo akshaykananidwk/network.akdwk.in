@@ -63,6 +63,7 @@ final class HttpTests
             // 1.9.2: the edge's own upgrade path, end to end over HTTP.
             self::edgeUpgrade();
             self::installLink();
+            self::deviceUpdateNow();
             self::selfUpdate();
         } finally {
             self::removeFixtures();
@@ -869,6 +870,103 @@ final class HttpTests
 
             @unlink(APP_ROOT . '/storage/downloads/akconnect-setup-1.9.5-installlink.exe');
         }
+    }
+
+    /**
+     * 1.9.5: "Update now", and the two things the device page must answer.
+     *
+     * The button does not push anything — there is no channel from the panel
+     * into a PC behind a shop router. It records a request, the agent collects
+     * it on its next configuration poll, and the panel clears it. What is
+     * tested here is that round trip, including the part that is easy to get
+     * wrong: the request must be consumed, or one click makes the agent check
+     * for an update on every poll for ever.
+     */
+    private static function deviceUpdateNow(): void
+    {
+        TestCase::group('HTTP — Update now, and what the device page answers (1.9.5)');
+
+        $client = self::signIn('alpha');
+        $deviceId = (int) self::$fixtures['alpha']['device_id'];
+
+        // A heartbeat carrying an uptime and a problem, as an agent sends it.
+        $agent = [
+            'Authorization' => 'Bearer ' . (string) self::$fixtures['alpha']['device_token'],
+            'Content-Type'  => 'application/json',
+            'Accept'        => 'application/json',
+        ];
+
+        $api = self::client();
+        $api->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'direct',
+            'endpoint'        => '203.0.113.9:51820',
+            'uptime_seconds'  => 7200,
+            'problems'        => [[
+                'code'   => 'dns_nrpt_refused',
+                'detail' => 'Windows refused the DNS policy rule.',
+            ]],
+        ]), $agent);
+        TestCase::assertSame(200, $api->status(), 'the heartbeat is accepted');
+
+        $device = TenantScope::asTenant(
+            (int) self::$fixtures['alpha']['tenant_id'],
+            static fn (): ?array => Device::find($deviceId)
+        );
+
+        TestCase::assert(
+            ($device['agent_started_at'] ?? null) !== null,
+            'the panel knows when the agent started, so "has it restarted?" has an answer'
+        );
+        TestCase::assertContains(
+            'Windows refused',
+            (string) ($device['last_error'] ?? ''),
+            'and keeps the last problem after it clears'
+        );
+
+        // A heartbeat with nothing wrong clears the current problems and must
+        // NOT erase the record of the last one — that is the whole point.
+        $api->post('/api/v1/agent/heartbeat',
+            (string) json_encode(['connection_type' => 'direct']), $agent);
+        $device = TenantScope::asTenant(
+            (int) self::$fixtures['alpha']['tenant_id'],
+            static fn (): ?array => Device::find($deviceId)
+        );
+        TestCase::assert(
+            ($device['problems_json'] ?? null) === null,
+            'a clean heartbeat clears what is wrong now'
+        );
+        TestCase::assertContains(
+            'Windows refused',
+            (string) ($device['last_error'] ?? ''),
+            'and the last problem survives it, which is why the column exists'
+        );
+
+        // The button.
+        $client->get('/devices/' . $deviceId);
+        TestCase::assertContains('/update-now', $client->body(), 'the device page offers Update now');
+
+        $client->post('/devices/' . $deviceId . '/update-now', ['_token' => (string) $client->csrfToken()]);
+        TestCase::assertSame(302, $client->status(), 'pressing it is accepted');
+
+        // The agent collects it on its next configuration poll.
+        $api->get('/api/v1/agent/config', $agent);
+        TestCase::assertSame(200, $api->status(), 'the agent fetches its configuration');
+        $config = json_decode($api->body(), true);
+        $data = is_array($config) ? ($config['data'] ?? []) : [];
+        TestCase::assert(
+            is_array($data) && ($data['update_requested'] ?? false) === true,
+            'and is asked to check for an update'
+        );
+
+        // And once only. Without this, one click makes every poll for ever
+        // after ask for an update.
+        $api->get('/api/v1/agent/config', $agent);
+        $config = json_decode($api->body(), true);
+        $data = is_array($config) ? ($config['data'] ?? []) : [];
+        TestCase::assert(
+            is_array($data) && ($data['update_requested'] ?? false) !== true,
+            'the request is consumed, not repeated on every poll'
+        );
     }
 
     /** @see self::installLink() — the body, so the restore above is a finally. */

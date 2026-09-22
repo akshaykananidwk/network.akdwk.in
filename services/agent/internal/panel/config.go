@@ -77,6 +77,12 @@ type Config struct {
 		ACLDefaultAction  string `json:"acl_default_action"`
 	} `json:"policy"`
 
+	// UpdateRequested is an administrator having pressed "Update now" on this
+	// device's page. The agent otherwise checks every six hours, which is
+	// right for a rollout and useless for somebody standing in front of a
+	// machine trying to fix it.
+	UpdateRequested bool `json:"update_requested,omitempty"`
+
 	IssuedAt string `json:"issued_at"`
 }
 
@@ -216,6 +222,12 @@ type Heartbeat struct {
 	// a log file on the customer's machine, which nobody reads until they
 	// telephone.
 	Problems []Problem `json:"problems,omitempty"`
+	// UptimeSeconds is how long this agent process has been running. The panel
+	// turns it into "started at", which is how an administrator answers "has
+	// it restarted?" without telephoning a shopkeeper. Sent rather than a
+	// timestamp because a machine with a wrong clock is common and a duration
+	// does not care what the clock says.
+	UptimeSeconds int `json:"uptime_seconds,omitempty"`
 }
 
 // Problem is one thing that needs a person.

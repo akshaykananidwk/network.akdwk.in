@@ -30,7 +30,106 @@ final class StaticAnalysisTests
         self::noInterpolatedSql();
         self::viewsEscapeOutput();
         self::stringAccessorDefaults();
+        self::oneChannelAwareResolver();
         self::phpSyntax();
+    }
+
+    /**
+     * Defect 29, kept fixed: exactly one place decides what an update is.
+     *
+     * The channel setting existed, was shown, was validated and was then not
+     * consulted — the updater installed the head of the branch whatever it
+     * said. Every push reached every panel the moment it landed, and an
+     * operator who had chosen "Stable" was running whatever was committed
+     * most recently. Unfinished work reached a live panel that way.
+     *
+     * The fix was to put the decision in one function. This is what stops it
+     * coming apart again: the two calls that can answer "what should we
+     * install" may appear only inside that function, so a second caller —
+     * an auto-check, a notification, a new Update Now button — cannot quietly
+     * grow its own idea of the channel.
+     */
+    private static function oneChannelAwareResolver(): void
+    {
+        TestCase::group('Static — one function decides what an update is (defect 29)');
+
+        $resolver = 'resolveTarget';
+        $offenders = [];
+
+        foreach (self::phpFiles() as $file) {
+            $source = self::withoutComments((string) file_get_contents($file));
+
+            // The client's own definitions are where these live.
+            if (str_ends_with($file, 'GithubClient.php')) {
+                continue;
+            }
+
+            foreach (['latestCommit', 'latestTag'] as $call) {
+                $offset = 0;
+                while (($at = strpos($source, '->' . $call . '(', $offset)) !== false) {
+                    $offset = $at + 1;
+
+                    if (self::enclosingFunction($source, $at) !== $resolver) {
+                        $offenders[] = sprintf(
+                            '%s:%d — %s() is called outside %s()',
+                            basename($file),
+                            substr_count(substr($source, 0, $at), "\n") + 1,
+                            $call,
+                            $resolver
+                        );
+                    }
+                }
+            }
+        }
+
+        TestCase::assert(
+            $offenders === [],
+            'nothing decides what to install except ' . $resolver . '()',
+            implode('; ', $offenders)
+        );
+    }
+
+    /**
+     * The name of the function a byte offset is inside, or '' at file scope.
+     *
+     * Braces are counted rather than parsed. It is enough for what it is
+     * asked: whether one call sits inside one named function in a file this
+     * project wrote.
+     */
+    private static function enclosingFunction(string $source, int $offset): string
+    {
+        $name = '';
+        $depth = 0;
+        $functionDepth = -1;
+
+        $length = min($offset, strlen($source));
+        for ($i = 0; $i < $length; $i++) {
+            $char = $source[$i];
+
+            if ($char === '{') {
+                $depth++;
+
+                continue;
+            }
+
+            if ($char === '}') {
+                $depth--;
+                if ($functionDepth >= 0 && $depth < $functionDepth) {
+                    $name = '';
+                    $functionDepth = -1;
+                }
+
+                continue;
+            }
+
+            if ($char === 'f' && preg_match('/\Gfunction\s+([A-Za-z_]\w*)/', $source, $m, 0, $i) === 1) {
+                $name = $m[1];
+                $functionDepth = $depth + 1;
+                $i += strlen($m[0]) - 1;
+            }
+        }
+
+        return $name;
     }
 
     private static function tenantScopeDeclarations(): void

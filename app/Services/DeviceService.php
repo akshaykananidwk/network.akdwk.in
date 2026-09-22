@@ -442,6 +442,15 @@ final class DeviceService
                 'allow_default_route' => (bool) Config::get('network.allow_default_route', false),
                 'acl_default_action'  => $network['acl_default_action'],
             ],
+            // An administrator pressed "Update now" on this device's page. The
+            // agent otherwise asks every six hours, which is right for a
+            // rollout and useless for somebody standing in front of a machine
+            // trying to fix it.
+            //
+            // It is a request, not an instruction: the agent still asks the
+            // panel what it is offered and still refuses a binary whose
+            // signature does not verify against the controller key above.
+            'update_requested' => Device::updateRequested((int) $device['id']),
             'issued_at'   => gmdate('c'),
         ];
 

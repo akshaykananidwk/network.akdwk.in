@@ -233,6 +233,21 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__devices` (
   -- in a log file on the customer's machine is the same as no report at all.
   `problems_json` JSON NULL DEFAULT NULL,
   `problems_at` DATETIME NULL DEFAULT NULL,
+  -- When the agent process came up, from the uptime it reports. "Has it
+  -- restarted?" is where a support call starts, and a machine somebody
+  -- switches off at the wall every night looks exactly like one that has been
+  -- up for a month without it.
+  `agent_started_at` DATETIME NULL DEFAULT NULL,
+  -- The last thing the agent could not do, kept after it clears. problems_json
+  -- holds what is wrong NOW and empties when it stops, so the fault that was
+  -- happening when the customer rang leaves no trace by the time anybody looks.
+  `last_error` VARCHAR(500) NULL DEFAULT NULL,
+  `last_error_at` DATETIME NULL DEFAULT NULL,
+  -- An administrator pressed "Update now". The agent collects it on its next
+  -- configuration poll and the panel clears it; there is no channel from here
+  -- into a PC behind a shop router, and inventing one would be a far bigger
+  -- thing than this button.
+  `update_requested_at` DATETIME NULL DEFAULT NULL,
   `token_hash` CHAR(64) NULL,
   `token_rotated_at` DATETIME NULL,
   `config_revision` BIGINT UNSIGNED NOT NULL DEFAULT 0,

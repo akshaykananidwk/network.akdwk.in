@@ -248,6 +248,12 @@ final class AgentController
         // acted on.
         Device::recordProblems((int) $device['id'], self::sanitiseProblems($input['problems'] ?? null));
 
+        // How long the agent has been running, which is how the page answers
+        // "did it restart?" without anybody telephoning the customer.
+        if (isset($input['uptime_seconds'])) {
+            Device::recordAgentStart((int) $device['id'], (int) $input['uptime_seconds']);
+        }
+
         // Only relayed traffic is metered: direct peer-to-peer bytes never
         // touch our infrastructure, so billing for them would be dishonest.
         //

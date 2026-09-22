@@ -36,7 +36,14 @@ func (s *session) maybeUpdate(ctx context.Context) {
 	if os.Getenv("AKCONNECT_NO_AUTO_UPDATE") != "" {
 		return
 	}
-	if !s.updateDue() {
+	// An administrator who pressed "Update now" is waiting, so the timer does
+	// not apply — but the check is still the same one, through the same
+	// signature verification. There is no path here that installs anything the
+	// automatic check would refuse.
+	requested := s.updateRequested
+	s.updateRequested = false
+
+	if !requested && !s.updateDue() {
 		return
 	}
 
