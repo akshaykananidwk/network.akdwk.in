@@ -424,6 +424,17 @@ final class DeviceService
                 // falling back to sending one in the clear.
                 'public_key' => (string) CoordinatorSettings::current()['public_key'],
             ],
+            // Where the agent goes when the network it is on passes nothing
+            // but the port a browser uses.
+            //
+            // Published to every device rather than only to the ones that need
+            // it, because a device cannot know in advance which network it
+            // will be plugged into tomorrow — the laptop that worked on a
+            // phone hotspot all morning is the same laptop that fails on the
+            // office wifi after lunch.
+            'fallback'    => [
+                'url' => (string) CoordinatorSettings::current()['fallback_url'],
+            ],
             // The controller's ed25519 public half.
             //
             // Published so an agent can verify what it is given: the signature

@@ -64,6 +64,9 @@ type Config struct {
 		PublicKey string `json:"public_key"`
 	} `json:"coordinator"`
 
+	// Fallback is the HTTPS path, used when UDP does not work at all.
+	Fallback Fallback `json:"fallback"`
+
 	// Controller is the panel's own signing identity. A release is only
 	// installed if its digest carries a signature from this key, so a panel
 	// that publishes no key can offer no updates.
@@ -163,6 +166,13 @@ type Route struct {
 	// 192.168.1.50 is about the NVR, not about the reception PC that happens
 	// to route for it.
 	Filters []Filter `json:"filters"`
+}
+
+// Fallback is where the agent goes when UDP cannot leave the network.
+type Fallback struct {
+	// URL is the wss:// address the relay's HTTPS endpoint is served on.
+	// Empty on a panel that has not configured one, which disables the path.
+	URL string `json:"url"`
 }
 
 // Relay is a fallback path for peers that cannot connect directly.

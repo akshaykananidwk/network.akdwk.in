@@ -55,8 +55,39 @@ final class CoordinatorSettings
             'public_key'    => self::value('public_key', (string) Config::get('coordinator.public_key', '')),
             'shared_secret' => self::value('shared_secret', (string) Config::get('coordinator.shared_secret', '')),
             'signing_key'   => self::value('signing_key', (string) Config::get('coordinator.signing_key', '')),
+            'fallback_url'  => self::value('fallback_url', self::defaultFallbackUrl()),
         ];
     }
+
+    /**
+     * Where an agent goes when the network it is on passes nothing but 443.
+     *
+     * Derived from the panel's own address rather than asked for, because the
+     * installer already points Apache at the relay on that host and a customer
+     * who has to be told a second URL is a customer who will get it wrong. An
+     * administrator can still override it — a separate edge host is a
+     * perfectly reasonable deployment — but nobody has to.
+     */
+    public static function defaultFallbackUrl(): string
+    {
+        $base = trim((string) Config::get('app.url', ''));
+        if ($base === '') {
+            return '';
+        }
+
+        $host = (string) parse_url($base, PHP_URL_HOST);
+        if ($host === '') {
+            return '';
+        }
+
+        // wss:// and not ws://: the whole point is to look exactly like the
+        // browser traffic the network already allows, and an unencrypted
+        // upgrade on 443 does not.
+        return 'wss://' . $host . self::FALLBACK_PATH;
+    }
+
+    /** The path Apache proxies to the relay. install-edge.sh writes the same. */
+    public const FALLBACK_PATH = '/fallback';
 
     /** The address agents are told to talk to, which may differ from ours. */
     public static function agentHost(): string
@@ -109,6 +140,13 @@ final class CoordinatorSettings
                 . 'ending in "=", as printed by "akconnect-coordinator keygen".';
         }
 
+        $fallbackUrl = trim((string) ($input['fallback_url'] ?? ''));
+        if ($fallbackUrl !== '' && !self::plausibleFallbackUrl($fallbackUrl)) {
+            $errors['fallback_url'] = 'That must be a wss:// address, for example '
+                . 'wss://net.akdwk.in/fallback. It is where agents go when the network they are '
+                . 'on passes nothing but the port a browser uses.';
+        }
+
         $sharedSecret = trim((string) ($input['shared_secret'] ?? ''));
         if ($sharedSecret !== '' && strlen($sharedSecret) < 32) {
             $errors['shared_secret'] = 'The shared secret is too short to be the one install-edge.sh generated, '
@@ -123,6 +161,7 @@ final class CoordinatorSettings
         self::put('public_host', $publicHost);
         self::put('port', (string) $port);
         self::put('public_key', $publicKey);
+        self::put('fallback_url', $fallbackUrl);
 
         // Blank means "leave it alone", so an administrator editing the host
         // does not have to paste the secret again — and so the form can show a
@@ -181,6 +220,12 @@ final class CoordinatorSettings
             $problems[] = 'No shared secret is set, so the coordinator cannot authenticate to this panel.';
         }
 
+        if ((string) $current['fallback_url'] === '') {
+            $problems[] = 'No HTTPS fallback address is set. Devices on networks that pass nothing but '
+                . 'port 443 — hotel wifi, guest networks, offices that drop UDP replies — will not '
+                . 'connect at all.';
+        }
+
         return $problems;
     }
 
@@ -194,6 +239,24 @@ final class CoordinatorSettings
     private static function put(string $key, string $value): void
     {
         Setting::set(self::PREFIX . $key, $value, null, in_array($key, self::SECRETS, true));
+    }
+
+    /**
+     * Is this a fallback address an agent could actually use?
+     *
+     * Deliberately narrow. A ws:// address would work and must not be offered:
+     * it is cleartext on the one port every network inspects, and it would
+     * make the fallback the least private path in the product rather than
+     * the most ordinary-looking one.
+     */
+    private static function plausibleFallbackUrl(string $url): bool
+    {
+        $parts = parse_url($url);
+        if (!is_array($parts) || ($parts['scheme'] ?? '') !== 'wss') {
+            return false;
+        }
+
+        return ($parts['host'] ?? '') !== '' && self::plausibleHost((string) $parts['host']);
     }
 
     private static function plausibleHost(string $host): bool

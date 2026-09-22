@@ -17,6 +17,7 @@ import (
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/discovery"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/dnsd"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/fallback"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/keystore"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/netcfg"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
@@ -120,6 +121,9 @@ type session struct {
 	// a problem reported once and then forgotten is a problem nobody fixes.
 	refused   []netip.Prefix
 	discovery *discovery.Client
+	// fallback is the HTTPS path, built whenever the panel publishes an
+	// address for it and connected only when UDP stops working.
+	fallback *fallback.Client
 	// peerMeta maps a peer's hex public key to the names the panel gave it,
 	// which the WireGuard device itself does not carry.
 	peerMeta  map[string]peerNames

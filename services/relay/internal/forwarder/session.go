@@ -32,6 +32,15 @@ type side struct {
 	conn *net.UDPConn
 	port uint16
 
+	// tun is set when this end reached us over the HTTPS fallback instead of
+	// over UDP. Such a side has no socket and no port of its own: everything
+	// for it arrives on, and leaves by, one TLS connection it opened outwards.
+	//
+	// A pointer swapped atomically rather than a field under the mutex,
+	// because pump() consults it for every packet it forwards and must not
+	// contend with a bind for the session lock to do so.
+	tun atomic.Pointer[tunnel]
+
 	// addr is where this side's tunnel traffic must be sent.
 	//
 	// It starts as the address the bind arrived from, which is a guess: behind
@@ -46,6 +55,40 @@ type side struct {
 
 	rx atomic.Int64
 	tx atomic.Int64
+}
+
+// tunnel is the HTTPS path to one side.
+//
+// send must be safe to call from several goroutines; the websocket connection
+// underneath it is, and the relay relies on that — the peer's pump goroutine
+// and this side's own keepalives both write.
+type tunnel struct {
+	send func(peer [32]byte, payload []byte) error
+}
+
+// deliver hands one packet to this side by whichever path it is reachable on.
+//
+// The tunnel wins when both exist. A side that had to open an outbound TLS
+// connection did so because UDP did not reach it, and the stored UDP address
+// is at best stale; preferring it would send every packet into the same hole
+// that caused the fallback.
+func (sd *side) deliver(from [32]byte, p []byte) error {
+	if t := sd.tun.Load(); t != nil {
+		return t.send(from, p)
+	}
+
+	if sd.conn == nil {
+		return fmt.Errorf("that end has no path yet")
+	}
+
+	target := sd.addr.Load()
+	if target == nil {
+		return fmt.Errorf("that end has no address yet")
+	}
+
+	_, err := sd.conn.WriteToUDPAddrPort(p, *target)
+
+	return err
 }
 
 // Session is one relayed peer pair.
@@ -85,7 +128,9 @@ func (s *Session) Close() {
 	defer s.mu.Unlock()
 
 	for _, sd := range s.sides {
-		_ = sd.conn.Close()
+		if sd.conn != nil {
+			_ = sd.conn.Close()
+		}
 	}
 	s.sides = nil
 }
@@ -142,6 +187,17 @@ func (s *Session) bind(self [32]byte, from netip.AddrPort, ports dataPorts, logf
 
 		s.touch()
 
+		if existing.conn == nil {
+			// It reached us over the fallback first and is now binding over
+			// UDP, which means UDP started working again. Give it a socket so
+			// the other end can be forwarded to it the cheap way; the tunnel
+			// stays until a packet actually arrives on that socket, because
+			// until one does this is only a claim.
+			if err := s.openSocket(existing, ports, logf); err != nil {
+				return nil, err
+			}
+		}
+
 		return existing, nil
 	}
 
@@ -152,21 +208,115 @@ func (s *Session) bind(self [32]byte, from netip.AddrPort, ports dataPorts, logf
 		return nil, fmt.Errorf("pair already has two ends")
 	}
 
-	conn, err := ports.listen()
-	if err != nil {
+	sd := &side{key: self}
+	sd.addr.Store(&from)
+
+	if err := s.openSocket(sd, ports, logf); err != nil {
 		return nil, err
 	}
 
-	local := conn.LocalAddr().(*net.UDPAddr)
-
-	sd := &side{key: self, conn: conn, port: uint16(local.Port)}
-	sd.addr.Store(&from)
 	s.sides[self] = sd
 	s.touch()
 
+	return sd, nil
+}
+
+// openSocket gives a side its own UDP port and starts forwarding from it.
+// Called with the session lock held.
+func (s *Session) openSocket(sd *side, ports dataPorts, logf func(string, ...any)) error {
+	conn, err := ports.listen()
+	if err != nil {
+		return err
+	}
+
+	sd.conn = conn
+	sd.port = uint16(conn.LocalAddr().(*net.UDPAddr).Port)
+
 	go s.pump(sd, logf)
 
+	return nil
+}
+
+// bindTunnel attaches a side that reached us over the HTTPS fallback.
+//
+// It allocates no socket and no port: this end is not addressable from
+// outside, which is the whole reason it is here. The other end may still be an
+// ordinary UDP peer and never learns the difference.
+func (s *Session) bindTunnel(self [32]byte, t *tunnel, logf func(string, ...any)) (*side, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.sides == nil {
+		return nil, fmt.Errorf("session is closed")
+	}
+
+	if existing, ok := s.sides[self]; ok {
+		existing.tun.Store(t)
+		s.touch()
+
+		return existing, nil
+	}
+
+	if len(s.sides) >= 2 {
+		return nil, fmt.Errorf("pair already has two ends")
+	}
+
+	sd := &side{key: self}
+	sd.tun.Store(t)
+	s.sides[self] = sd
+	s.touch()
+
+	if logf != nil {
+		logf("pair %x… : one end is on the HTTPS fallback", s.PairID[:6])
+	}
+
 	return sd, nil
+}
+
+// dropTunnel detaches a fallback path that has gone away, but only if it is
+// still the current one. Without that check a connection closing after the
+// agent has already reconnected would tear down the new path with the old.
+func (s *Session) dropTunnel(self [32]byte, t *tunnel) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if sd, ok := s.sides[self]; ok {
+		sd.tun.CompareAndSwap(t, nil)
+	}
+}
+
+// fromTunnel forwards one packet that arrived over the fallback.
+//
+// The counterpart of pump() for a side with no socket to pump.
+func (s *Session) fromTunnel(self [32]byte, payload []byte) error {
+	s.mu.Lock()
+	sd := s.sides[self]
+	var peer *side
+	for key, other := range s.sides {
+		if key != self {
+			peer = other
+		}
+	}
+	s.mu.Unlock()
+
+	if sd == nil {
+		return fmt.Errorf("this end has not bound")
+	}
+	if peer == nil {
+		// The other end has not bound yet. Dropping is right for the same
+		// reason it is right in pump(): there is nowhere to put it.
+		return nil
+	}
+
+	if err := peer.deliver(self, payload); err != nil {
+		return err
+	}
+
+	sd.rx.Add(int64(len(payload)))
+	peer.tx.Add(int64(len(payload)))
+	s.touch()
+
+	return nil
 }
 
 // other returns the opposite end, or nil when it has not bound yet.
@@ -216,6 +366,14 @@ func (s *Session) pump(sd *side, logf func(string, ...any)) {
 		}
 		sd.learned.Store(true)
 
+		// Tunnel traffic arriving here means this end is reachable over UDP
+		// after all, so stop paying for TLS and a proxy hop. Dropping the
+		// tunnel is safe: the agent keeps the connection open and will re-bind
+		// over it the moment UDP stops working again.
+		if sd.tun.Swap(nil) != nil {
+			logf("pair %x… : an end came back to UDP; leaving the fallback", s.PairID[:6])
+		}
+
 		peer := s.other(sd.key)
 		if peer == nil {
 			// The other end has not bound yet. Dropping is correct: there is
@@ -224,13 +382,8 @@ func (s *Session) pump(sd *side, logf func(string, ...any)) {
 			continue
 		}
 
-		target := peer.addr.Load()
-		if target == nil {
-			continue
-		}
-
-		if _, err := peer.conn.WriteToUDPAddrPort(buf[:n], *target); err != nil {
-			logf("forwarding to %s failed: %v", target, err)
+		if err := peer.deliver(sd.key, buf[:n]); err != nil {
+			logf("forwarding across pair %x… failed: %v", s.PairID[:6], err)
 
 			continue
 		}

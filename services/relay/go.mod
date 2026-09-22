@@ -2,7 +2,10 @@ module github.com/akshaykananidwk/network.akdwk.in/services/relay
 
 go 1.24
 
-require github.com/akshaykananidwk/network.akdwk.in/services/shared v0.0.0
+require (
+	github.com/akshaykananidwk/network.akdwk.in/services/shared v0.0.0
+	github.com/coder/websocket v1.8.15
+)
 
 require (
 	golang.org/x/crypto v0.37.0 // indirect

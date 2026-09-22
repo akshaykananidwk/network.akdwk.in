@@ -13,6 +13,9 @@ require (
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 )
 
-require github.com/akshaykananidwk/network.akdwk.in/services/shared v0.0.0
+require (
+	github.com/akshaykananidwk/network.akdwk.in/services/shared v0.0.0
+	github.com/coder/websocket v1.8.15
+)
 
 replace github.com/akshaykananidwk/network.akdwk.in/services/shared => ../shared

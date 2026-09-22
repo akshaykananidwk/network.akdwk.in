@@ -75,6 +75,8 @@ func usage() {
     --idle DURATION  close a session idle this long (default 5m)
     --data-ports A-B  UDP range for data sockets, e.g. 51900-52400
     --name NAME      this relay's name, for logs and reporting
+    --ws-listen ADDR  plain-HTTP address for the HTTPS fallback, e.g. 127.0.0.1:9443
+    --ws-path PATH   path the fallback is served on (default /ws)
 
 Environment:
   AKCONNECT_RELAY_SECRET   shared with the coordinator; required
@@ -92,6 +94,9 @@ func runServe(args []string) error {
 	name := fs.String("name", "relay", "this relay's name")
 	dataPorts := fs.String("data-ports", "",
 		"UDP range data sockets may use, e.g. 51900-52400; empty lets the kernel choose")
+	wsListen := fs.String("ws-listen", "",
+		"address for the HTTPS fallback, e.g. 127.0.0.1:9443; empty disables it")
+	wsPath := fs.String("ws-path", "/ws", "path the fallback is served on")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -150,6 +155,24 @@ func runServe(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *wsListen != "" {
+		edge, err := relay.NewEdge(forwarder.EdgeOptions{Coordinator: *coordinator})
+		if err != nil {
+			return err
+		}
+
+		go func() {
+			if err := edge.Serve(ctx, *wsListen, *wsPath); err != nil {
+				// Fatal to the fallback, not to the relay: UDP sessions keep
+				// working, and saying so is better than exiting and taking
+				// them with it.
+				logf("the HTTPS fallback stopped: %v", err)
+			}
+		}()
+	} else {
+		logf("warning: no --ws-listen given, so devices on UDP-blocked networks cannot connect at all")
+	}
 
 	return relay.Run(ctx)
 }

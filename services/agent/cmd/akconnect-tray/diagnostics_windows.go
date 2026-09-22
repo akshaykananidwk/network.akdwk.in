@@ -49,18 +49,30 @@ func gatherSources() []source {
 		Text: about(),
 	}}
 
-	store, err := state.Open()
-	if err != nil {
-		return append(sources, source{Name: "status.txt", Text: "state directory unreadable: " + err.Error()})
+	// A failure here is reported and then stepped over rather than returned.
+	//
+	// It used to return, and a laptop whose state directory the tray could not
+	// open produced a bundle of two files — no log, and none of what Windows
+	// itself would have said about its adapters and its firewall. The parts
+	// that still work are exactly the parts that explain that kind of fault,
+	// so they are collected anyway.
+	if store, err := state.Open(); err != nil {
+		sources = append(sources, source{
+			Name: "status.txt",
+			Text: "state directory unreadable: " + err.Error() + "\n",
+		})
+	} else {
+		sources = append(sources, source{
+			Name: "status.json",
+			Path: filepath.Join(filepath.Dir(store.Path()), "runtime.json"),
+		})
 	}
 
+	// A megabyte from the end. A log that has been running since the machine
+	// was installed is not more useful for being complete, and an attachment
+	// nobody can email is not a diagnostic.
 	sources = append(sources,
-		source{Name: "status.json", Path: filepath.Join(filepath.Dir(store.Path()), "runtime.json")},
-		// A megabyte from the end. A log that has been running since the
-		// machine was installed is not more useful for being complete, and an
-		// attachment nobody can email is not a diagnostic.
-		source{Name: "service.log", Path: state.ServiceLogPath(), Limit: 1 << 20},
-	)
+		source{Name: "service.log", Path: state.ServiceLogPath(), Limit: 1 << 20})
 
 	// And what Windows knows that the agent does not: adapters, routes,
 	// firewall profiles and rules, and which process holds which UDP port.

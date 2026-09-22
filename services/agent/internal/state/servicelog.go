@@ -48,6 +48,17 @@ func OpenServiceLog() (*os.File, string, error) {
 		return nil, "", err
 	}
 
+	// The person at the machine has to be able to read it. Without this the
+	// log inherits the directory's administrators-only permissions and the
+	// tray's "collect diagnostics" produces a bundle whose log file says
+	// "Access is denied" — which is what a customer's laptop did. See
+	// readable_windows.go.
+	//
+	// Failing is not fatal. A log that is open and hard to collect is worth
+	// more than a service that refuses to start because it could not set a
+	// permission.
+	_ = allowLocalRead(path)
+
 	return file, path, nil
 }
 

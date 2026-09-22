@@ -81,6 +81,9 @@ func (s *session) startDiscovery(ctx context.Context, cfg *panel.Config, priv wg
 	go client.Run(ctx)
 
 	s.logf("discovery: announcing to the coordinator at %s", addr)
+
+	// And the path for networks where none of that will ever work.
+	s.startFallback(ctx, cfg, addr, [32]byte(pub))
 }
 
 // relayFleet turns the panel's relay list into addresses the agent can probe.

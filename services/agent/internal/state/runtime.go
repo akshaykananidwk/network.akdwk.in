@@ -123,6 +123,14 @@ func (s *Store) SaveRuntime(r *Runtime) error {
 		return err
 	}
 
+	// Before the rename, so the file that lands is already readable. The
+	// status file is what the tray shows and what a support bundle carries,
+	// and it lives in a directory locked to administrators because the device
+	// key is in there too. See readable_windows.go.
+	if err := allowLocalRead(tmp); err != nil {
+		return err
+	}
+
 	return os.Rename(tmp, path)
 }
 

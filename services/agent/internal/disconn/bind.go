@@ -14,6 +14,7 @@ package disconn
 import (
 	"net/netip"
 	"sync"
+	"sync/atomic"
 
 	"golang.zx2c4.com/wireguard/conn"
 
@@ -32,11 +33,30 @@ type Bind struct {
 	mu      sync.RWMutex
 	handler Handler
 	port    uint16
+
+	// route is the HTTPS fallback's diversion table, swapped whole rather
+	// than locked. Send consults it for every batch WireGuard hands over, and
+	// a lock there would be contended by every packet on a machine that has
+	// no fallback at all — which is almost all of them.
+	route atomic.Pointer[routing]
+
+	// injected carries packets that arrived over the fallback into
+	// wireguard-go, through a receive function of their own. Buffered and
+	// lossy on purpose: this is a datagram path, and blocking the reader that
+	// feeds it would stall every other session on the same connection.
+	injected chan injected
+	// closed is closed by Close so the injecting receive function stops.
+	// Replaced on each Open, because wireguard-go opens and closes a bind
+	// repeatedly over one device's life.
+	closed chan struct{}
 }
 
 // New wraps the platform's default bind.
 func New() *Bind {
-	return &Bind{inner: conn.NewDefaultBind()}
+	return &Bind{
+		inner:    conn.NewDefaultBind(),
+		injected: make(chan injected, injectQueue),
+	}
 }
 
 // SetHandler installs the discovery handler. It may be called before or after
@@ -66,12 +86,20 @@ func (b *Bind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	b.port = actual
 	b.mu.Unlock()
 
-	wrapped := make([]conn.ReceiveFunc, len(fns))
-	for i, fn := range fns {
-		wrapped[i] = b.intercept(fn)
+	wrapped := make([]conn.ReceiveFunc, 0, len(fns)+1)
+	for _, fn := range fns {
+		wrapped = append(wrapped, b.intercept(fn))
 	}
 
-	return wrapped, actual, nil
+	// One more source of packets than the socket: anything arriving over the
+	// HTTPS fallback enters here. wireguard-go treats it exactly like a
+	// receive function reading a socket, which is what keeps the fallback
+	// invisible to everything above this line.
+	b.mu.Lock()
+	b.closed = make(chan struct{})
+	b.mu.Unlock()
+
+	return append(wrapped, b.receiveInjected), actual, nil
 }
 
 // intercept sifts discovery packets out of a batch.
@@ -130,19 +158,58 @@ func (b *Bind) dispatch(pkt []byte, from netip.AddrPort) {
 // Send passes through, which is what lets discovery reuse the socket: a
 // discovery packet is sent with the same Send as a WireGuard one, so it leaves
 // through the same NAT mapping.
-func (b *Bind) Send(bufs [][]byte, ep conn.Endpoint) error { return b.inner.Send(bufs, ep) }
+//
+// The exception is a peer whose endpoint is one of the fallback's pseudo
+// addresses, which is not a real address and must never reach a socket.
+func (b *Bind) Send(bufs [][]byte, ep conn.Endpoint) error {
+	if route := b.route.Load(); route != nil && len(route.peers) > 0 {
+		if peer, ok := route.peers[endpointAddrPort(ep)]; ok {
+			return route.sendTunnel(peer, bufs)
+		}
+	}
+
+	return b.inner.Send(bufs, ep)
+}
 
 // SendTo sends a discovery packet to a raw address.
+//
+// While the fallback is carrying control, a packet for the coordinator or a
+// relay goes out over both paths. That is not belt and braces: the UDP copy is
+// how the agent finds out that UDP has started working again, and without it
+// a device would stay on the fallback until it was restarted.
 func (b *Bind) SendTo(pkt []byte, to netip.AddrPort) error {
+	route := b.route.Load()
+	diverted := route.diverts(pkt, to)
+
+	if diverted {
+		if err := route.tunnel.SendControl(pkt, to); err != nil {
+			return err
+		}
+	}
+
 	ep, err := b.inner.ParseEndpoint(to.String())
 	if err != nil {
 		return err
 	}
 
-	return b.inner.Send([][]byte{pkt}, ep)
+	if err := b.inner.Send([][]byte{pkt}, ep); err != nil && !diverted {
+		return err
+	}
+
+	return nil
 }
 
-func (b *Bind) Close() error                                  { return b.inner.Close() }
+func (b *Bind) Close() error {
+	b.mu.Lock()
+	if b.closed != nil {
+		close(b.closed)
+		b.closed = nil
+	}
+	b.mu.Unlock()
+
+	return b.inner.Close()
+}
+
 func (b *Bind) SetMark(mark uint32) error                     { return b.inner.SetMark(mark) }
 func (b *Bind) ParseEndpoint(s string) (conn.Endpoint, error) { return b.inner.ParseEndpoint(s) }
 func (b *Bind) BatchSize() int                                { return b.inner.BatchSize() }
