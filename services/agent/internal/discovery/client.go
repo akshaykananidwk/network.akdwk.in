@@ -391,13 +391,26 @@ func (c *Client) announce(full bool) {
 		return
 	}
 
+	// Counted BEFORE the send, not after.
+	//
+	// The coordinator's answer arrives on another goroutine, and on a fast
+	// path it can be processed before this one gets to the next line — so
+	// counting afterwards could set the counter to 1 immediately after the
+	// ack had cleared it, leaving the agent convinced it had never been
+	// answered. It then re-announces every five seconds for ever and, given
+	// enough of them, moves to a different port on a link that was working.
+	//
+	// A send that fails is undone below, because a failed send is not an
+	// announcement that went unanswered: that is the dead socket, and it has
+	// its own detector.
+	c.noteAnnouncementSent()
+
 	if err := c.opts.Transport.SendTo(pkt, c.opts.Coordinator); err != nil {
+		c.undoAnnouncementSent()
 		c.noteSendFailure(err)
 
 		return
 	}
-
-	c.noteAnnouncementSent()
 
 	c.mu.Lock()
 	recovered := c.sendFailures > 0 || c.rebinds > 0

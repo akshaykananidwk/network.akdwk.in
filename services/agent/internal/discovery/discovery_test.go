@@ -22,6 +22,10 @@ type fakeTransport struct {
 	// failWith is returned by SendTo instead of sending, so a socket that has
 	// died underneath the agent can be reproduced.
 	failWith error
+	// onSend runs while the send is in flight. It is how the test reproduces
+	// an answer that arrives before the sending side has finished bookkeeping,
+	// which on a real machine is two goroutines and a fast network.
+	onSend func()
 }
 
 type sentPacket struct {
@@ -37,7 +41,12 @@ func (f *fakeTransport) SendTo(pkt []byte, to netip.AddrPort) error {
 
 		return err
 	}
+	hook := f.onSend
 	f.mu.Unlock()
+
+	if hook != nil {
+		hook()
+	}
 
 	header, _, err := disco.ParseHeader(pkt)
 	if err != nil {

@@ -202,3 +202,46 @@ func TestTheBackoffNeverReachesZero(t *testing.T) {
 		t.Fatal("the threshold does not rise with each move")
 	}
 }
+
+// The coordinator's answer can arrive before the sending side has finished
+// counting the announcement.
+//
+// The ack is handled on another goroutine, and on a fast path — a lab, a LAN,
+// localhost — it lands in microseconds. Counting the announcement AFTER the
+// send meant the counter could be cleared by the ack and then set to one, and
+// it stayed at one for ever: the agent re-announced every five seconds
+// indefinitely and, given enough of them, moved to a different port on a link
+// that was working perfectly.
+//
+// The release gate caught it as "21 hellos — an agent that is not being
+// answered re-announces forever", on an agent that was being answered every
+// time.
+func TestAnAnswerThatArrivesDuringTheSendStillCounts(t *testing.T) {
+	h := newHarness(t)
+
+	moves := 0
+	h.client.opts.MovePort = func() (int, []netip.AddrPort, error) { moves++; return 50001, nil, nil }
+
+	// The worst case, made deterministic: the answer is delivered from inside
+	// the send itself.
+	h.transport.mu.Lock()
+	h.transport.onSend = func() { h.deliverAck(t) }
+	h.transport.mu.Unlock()
+
+	for i := 0; i < 10; i++ {
+		h.client.announce(true)
+		h.client.maybeMovePort()
+	}
+
+	h.client.mu.Lock()
+	unacked := h.client.unacked
+	h.client.mu.Unlock()
+
+	if unacked != 0 {
+		t.Fatalf("%d unanswered announcements after 10 that were all answered", unacked)
+	}
+
+	if moves != 0 {
+		t.Fatalf("the port moved %d time(s) on a link that answered every announcement", moves)
+	}
+}

@@ -55,6 +55,16 @@ func (c *Client) noteAnnouncementSent() {
 	c.mu.Unlock()
 }
 
+// undoAnnouncementSent takes back a count for an announcement that never left
+// the socket.
+func (c *Client) undoAnnouncementSent() {
+	c.mu.Lock()
+	if c.unacked > 0 {
+		c.unacked--
+	}
+	c.mu.Unlock()
+}
+
 // noteAnswered records that the coordinator replied, which proves the whole
 // path out of this machine works: socket, port, router and all.
 func (c *Client) noteAnswered() {

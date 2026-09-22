@@ -136,12 +136,39 @@ apply_nat_mode() {
         return
     fi
 
-    # Outbound from the agent's port keeps that port.
+    # A full cone for WHATEVER port the agent uses.
+    #
+    # These two rules used to name 51820 on both sides, because every agent
+    # used 51820. Since defect 23 each device picks its own port out of the
+    # ephemeral range, and an agent on 52278 matched neither rule — it fell
+    # through to the plain MASQUERADE below, which is a RESTRICTED cone: the
+    # mapping exists, but only for the host the agent has already sent to.
+    #
+    # So the scenarios that say "cone NAT — both sides punchable" were quietly
+    # testing something else, and the ACL drills that depend on a direct path
+    # existing within a few seconds started failing. A lab that says cone and
+    # gives you restricted cone is the same false-pass class as a gate that
+    # prints PASS after a failed preflight.
+    #
+    # The range is state.ChooseListenPort's, plus 51820 for agents old enough
+    # to still use it.
+    local ports="49152:60999"
+
+    # Outbound from the agent's port keeps that port. SNAT to an address with
+    # no port preserves the source port when it is free, which it is.
+    ip netns exec "$gw" iptables -t nat -A POSTROUTING -s "$host" -p udp --sport "$ports" \
+        -o "wan-$gw" -j SNAT --to-source "$wan"
     ip netns exec "$gw" iptables -t nat -A POSTROUTING -s "$host" -p udp --sport 51820 \
         -o "wan-$gw" -j SNAT --to-source "$wan:51820"
-    # Inbound to it reaches the agent, whoever sent it.
+
+    # Inbound to it reaches the agent, whoever sent it — which is what makes
+    # this a full cone rather than a restricted one. DNAT with no port keeps
+    # the destination port.
+    ip netns exec "$gw" iptables -t nat -A PREROUTING -d "$wan" -p udp --dport "$ports" \
+        -i "wan-$gw" -j DNAT --to-destination "$host"
     ip netns exec "$gw" iptables -t nat -A PREROUTING -d "$wan" -p udp --dport 51820 \
         -i "wan-$gw" -j DNAT --to-destination "$host:51820"
+
     # Everything else is ordinary masquerading.
     ip netns exec "$gw" iptables -t nat -A POSTROUTING -s "$private.0/24" \
         -o "wan-$gw" -j MASQUERADE

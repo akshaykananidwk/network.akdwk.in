@@ -236,8 +236,16 @@ apply_nat_mode_in() {
         return
     fi
 
+    # A full cone for whatever port the agent uses — see apply_nat_mode in
+    # topology.sh for why naming 51820 alone stopped being enough.
+    local ports="49152:60999"
+
+    ip netns exec "$gw" iptables -t nat -A POSTROUTING -s "$host" -p udp --sport "$ports" \
+        -o "wan-$gw" -j SNAT --to-source "$wan"
     ip netns exec "$gw" iptables -t nat -A POSTROUTING -s "$host" -p udp --sport 51820 \
         -o "wan-$gw" -j SNAT --to-source "$wan:51820"
+    ip netns exec "$gw" iptables -t nat -A PREROUTING -d "$wan" -p udp --dport "$ports" \
+        -i "wan-$gw" -j DNAT --to-destination "$host"
     ip netns exec "$gw" iptables -t nat -A PREROUTING -d "$wan" -p udp --dport 51820 \
         -i "wan-$gw" -j DNAT --to-destination "$host:51820"
     ip netns exec "$gw" iptables -t nat -A POSTROUTING -s "$private.0/24" \
