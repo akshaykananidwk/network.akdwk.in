@@ -593,14 +593,43 @@ is the URL to give a customer: it is stamped for your panel and comes from the
 release the panel is actually running. There is no copy in the repository any
 more.
 
-**To stop doing this by hand:**
+**This already stops itself being a manual job.** Since 1.9.5 the script
+installs a systemd timer on every run, which checks this panel hourly and
+upgrades the edge whenever the panel moves to a new release. An edge that is
+only upgraded when somebody remembers to log in runs an old coordinator for
+months, and you find out when two customers cannot connect rather than when
+the release is published.
+
+To manage the scheduling yourself instead:
 
 ```bash
-sudo /opt/akconnect/src/deploy/upgrade-edge.sh --install-timer
+sudo /opt/akconnect/src/deploy/upgrade-edge.sh --no-timer
 ```
 
-That installs a systemd timer which checks this panel hourly and upgrades the
-edge whenever the panel moves to a new release.
+It then says so in its summary, as an INFO row, so a future you can see why
+the edge is not keeping itself current.
+
+### A second relay
+
+One relay is a single point of failure for every pair that cannot punch
+through their routers — a CGNAT customer, a hotel with a symmetric NAT — and
+it is also one region. A relay in the city where the customers are is the
+difference between a camera feed that plays and one that stutters.
+
+On the NEW relay's server, as root:
+
+```bash
+sudo /opt/akconnect/src/deploy/add-relay.sh \
+     --name mumbai-2 --public-host relay2.akdwk.in \
+     --coordinator edge.akdwk.in:8443 --region in-west
+```
+
+It installs and starts the relay, then prints the two lines to add to
+`/etc/akconnect/coordinator.env` on the EDGE server and what to type under
+Platform → Relays. It cannot reach the edge or the panel itself: that machine
+is given a secret and a name, and never a credential for anything else.
+
+Open on the new server: UDP 9000, and UDP 51900–52400 for the data sockets.
 
 ### Why the panel's Update Now does not do this for you
 
