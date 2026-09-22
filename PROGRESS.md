@@ -313,10 +313,30 @@ web browser works on, with nothing configured, like Tailscale and ZeroTier.
   seconds later, with nothing restarted**. A fourth is the laptop's own story
   — a pair connected and settled on a working network, and then the router
   starts dropping UDP under it.
-* **Apache configured automatically**, by version — `mod_proxy_wstunnel`
-  below 2.4.47, `upgrade=websocket` on `mod_proxy_http` from it — with the
-  module checked as loaded rather than assumed, because `<IfModule>` would
-  have made a missing one silent.
+* **Apache configured on request only, into one virtual host.** The panel's
+  own VPS carries thirty other people's websites on the same Apache, so this
+  is the one part of the release that touches something the customer did not
+  install. `--configure-apache` at a terminal is the only way in — the hourly
+  timer refuses even when handed the flag — and it prints the file, the block
+  and the three lines and waits for a yes. The block is found by parsing the
+  virtual hosts, so a commented directive is not configuration and a
+  neighbour parking the domain as a `ServerAlias` is not a match. Every
+  `ServerName` on the machine is asked for `/` and `/fallback/health`, over
+  TLS and over port 80, before and after; any difference rolls everything
+  back from timestamped copies and fails. The module choice is still made by
+  version — `mod_proxy_wstunnel` below 2.4.47, `upgrade=websocket` on
+  `mod_proxy_http` from it — with the module checked as loaded rather than
+  assumed, because `<IfModule>` would have made a missing one silent.
+  `deploy/remove-apache-fallback.sh` undoes all of it.
+* **Two adversarial reviews of that change, the second of which finished.**
+  The first found three scope leaks and four rollback defects, and 16 of its
+  18 agents died on a session limit — so it is recorded as an incomplete run
+  rather than as a result. The second ran on the fixed code with 30 agents,
+  all 30 completing, and found twelve more: the library taking the caller's
+  one EXIT trap, a rollback failure count that was always zero, `--panel` as
+  the last argument spinning for ever, and `install-edge.sh` editing Apache
+  with no flag at all. `edge-script-gate.sh` is 97 checks now, and eleven of
+  the twelve new ones are red against the code as it stood before.
 * **The automatic self-update path**, which is the one that failed in the
   field and the one nothing tested: everything before this ran `agent
   update`, which is a person typing a command, and nobody typed a command on
@@ -339,6 +359,12 @@ web browser works on, with nothing configured, like Tailscale and ZeroTier.
 * `RelayProbe` latency measurement is not diverted over the fallback, so a
   device on it reports relays as unreachable and the coordinator picks from
   the other end's measurements. Honest, and it costs a better choice of relay.
+* **No Apache has run any of this.** `edge-script-gate.sh` drives the real
+  scripts against a fixture shaped like the production server, which is why
+  it can catch a scope leak at all — but there is no Apache in this
+  environment to reload, so the reload, the module loading and the live probe
+  are stubbed. The first `--configure-apache` on the real machine is the
+  first time any of it meets Apache.
 
 ---
 

@@ -85,6 +85,18 @@ whose service needs a new flag would have installed the binary and left the old
 unit behind — which 1.9.6 is exactly: the fallback is switched on by
 `--ws-listen`.
 
+**The panel and the coordinator could hold different keys and say nothing.**
+An agent seals its announcement to the public key the panel hands it. If that
+is not the key the coordinator is running, the coordinator cannot open a single
+one — and dropping an unopenable packet without a word is exactly what a socket
+on the public internet must do. So the fault has no symptom at all: every
+device configured, connected to the panel, reporting healthy, and mute. The
+coordinator now reports which key it holds on the authenticated call it already
+makes, and the settings page says when that is not the key it publishes. Found
+when the settings table, which outranks the configuration file by design, was
+left holding a test fixture and thirty-two lab scenarios failed with nothing in
+any log.
+
 **The installer announced success because its calls returned.** It now reads
 back what happened and says which situation this is — waiting for approval, the
 only machine on the network, connected only over HTTPS — and writes a

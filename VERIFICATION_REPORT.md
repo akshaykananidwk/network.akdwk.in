@@ -437,7 +437,141 @@ the way the service starts it, and waits:
   18 passed, 0 failed
 ```
 
-### L.5 — What 1.9.6 does not show
+### L.5 — The Apache change, on a server with thirty other people's websites
+
+The panel's own VPS runs aaPanel with more than thirty live sites on the same
+Apache. Everything above needed three lines of proxy configuration on that
+machine, and the first version of them was written the way such things usually
+are: append an `IncludeOptional` to `httpd.conf`, reload, done. At server level
+`ProxyPass` is inherited by every virtual host on the box, so that version
+would have published `/fallback` on all thirty-odd customer sites. It never ran
+anywhere. It was still wrong enough to be worth stating plainly, and it is why
+everything below exists.
+
+What replaced it is drilled in `edge-script-gate.sh` against a fixture shaped
+like the real server — thirty-one site files, a neighbouring site parking the
+panel's domain as a `ServerAlias`, a bundle file holding two unrelated TLS
+hosts, and the panel's own `:80` block carrying the commented-out `#SSL-START`
+stanza aaPanel leaves behind.
+
+**It is scoped to one virtual host.** The three lines go inside the TLS block
+whose own `ServerName` is the panel's domain, and nowhere else. Finding that
+block means parsing the file rather than matching text in it: an awk state
+machine walks `<VirtualHost>` openings and closings, joins backslash-continued
+directives, strips the `:port` Apache strips, and drops comment lines before
+anything else looks at them. A commented `SSLEngine on` is therefore not a TLS
+block, and a `ServerAlias network.akdwk.in` in a customer's file is not a
+match — the script refuses and names the file it found it in.
+
+**The unattended timer cannot touch Apache at all.** Configuration happens only
+when a person runs `upgrade-edge.sh --configure-apache` or `install-edge.sh
+--configure-apache` at a terminal. The hourly timer reports `Apache fallback
+not configured yet` and ends PARTIAL. The decision function returns "no" for an
+unattended run before it looks at what was asked, so passing the flag from a
+timer still does nothing; `INVOCATION_ID` catches a unit from an older release
+that has not learned to pass `--unattended`. With no controlling terminal it
+refuses outright.
+
+**It prints what it will do and waits.** The exact file, the line range of the
+block, and the three lines — then a yes/no on the terminal.
+
+**Every site is probed before and after.** Each `ServerName` the machine serves
+is asked three questions: `/` over TLS, `/fallback/health` over TLS, and
+`/fallback/health` over port 80. Any status that changes for any name, or a
+name that appears or disappears, rolls every edited file back from its
+timestamped copy and fails the run. Afterwards the panel must answer the
+fallback **from the relay** — the relay names itself on the health line, because
+this panel has a front controller and answers 200 for paths it has never heard
+of — no other name may answer it, and no name at all may answer it in
+cleartext. A request naming no site is made too, because the block the include
+went into could be Apache's default for its address and port, which no probe by
+name can see.
+
+**It is reversible.** `deploy/remove-apache-fallback.sh` removes the block from
+every file on the machine that carries it, removes the generated configuration,
+probes before and after the same way, and rolls back if anything moved.
+`LoadModule` lines are left alone, because another site may be proxying through
+the same modules — but the modules this product enabled are now recorded, so it
+can say which of them were its own.
+
+#### The two reviews, and what the second one found
+
+The first adversarial review of this code found three scope leaks — the file
+chosen by any `ServerName` or `ServerAlias` match, the first block mentioning
+SSL taken as the TLS one, commented directives counted as configuration — and
+four defects in the rollback. **That review must not be read as a result: 16 of
+its 18 agents died on a session limit, and "0 confirmed" from a crashed run is
+not a finding of no problems.**
+
+The second review was run on the fixed code and completed: **30 agents
+launched, 30 finished, 0 errored, 0 skipped**, six lenses, every finding handed
+to a verifier prompted to refute it. Three survived refutation; nine more were
+confirmed against the code directly while the verifiers were still running.
+
+The two worst were the same shape — a guard that reported success whatever
+happened.
+
+**The library took the EXIT trap.** A shell has one. `upgrade-edge.sh` installs
+its own at the top, and it is the only thing that prints the results table,
+removes the temporary files, and decides the exit status: the script's last
+line is `REACHED_END=1` and there is no explicit exit anywhere. So a confirmed
+`--configure-apache` run finished silently and exited 0 whatever else in the
+upgrade had failed. The rollback now takes INT, TERM and HUP, and its handler
+exits rather than returning — a bash signal handler that returns resumes the
+script at the next command, so Ctrl-C used to roll everything back, disarm
+itself, and carry straight on re-applying the change with nothing left to undo
+it.
+
+**The failure count was always zero.** `akconnect_apache_undo` read the
+rollback's status with `$?` after the `fi` of an `if` whose condition was the
+rollback — and an `if` with a false condition and no `else` exits 0. The one
+branch that exists to say a restore failed always said "0 file(s) could NOT be
+put back", which is the reading most likely to stop somebody opening the
+manifest while a customer's virtual host sits half-edited. It is the second
+time this particular message has been wrong: the version before it said
+everything had been put back whatever happened.
+
+The rest, in the order they would bite:
+
+* **`--panel` as the last argument hung the script in an infinite loop.**
+  `shift 2` with one argument left is out of range: bash returns non-zero and
+  leaves the positional parameters *completely unchanged* rather than shifting
+  by one. Nothing sets `-e`, so `$1` is still `--panel` and the arm runs for
+  ever on builtins — pinning a core on the machine serving thirty customer
+  sites, before the root check, with nothing printed to say why.
+  `--panel $URL` unquoted with `URL` unset does it too.
+* **`install-edge.sh` edited Apache on every run, with no flag at all.**
+* **A site that already answered 200 for an unknown path was called a leak**
+  and rolled the change back over it. On this machine there are thirty
+  candidates for that.
+* **The restore path could destroy the file it was saving.** `cp` opens the
+  destination with `O_TRUNC`; every other write here had been moved to
+  temp-file-and-rename for exactly that reason.
+* **Names Apache serves were silently exempt from the comparison** —
+  `ServerName host:443`, and every name after the first in a continued
+  `ServerAlias`.
+* **`mktemp` was unchecked**, and set-but-empty passes `set -u`: the probes
+  write nothing, the comparison finds no differences, and the run reports that
+  every site answers as before without having asked any of them.
+* **Apache was reloaded immediately after a rollback reported it had failed**,
+  one line below telling the operator not to reload until the files were back.
+* **`a2enmod`'s changes were recorded nowhere and undone by nothing.**
+* **`test -r /dev/tty` is true for every process on the machine** — it is a
+  0666 device and `test -r` is an `access(2)` check on the path, not a question
+  about a controlling terminal. The refusal was unreachable. It refused anyway,
+  because the read failed, printing a raw shell error over the message.
+* **A partial removal died with the first file edited and nothing put back** —
+  in the script that exists for the case where more than one file carries the
+  block.
+* **The panel's own file was described as somebody else's site** when the
+  domain had a virtual host but no certificate.
+
+`edge-script-gate.sh` now runs 97 checks. Twelve are new, and eleven of them are
+red against the code as it stood before the fixes — checked by putting the old
+files back and running the gate. The twelfth is not a regression test and is
+not presented as one: the no-terminal confirmation always refused, by accident.
+
+### L.6 — What 1.9.6 does not show
 
 * **The lab proves the fallback over `ws://` through a plain TCP proxy**, which
   is the production shape minus the TLS: the relay on loopback, something else
