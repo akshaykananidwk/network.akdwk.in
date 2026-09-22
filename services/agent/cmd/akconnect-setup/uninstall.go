@@ -19,7 +19,7 @@ import (
 // Every step is best-effort and recorded. One failure must not stop the
 // others: a machine where the service had already been removed by hand still
 // needs its firewall rule taken away.
-func runUninstall(ui *console) error {
+func runUninstall(ui *console, managed bool) error {
 	dir := installDir()
 	var problems []string
 
@@ -77,8 +77,13 @@ func runUninstall(ui *console) error {
 	ui.step("Removing the Start menu entry")
 	note("the Start menu entry and the sign-in icon", removeShortcuts(), "Start menu")
 
-	ui.step("Removing the entry in Settings")
-	note("the entry in Settings \u2192 Apps", unregisterFromPrograms(), "Apps & features")
+	if !managed {
+		// When a deployment package installed this, the entry in Settings is
+		// its own and it removes it itself. Claiming to have removed one that
+		// was never ours would be a line in the list that is not true.
+		ui.step("Removing the entry in Settings")
+		note("the entry in Settings \u2192 Apps", unregisterFromPrograms(), "Apps & features")
+	}
 
 	ui.step("Removing the files")
 	// The data directory holds the device's private key and its token. It goes

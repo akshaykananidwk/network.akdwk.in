@@ -79,7 +79,11 @@ func main() {
 		name      = flag.String("name", "", "device name to show in the panel (default: this computer's name)")
 		silent    = flag.Bool("silent", false, "no dialogs; for deployment tools")
 		force     = flag.Bool("force", false, "install even when a newer version is already here")
-		showVer   = flag.Bool("version", false, "print the version and exit")
+		// Set by the MSI wrapper, which owns the Apps & features entry
+		// itself. Two entries for one program is worse than none: removing
+		// either of them leaves the other pointing at nothing.
+		managed = flag.Bool("managed", false, "a deployment package owns the Settings entry; do not write one")
+		showVer = flag.Bool("version", false, "print the version and exit")
 	)
 
 	// /S /CODE=ABCD-1234 as well as -silent -code=ABCD-1234, because every
@@ -102,6 +106,7 @@ func main() {
 		panelURL:  *panelURL,
 		name:      *name,
 		force:     *force,
+		managed:   *managed,
 	}); err != nil {
 		ui.fail(err.Error())
 		os.Exit(1)
@@ -121,6 +126,7 @@ type options struct {
 	panelURL  string
 	name      string
 	force     bool
+	managed   bool
 }
 
 func runSetup(ui *console, opt options) error {
@@ -140,7 +146,7 @@ func runSetup(ui *console, opt options) error {
 	}
 
 	if opt.uninstall {
-		return runUninstall(ui)
+		return runUninstall(ui, opt.managed)
 	}
 
 	if err := checkPayload(); err != nil {
@@ -192,7 +198,7 @@ func runSetup(ui *console, opt options) error {
 		return err
 	}
 
-	return runInstall(ui, code, panelURL, opt.name)
+	return runInstall(ui, code, panelURL, opt.name, opt.managed)
 }
 
 // checkPanelURL refuses an address that cannot work, before anything is

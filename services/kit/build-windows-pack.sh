@@ -169,6 +169,65 @@ agent_size="$(stat -c%s "$STAGE/akconnect-agent.exe")"
 [ "$setup_size" -gt "$agent_size" ] \
     || die "akconnect-setup.exe ($setup_size bytes) is not larger than the agent it should contain ($agent_size)"
 
+# Code signing, when a certificate is configured.
+#
+# Every one of these files is an unsigned executable today, which means
+# SmartScreen shows "Windows protected your PC" the first time a customer runs
+# it and the sentence under it names an unknown publisher. That is the single
+# biggest thing standing between this and looking like a normal product, and it
+# is bought, not built: an OV or EV code-signing certificate.
+#
+# So the pipeline is ready for one and says plainly when there is none. Set
+# AKCONNECT_SIGN_CMD to a command taking one file:
+#
+#   export AKCONNECT_SIGN_CMD='osslsigncode sign -pkcs11module ... -in {} -out {}.signed'
+#   export AKCONNECT_SIGN_CMD='signtool sign /fd sha256 /tr http://ts.example /td sha256 {}'
+#
+# Nothing is invented here: no key is generated, no certificate is created,
+# and a signing command that fails fails the build rather than shipping
+# something that looks signed and is not.
+sign_artifacts() {
+    local signed=0
+
+    if [ -z "${AKCONNECT_SIGN_CMD:-}" ]; then
+        echo "  ! unsigned: no AKCONNECT_SIGN_CMD is set."
+        echo "    Customers will see SmartScreen's \"unknown publisher\" warning."
+
+        return 0
+    fi
+
+    echo "  signing with \$AKCONNECT_SIGN_CMD"
+    local file
+    for file in "$STAGE/akconnect-setup.exe" "$STAGE/akconnect-agent.exe" \
+                "$STAGE/akconnect-tray.exe" "$STAGE/arm64/akconnect-setup.exe" \
+                "$STAGE/arm64/akconnect-agent.exe" "$STAGE/arm64/akconnect-tray.exe"; do
+        [ -f "$file" ] || continue
+        # shellcheck disable=SC2086
+        ${AKCONNECT_SIGN_CMD//\{\}/$file} \
+            || die "signing $file failed. Nothing ships half-signed."
+        signed=$((signed + 1))
+    done
+
+    echo "  signed $signed file(s)"
+}
+
+sign_artifacts
+
+# The MSI, for deployment tools. Optional: wixl is not on every build machine,
+# and an edge upgrade must not fail for want of a deployment convenience.
+echo "  building the MSI"
+msi_status="not built"
+if "$ROOT/services/kit/msi/build-msi.sh" "$STAGE/akconnect-setup.exe" "$VERSION" \
+       "$STAGE/AKConnect.msi" x64; then
+    "$ROOT/services/kit/msi/check-msi.sh" "$STAGE/AKConnect.msi" \
+        || die "the MSI built but does not say what it must say; see the failures above"
+    msi_status="built and checked"
+else
+    rc=$?
+    [ "$rc" -eq 2 ] || die "the MSI build failed"
+    msi_status="skipped (wixl is not installed)"
+fi
+
 echo "  adding the runbook and scripts"
 cp "$ROOT/services/kit/WINDOWS-RUNBOOK.md"  "$STAGE/RUNBOOK.md"
 cp "$ROOT/services/kit/collect.ps1"         "$STAGE/"
@@ -183,5 +242,11 @@ echo "  pack: $OUT"
 echo "  size: $(du -h "$OUT" | cut -f1)"
 echo "  sha256: $(sha256sum "$OUT" | cut -d' ' -f1)"
 echo
-echo "  Contains an unsigned agent and WireGuard LLC's signed wintun.dll,"
+echo "  msi: $msi_status"
+echo
+if [ -z "${AKCONNECT_SIGN_CMD:-}" ]; then
+echo "  Contains an UNSIGNED agent and WireGuard LLC's signed wintun.dll,"
+else
+echo "  Contains a signed agent and WireGuard LLC's signed wintun.dll,"
+fi
 echo "  redistributed under clause 3(d) of its prebuilt binaries licence."

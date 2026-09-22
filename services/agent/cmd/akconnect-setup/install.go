@@ -29,7 +29,7 @@ func dataDir() string {
 	return filepath.Join(base, productName)
 }
 
-func runInstall(ui *console, code, panelURL, name string) error {
+func runInstall(ui *console, code, panelURL, name string, managed bool) error {
 	dir := installDir()
 
 	ui.step("Installing to " + dir)
@@ -170,7 +170,10 @@ func runInstall(ui *console, code, panelURL, name string) error {
 	// Listed in Settings → Apps like any other program, with a working
 	// uninstall button. Done after the service is up rather than before, so a
 	// failed install does not leave an entry for something that is not there.
-	if err := registerInPrograms(dir, setupPath); err != nil {
+	if managed {
+		// A deployment package put this here and lists it in Settings itself.
+		ui.step("Installed; the deployment package owns the Settings entry")
+	} else if err := registerInPrograms(dir, setupPath); err != nil {
 		// Not fatal. The software works; it is the removal that would be
 		// awkward, and uninstall.txt says how.
 		ui.step("Installed, but not listed in Settings \u2192 Apps: " + err.Error())

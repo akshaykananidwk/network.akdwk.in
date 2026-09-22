@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The MSI, for the people who deploy software by policy rather than by hand.
+
+  A shopkeeper double-clicks akconnect-setup.exe and that is the whole story.
+  An IT department with fifty hotel PCs does not: they push an MSI through
+  Intune, PDQ or Group Policy, and what they need is
+
+      msiexec /i AKConnect.msi JOINCODE=ABCD-1234 /qn
+
+  This is deliberately a wrapper and nothing more. It carries setup.exe,
+  runs it silently on install and runs its uninstaller on removal. Everything
+  that is hard — the service, the driver, the firewall rules, the enrolment —
+  stays in one place, in the installer that is tested, rather than being
+  reimplemented in MSI tables where it would drift.
+
+  Built with wixl (msitools), which is what can build an MSI on the machine
+  this project is developed on. It uses the subset both wixl and WiX accept.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="$(var.DisplayName)"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="$(var.Publisher)"
+           UpgradeCode="7b3f9d2e-5c41-4e8a-9f16-2d7c8a4b6e03">
+
+    <Package InstallerVersion="200"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="$(var.DisplayName) agent"
+             Comments="Installs the $(var.DisplayName) agent and joins this computer to a network." />
+
+    <Media Id="1" Cabinet="akconnect.cab" EmbedCab="yes" />
+
+    <!-- The join code the deployment tool passes. Public property (upper
+         case) so it survives the switch to the elevated service, which is
+         where the custom action runs. -->
+    <Property Id="JOINCODE" Secure="yes" />
+
+    <!-- Named in SecureCustomProperties as well, because that is what lets a
+         property given on the command line cross into the elevated half of a
+         per-machine install. wixl does not derive it from Secure="yes". -->
+    <Property Id="SecureCustomProperties" Value="JOINCODE" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="$(var.DisplayName) Installer">
+          <Component Id="SetupExe" Guid="3f9a7c15-8d24-4b6e-a1f3-9c5e2d8b7a40">
+            <File Id="akconnect_setup.exe"
+                  Name="akconnect-setup.exe"
+                  Source="$(var.SetupExe)"
+                  KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="Agent" Title="$(var.DisplayName)" Level="1">
+      <ComponentRef Id="SetupExe" />
+    </Feature>
+
+    <!-- Two actions for one command, and the reason is a trap worth writing
+         down: a deferred custom action cannot read properties. It runs in the
+         elevated service, where the property table holds CustomActionData,
+         ProductCode and UserSID and nothing else — so a deferred action whose
+         command says [JOINCODE] receives an empty join code and installs an
+         agent that has joined nothing.
+
+         The way round it is the convention Windows Installer expects: an
+         immediate action named exactly as the deferred one sets its
+         CustomActionData, and the deferred one reads that.
+
+         -managed: the MSI owns the Apps & features entry, so the installer
+         must not write a second one. Without it a customer sees the program
+         listed twice and removing one of them leaves the other. -->
+    <CustomAction Id="RunSetup"
+                  Property="RunSetupNow"
+                  Value="-silent -managed -code=&quot;[JOINCODE]&quot;"
+                  Execute="immediate" />
+
+    <CustomAction Id="RunSetupNow"
+                  FileKey="akconnect_setup.exe"
+                  ExeCommand="[CustomActionData]"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <CustomAction Id="RunUninstall"
+                  FileKey="akconnect_setup.exe"
+                  ExeCommand="-uninstall -silent -managed"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <!-- Explicit sequence numbers, not Before/After.
+
+         With Before="RemoveFiles" this action came out of wixl numbered 1 —
+         ahead of InstallInitialize at 1500, where a deferred action cannot
+         run at all. It was numbered correctly until another action was added
+         beside it, which is the kind of thing that is invisible in the source
+         and obvious in the built table. The numbers below are Windows
+         Installer's own standard ones and are checked after every build.
+
+         1500 InstallInitialize · 1800 UnpublishFeatures · 3500 RemoveFiles
+         4000 InstallFiles · 6600 InstallFinalize -->
+    <InstallExecuteSequence>
+      <!-- Before the file is taken away, because it is what removes
+           everything the install put outside this folder. -->
+      <Custom Action="RunUninstall" Sequence="1801">REMOVE="ALL"</Custom>
+      <!-- After the file is on disk, and only when installing. -->
+      <Custom Action="RunSetup" Sequence="4001">NOT Installed</Custom>
+      <Custom Action="RunSetupNow" Sequence="4002">NOT Installed</Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>
