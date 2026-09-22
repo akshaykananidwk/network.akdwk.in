@@ -70,7 +70,7 @@ func (r *routing) diverts(pkt []byte, to netip.AddrPort) bool {
 		return false
 	}
 
-	if r.control[to] {
+	if r.control[normalise(to)] {
 		return true
 	}
 
@@ -136,6 +136,8 @@ func (b *Bind) UseTunnel(t Tunnel) {
 // through the fallback — the coordinator, and every relay this device is
 // offered.
 func (b *Bind) DivertControl(to netip.AddrPort) {
+	to = normalise(to)
+
 	if route := b.route.Load(); route != nil && route.control[to] {
 		return
 	}
@@ -145,6 +147,17 @@ func (b *Bind) DivertControl(to netip.AddrPort) {
 	b.route.Store(next)
 }
 
+// normalise puts an address in the one form these tables are keyed by.
+//
+// An IPv4 address can be held either plainly or mapped into IPv6, and the two
+// are different map keys while being the same address. Everything read back
+// out of a wireguard-go endpoint is unmapped, so everything put in has to be
+// too — otherwise a lookup misses, the packet is not diverted, and it is sent
+// for real to an address that exists nowhere. A black hole with no error.
+func normalise(at netip.AddrPort) netip.AddrPort {
+	return netip.AddrPortFrom(at.Addr().Unmap(), at.Port())
+}
+
 // RoutePeer sends everything addressed to at through the fallback, as traffic
 // for peer.
 //
@@ -152,6 +165,8 @@ func (b *Bind) DivertControl(to netip.AddrPort) {
 // behind, and an entry nothing addresses any more would still divert traffic
 // if that address were ever handed out again.
 func (b *Bind) RoutePeer(at netip.AddrPort, peer [32]byte) {
+	at = normalise(at)
+
 	next := b.current().clone(b.current().tunnel)
 
 	for addr, existing := range next.peers {
@@ -172,7 +187,7 @@ func (b *Bind) ForgetPeer(at netip.AddrPort) {
 	}
 
 	next := b.current().clone(b.current().tunnel)
-	delete(next.peers, at)
+	delete(next.peers, normalise(at))
 	b.route.Store(next)
 }
 

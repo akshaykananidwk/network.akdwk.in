@@ -180,19 +180,47 @@ func serviceImagePath() string {
 	return ""
 }
 
-// removeFirewallRule takes away the inbound rule the service install created.
+// removeFirewallRule takes away every rule any version of this has created.
+//
+// Every version, and that is the point. The agent's own `service uninstall`
+// knows the names it registered and is tried first; this is the path on a
+// machine where the binary is already gone, and there the list has to be
+// written down. An uninstall that leaves a firewall rule behind is the sort of
+// thing a customer's IT person finds months later and forms an opinion about,
+// and the rules changed shape in 1.9.6 — from one naming a port to four naming
+// the program.
+//
+// Spelled out here rather than imported because this binary is the installer
+// and does not otherwise link the agent's packages. The names must match
+// winenv.FirewallRuleName and the table beside it.
 func removeFirewallRule() error {
-	out, err := exec.Command("netsh", "advfirewall", "firewall", "delete", "rule",
-		"name=AKConnect Agent (WireGuard UDP)").CombinedOutput()
-	if err == nil {
-		return nil
+	names := []string{
+		// 1.9.0 to 1.9.5: one rule, naming a port.
+		"AKConnect Agent (WireGuard UDP)",
+		// 1.9.6 onwards: four, naming the program.
+		"AK Connect (inbound UDP)",
+		"AK Connect (inbound TCP)",
+		"AK Connect (outbound UDP)",
+		"AK Connect (outbound TCP)",
 	}
 
-	if strings.Contains(strings.ToLower(string(out)), "no rules match") {
-		return nil
+	var failures []string
+
+	for _, name := range names {
+		out, err := exec.Command("netsh", "advfirewall", "firewall", "delete", "rule",
+			"name="+name).CombinedOutput()
+		if err == nil || strings.Contains(strings.ToLower(string(out)), "no rules match") {
+			continue
+		}
+
+		failures = append(failures, name+": "+strings.TrimSpace(string(out)))
 	}
 
-	return fmt.Errorf("%s", strings.TrimSpace(string(out)))
+	if failures != nil {
+		return fmt.Errorf("%s", strings.Join(failures, "; "))
+	}
+
+	return nil
 }
 
 // removeOverlayFirewallRule takes away the inbound rule for the overlay.

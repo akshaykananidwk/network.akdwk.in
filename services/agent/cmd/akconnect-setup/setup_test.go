@@ -343,3 +343,38 @@ func TestTheServiceProgramIsReadOutOfItsCommandLine(t *testing.T) {
 		}
 	}
 }
+
+// The uninstaller has to know every firewall rule any version of this ever
+// made, because the path that uses this list is the one where the agent's
+// binary is already gone and cannot be asked.
+//
+// The rules changed shape in 1.9.6 — from one naming a port to four naming the
+// program — and an uninstall that left four rules behind would be exactly the
+// thing a customer's IT person finds months later.
+func TestTheUninstallerKnowsEveryFirewallRuleEverMade(t *testing.T) {
+	source, err := os.ReadFile("windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The names the agent creates, read from the agent's own file so the two
+	// cannot drift apart without this failing.
+	rules, err := os.ReadFile("../../internal/winenv/firewall_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, suffix := range []string{"inbound UDP", "inbound TCP", "outbound UDP", "outbound TCP"} {
+		if !strings.Contains(string(rules), `{"`+suffix+`"`) {
+			t.Fatalf("the agent no longer creates a rule for %q; this test is out of date", suffix)
+		}
+		if !strings.Contains(string(source), `"AK Connect (`+suffix+`)"`) {
+			t.Errorf("the uninstaller does not remove the %q rule", suffix)
+		}
+	}
+
+	// And the one every installation before 1.9.6 has.
+	if !strings.Contains(string(source), `"AKConnect Agent (WireGuard UDP)"`) {
+		t.Error("the uninstaller no longer removes the rule versions up to 1.9.5 created")
+	}
+}

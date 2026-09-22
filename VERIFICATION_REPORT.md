@@ -1,11 +1,11 @@
 # Verification report
 
-**Version 1.9.5 · 22 September 2026**
+**Version 1.9.6 · 22 September 2026**
 
-**Read [§K](#k--195-two-pcs-behind-one-router-and-a-windows-program) first for
-1.9.5.** Everything before it is the record of 1.0.1 through 1.9.2 and is left
-as it was written; nothing in it has been re-run for this release except the
-gates listed in §K.
+**Read [§L](#l--196-any-network-a-browser-works-on) first for 1.9.6, and §K
+for 1.9.5.** Everything before them is the record of 1.0.1 through 1.9.2 and is
+left as it was written; nothing in it has been re-run for this release except
+the gates listed in §L.
 
 What follows is what was actually run and what it actually produced. Where a
 requirement is met, the evidence is the command and its output. Where it is
@@ -277,6 +277,175 @@ pass it.** Two fresh Windows PCs, two ISPs, one behind CGNAT, double-click,
 code, OK, both online and pinging within sixty seconds — that is AK's test on
 AK's machines, and until it passes there, this release is unproven where it
 matters most.
+
+---
+
+## L — 1.9.6: any network a browser works on
+
+### L.0 — What produced this release
+
+A customer laptop on an office Wi-Fi. The coordinator's log shows its
+announcements arriving every five to ten seconds for an entire afternoon. The
+relay's log shows the offer being made and the laptop never binding. The same
+laptop on a phone hotspot that morning connected directly in seconds.
+
+The first answer given was to check the firewall. That answer was wrong, and
+a 24-agent adversarial diagnosis of the code and of Windows' own behaviour
+established why: **Windows Firewall is stateful for UDP.** The coordinator's
+reply is a solicited reply to the exact five-tuple the hello left from, so WFP
+admits it against the outbound flow's own state without consulting any inbound
+rule — with the rule present, with it absent, with it naming the wrong port,
+and on a Public profile with "block all incoming connections" set. The same
+argument clears the router for that one packet: every NAT and every stateful
+filter admits a reply coming back from the address and port the request went
+to. That is the one case they all handle.
+
+So no setting on that machine would have changed anything, and the only
+remaining answers were "change your firewall" — which no customer will do —
+or a path on the port a browser already uses.
+
+### L.1 — The gate that had to pass
+
+The block is applied at **alpha's router**, not inside the machine, and the
+difference is the whole point. A DROP rule in a machine's own OUTPUT chain
+makes its sends fail with EPERM, which is a Windows-Firewall-shaped fault and
+a different one. The office let the packets out of the laptop perfectly well
+and killed them at the building's edge, so from inside the machine every send
+succeeded and only the silence afterwards said anything was wrong.
+
+```
+── a device whose network carries no UDP at all must still connect
+  ✓ https-fallback/connected  traffic flows with all UDP dropped in both directions
+  ✓ https-fallback/budget     connected in 21s, inside the 30s budget
+  ✓ https-fallback/path       the agent reports relay-https, not a UDP path
+  ✓ https-fallback/relay      the relay logged 2 bind(s) over the HTTPS fallback
+
+── outbound UDP allowed, replies dropped — the office Wi-Fi case
+  ✓ https-inbound/connected   traffic flows with inbound UDP replies dropped
+  ✓ https-inbound/budget      connected in 21s, inside the 30s budget
+  ✓ https-inbound/path        the agent reports relay-https, not a UDP path
+  ✓ https-inbound/relay       the relay logged 4 bind(s) over the HTTPS fallback
+
+── when UDP starts working again the pair must leave the fallback by itself
+  ✓ https-recover/connected   connected over HTTPS while UDP was blocked
+  ✓ https-recover/upgraded    back to relay-udp 10s after the block was lifted,
+                              with nothing restarted
+  ✓ https-recover/traffic     traffic still flows on the recovered path
+```
+
+The agent is also made to fall back when its own sends are refused, which is
+the other shape — Windows Firewall blocking our program outbound — because
+there no count of unanswered announcements ever grows: nothing left the
+machine for anything to answer.
+
+### L.2 — The defects the gate found in its own release
+
+Three, all in code written the same day, none visible by reading it.
+
+**The panel published the wrong address.** A configured fallback URL was
+ignored, because the derived default was used as the fallback for the stored
+setting instead of the configuration file — which every other coordinator key
+reads first. The agent dialled `wss://10.0.0.1/fallback` and got connection
+refused.
+
+**The retry backoff never reset.** A connection that had worked and then
+dropped retried on the same growing schedule as one that had never connected,
+reaching thirty-two seconds — outside the budget, on a network where this is
+the only path there is.
+
+**Port moves fought the fallback.** On a network that carries no UDP the
+port-move detector from 1.9.5 kept hopping ports, churning the address peers
+hold and resetting the count that measures the silence the fallback triggers
+on. Moves are held while the fallback carries control.
+
+And a fourth, from the recovery scenario, which is the one worth reading:
+
+**Nothing could tell that UDP had come back.** Once the fallback is up the
+coordinator answers *through it*, and its replies are handed to discovery
+exactly as UDP ones are — that is the entire point of the design. So "the
+coordinator is answering" stops meaning "UDP works", and every health signal
+in the agent read fine while the network underneath carried nothing. The agent
+kept answering relay binds over the tunnel, WireGuard kept addressing the
+tunnel, and the relay never saw a packet on that side's own socket, which is
+the one thing that would have made it drop the tunnel. Stable,
+self-reinforcing, and invisible: the pair would have stayed on the expensive
+path for ever with everything apparently healthy.
+
+The fix is that the socket says it. A discovery packet arriving through the
+real receive path stamps the bind; an injected one never does. Ten seconds
+from the block lifting to the pair being back on UDP.
+
+### L.3 — Where the laptop's diagnostics bundle came from
+
+The customer sent one. It contained three files, two of which said:
+
+```
+C:\ProgramData\AKConnect\service.log could not be read: Access is denied.
+C:\ProgramData\AKConnect\runtime.json could not be read: Access is denied.
+```
+
+The keystore strips the state directory's inherited permissions and grants only
+SYSTEM and the local Administrators group — correct for a device key, and it
+took the status file and the service log with it. The tray runs as the person
+sitting at the machine. **The one artifact that exists to explain a fault could
+not see the fault.** Those two files now carry an explicit read grant for the
+local Users group; the key and the token stay administrators-only. The
+collector also no longer gives up on everything else when the state directory
+will not open — it used to return, dropping the log and every Windows probe.
+
+### L.4 — Self-update, and why an all-in-one stayed on 1.9.3
+
+Two reasons, both fixed.
+
+**The agent never told the panel anything.** Every step — check, offer,
+download, signature, swap — is silent, and every failure path is a line in a
+log file on the customer's machine. From the panel a device that had never
+checked and one that had refused a badly signed release were the same thing: a
+version number that had not moved. Devices now report where they got to on the
+heartbeat they already send.
+
+**Nothing tested the path that failed.** The self-update gate ran `agent
+update`, which is a person typing a command; nobody typed a command on that
+machine. The automatic path is a different function inside the poll loop. The
+gate now publishes a release, presses the panel's own button, starts the agent
+the way the service starts it, and waits:
+
+```
+── a running agent updates itself, with nobody typing anything
+  ✓ the panel is asked to update dev_ec4e…, the way the button does
+  ✓ the binary on disk became 9.9.10-gate without any command being run
+  ✓ and the panel shows it installed 9.9.10-gate
+
+  18 passed, 0 failed
+```
+
+### L.5 — What 1.9.6 does not show
+
+* **The lab proves the fallback over `ws://` through a plain TCP proxy**, which
+  is the production shape minus the TLS: the relay on loopback, something else
+  taking the connection on a public port and passing it through, so the relay
+  never sees the agent's own address. There is no certificate authority in a
+  network namespace. The TLS hop is Apache's — the same Apache and the same
+  certificate that already serve the panel — and `edge-script-gate.sh` checks
+  the configuration that puts it there, not a handshake through it.
+* **No Apache runs in this environment**, so the generated configuration is
+  checked by reading it: both forms present, agreeing with the relay unit about
+  the port, the health path ordered before the tunnel path, an explicit idle
+  timeout rather than an inherited one, and neither form wrapped in `<IfModule>`
+  — which would make a missing module silent. The version rule that chooses
+  between them is exercised directly.
+* **A fleet of more than one relay.** The fallback URL is a single panel-wide
+  setting, so a device on the HTTPS path connects to the relay the panel names,
+  which need not be the one its peer was offered. One relay is the deployment.
+  More than one needs the coordinator to prefer the relay a fallback device is
+  already connected to — it can see that, because such a device's packets
+  arrive from the relay's own address — and that is not built.
+* **Relay latency probes are not diverted.** A device on the fallback reports
+  every relay as unreachable and the coordinator chooses from the other end's
+  measurements. Honest, and it costs a better choice of relay.
+* **Windows.** Every line of the fallback runs the same code on both platforms
+  except the firewall rules, and no part of this release has run on Windows.
+  Stages 18 and 19 of `docs/AK-MUST-VERIFY-ON-WINDOWS.md` are that test.
 
 ---
 
