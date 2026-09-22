@@ -308,6 +308,22 @@ func (s *session) applyConfig(ctx context.Context, priv wgPrivate, cfg *panel.Co
 	s.st.Revision = cfg.Revision
 	s.st.VirtualIP = cfg.Device.VirtualIP
 
+	// Discovery is told that the world has changed.
+	//
+	// A configuration that arrives with a new revision means the panel has
+	// approved, revoked or re-scoped something — so the coordinator's idea of
+	// who this device may reach is out of date, and only a full announcement
+	// refreshes it. Without this the agent kept pinging happily while the
+	// coordinator introduced it to nobody, and restarting the service was the
+	// only cure.
+	//
+	// The relay fleet is re-read for the same reason: a relay added in the
+	// panel was invisible until the process was restarted.
+	if s.discovery != nil {
+		s.discovery.SetRelays(relayFleet(cfg, s.logf))
+		s.discovery.Rehello()
+	}
+
 	return s.stateSt.Save(s.st)
 }
 

@@ -67,10 +67,8 @@ func (c *Client) handleRelayOffer(header disco.Header, sealed []byte) {
 		return
 	}
 
-	control, err := netip.ParseAddrPort(offer.Endpoint)
-	if err != nil {
-		c.opts.Logf("discovery: relay endpoint %q is unusable: %v", offer.Endpoint, err)
-
+	control, ok := c.relayEndpoint(offer)
+	if !ok {
 		return
 	}
 
@@ -85,6 +83,96 @@ func (c *Client) handleRelayOffer(header disco.Header, sealed []byte) {
 	c.mu.Unlock()
 
 	c.sendRelayBind(offer.Peer, control, offer.Ticket)
+}
+
+// relayEndpoint works out where to send the bind.
+//
+// The offer names the relay and gives its endpoint as a string, and that
+// string is whatever the coordinator was configured with. On a real deployment
+// that is a hostname — DEPLOY.md tells the operator to use the VPS's public
+// hostname, and AKCONNECT_RELAYS carries it verbatim — so parsing it as a
+// literal address fails for every offer ever made. That is exactly what
+// happened in the field: the coordinator logged that it had offered the relay
+// to both devices, and a twenty-second capture on the relay's own ports saw
+// not one packet from either of them. Every lab drill passed because the lab
+// configures its relays by IP.
+//
+// The fleet the panel published is tried first, by name, because those
+// addresses were resolved at start-up and are already known good. Resolution
+// is the fallback, and it is deliberately not done on this goroutine: this
+// runs in the packet handler, and a DNS lookup that takes two seconds would
+// stall every other message for two seconds.
+func (c *Client) relayEndpoint(offer *disco.RelayOffer) (netip.AddrPort, bool) {
+	// A literal address is the easy case, and the one the lab exercises.
+	if addr, err := netip.ParseAddrPort(offer.Endpoint); err == nil {
+		return addr, true
+	}
+
+	if offer.Name != "" {
+		c.mu.Lock()
+		for _, relay := range c.relays {
+			if relay.Name == offer.Name && relay.Addr.IsValid() {
+				addr := relay.Addr
+				c.mu.Unlock()
+
+				return addr, true
+			}
+		}
+		c.mu.Unlock()
+	}
+
+	// Neither a literal address nor a relay this device has measured. Resolve
+	// it, off this goroutine, and bind when the answer comes back.
+	go c.bindAfterResolving(offer)
+
+	return netip.AddrPort{}, false
+}
+
+// bindAfterResolving looks a relay's hostname up and then binds to it.
+//
+// Separate goroutine because DNS blocks. One attempt: the coordinator re-offers
+// a relay whenever an agent asks again, which it does every second while a
+// peer is stalled, so a name that resolves a moment later is picked up without
+// a retry loop here.
+func (c *Client) bindAfterResolving(offer *disco.RelayOffer) {
+	addr, err := resolveHostPort(offer.Endpoint)
+	if err != nil {
+		c.opts.Logf("discovery: relay %s at %q cannot be reached: %v", offer.Name, offer.Endpoint, err)
+
+		return
+	}
+
+	c.mu.Lock()
+	c.relayControl[offer.Peer] = addr
+	c.relayTicket[offer.Peer] = offer.Ticket
+	c.relayName[offer.Peer] = offer.Name
+	c.relayMissed[offer.Peer] = 0
+	// Remembered under its name, so the next offer for this relay takes the
+	// fast path above instead of resolving again.
+	c.rememberRelayAddrLocked(offer.Name, addr)
+	c.mu.Unlock()
+
+	c.opts.Logf("discovery: relay %s resolved to %s", offer.Name, addr)
+
+	c.sendRelayBind(offer.Peer, addr, offer.Ticket)
+}
+
+// rememberRelayAddrLocked adds a resolved relay to the fleet this device
+// knows. Caller holds c.mu.
+func (c *Client) rememberRelayAddrLocked(name string, addr netip.AddrPort) {
+	if name == "" {
+		return
+	}
+
+	for i, relay := range c.relays {
+		if relay.Name == name {
+			c.relays[i].Addr = addr
+
+			return
+		}
+	}
+
+	c.relays = append(c.relays, RelayTarget{Name: name, Addr: addr})
 }
 
 // sendRelayBind presents the ticket, which is how the relay learns where this

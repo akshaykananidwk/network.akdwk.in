@@ -39,6 +39,28 @@ type Entry struct {
 	// RTTReportedAt is when that measurement arrived, so a stale one can be
 	// recognised as stale rather than trusted forever.
 	RTTReportedAt time.Time
+	// Token is the device token this device announced with, kept so the peer
+	// set can be re-confirmed with the panel without waiting for the device to
+	// say hello again.
+	//
+	// It is held in memory only, never logged and never written anywhere, and
+	// it is dropped the moment the entry is. The coordinator already receives
+	// it on every hello and forwards it to the panel; keeping it is the same
+	// trust, held for less time than the device's own copy.
+	Token string
+	// VerifiedAt is when the panel last confirmed Peers.
+	//
+	// This exists because it was missing. The peer set used to be written only
+	// by a hello, and in steady state an agent only pings — so a device that
+	// said hello when it had no peers was never told about the ones added
+	// afterwards, and nothing short of restarting its service fixed it. Every
+	// existing device at a customer site broke the moment a new one was added.
+	VerifiedAt time.Time
+}
+
+// NeedsVerify reports whether the peer set is old enough to be re-confirmed.
+func (e *Entry) NeedsVerify(ttl time.Duration) bool {
+	return e.VerifiedAt.IsZero() || time.Since(e.VerifiedAt) > ttl
 }
 
 // Online reports whether the entry is fresh enough to introduce to others.
@@ -74,9 +96,86 @@ func (r *Registry) Upsert(e *Entry) *Entry {
 	}
 
 	e.LastSeen = time.Now()
+	// A hello is a verification: the panel was just asked and just answered.
+	e.VerifiedAt = e.LastSeen
 	r.byKey[e.PublicKey] = e
 
 	return e
+}
+
+// SetPeers replaces what the panel says this device may reach.
+//
+// Separate from Upsert because it is the answer to a re-verification rather
+// than to an announcement: the endpoint, the local addresses and the measured
+// latencies all stay as they are.
+//
+// It reports whether the set actually changed, so a caller can tell the
+// difference between "confirmed" and "news", and only push peers when there is
+// news.
+func (r *Registry) SetPeers(key [32]byte, peers map[[32]byte]struct{}, networkID, tenantID int, region string) (changed bool, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.byKey[key]
+	if !ok {
+		return false, false
+	}
+
+	changed = !samePeerSet(entry.Peers, peers)
+
+	entry.Peers = peers
+	entry.NetworkID = networkID
+	entry.TenantID = tenantID
+	entry.Region = region
+	entry.VerifiedAt = time.Now()
+
+	return changed, true
+}
+
+// Invalidate marks a device's peer set as needing re-confirmation.
+//
+// Used when something else has happened that probably changed it — a peer
+// coming online, the panel saying a set has moved — so the next keepalive
+// re-verifies instead of waiting out the full TTL.
+func (r *Registry) Invalidate(keys ...[32]byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, key := range keys {
+		if entry, ok := r.byKey[key]; ok {
+			entry.VerifiedAt = time.Time{}
+		}
+	}
+}
+
+// InvalidateNetwork marks every device on one network as needing
+// re-confirmation, and reports how many.
+func (r *Registry) InvalidateNetwork(networkID int) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	n := 0
+	for _, entry := range r.byKey {
+		if entry.NetworkID == networkID {
+			entry.VerifiedAt = time.Time{}
+			n++
+		}
+	}
+
+	return n
+}
+
+// Credentials returns what re-verification needs, without exposing the entry.
+func (r *Registry) Credentials(key [32]byte) (deviceUID, token string, ok bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	entry, ok := r.byKey[key]
+	if !ok {
+		return "", "", false
+	}
+
+	return entry.DeviceUID, entry.Token, entry.Token != ""
 }
 
 // Touch refreshes a device's last-seen time and endpoint without replacing its
@@ -181,6 +280,20 @@ func (r *Registry) Sweep() int {
 	}
 
 	return removed
+}
+
+func samePeerSet(a, b map[[32]byte]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for key := range a {
+		if _, ok := b[key]; !ok {
+			return false
+		}
+	}
+
+	return true
 }
 
 // Len is the number of devices currently known.

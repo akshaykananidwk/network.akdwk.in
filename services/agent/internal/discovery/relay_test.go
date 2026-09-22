@@ -304,3 +304,83 @@ func TestDoesNotRepeatAnUnchangedMeasurement(t *testing.T) {
 		t.Fatalf("sent %d reports for one measurement, want 1", reports)
 	}
 }
+
+// Defect 16, from the first two-PC test on the real internet.
+//
+// The coordinator logged that it had offered the relay to both devices:
+//
+//	08:33:56 offered dev_1eb85… the relay mumbai-1 for peer 174f…
+//	08:33:57 offered dev_d66b… the relay mumbai-1 for peer 4992…
+//
+// A twenty-second capture on the relay's control and data ports saw not one
+// packet from either device. The offer carries the endpoint as the string the
+// coordinator was configured with — AKCONNECT_RELAYS=mumbai-1:in:edge.akdwk.in:9000,
+// a hostname, because that is what DEPLOY.md tells the operator to use — and
+// the agent parsed it as a literal address, which never succeeds. Every relay
+// drill in the lab passed because the lab configures its relays by IP.
+func TestARelayOfferedByHostnameIsStillUsed(t *testing.T) {
+	// The fleet the panel published, resolved at start-up. This is the path
+	// that must be taken: the address is already known, so the offer needs no
+	// DNS at all.
+	fleet := []RelayTarget{{
+		Name: "mumbai-1",
+		Addr: netip.MustParseAddrPort("203.0.113.9:9000"),
+	}}
+
+	c := &Client{relays: fleet, relayControl: map[[32]byte]netip.AddrPort{}}
+
+	offer := &disco.RelayOffer{
+		Name:     "mumbai-1",
+		Endpoint: "edge.akdwk.in:9000",
+	}
+
+	got, ok := c.relayEndpoint(offer)
+	if !ok {
+		t.Fatal("a relay offered by hostname was discarded, so nothing would ever reach it")
+	}
+	if got != netip.MustParseAddrPort("203.0.113.9:9000") {
+		t.Fatalf("bound to %s, not the address the panel published", got)
+	}
+
+	// A literal address still works, which is what the lab exercises.
+	literal, ok := c.relayEndpoint(&disco.RelayOffer{Name: "lab-a", Endpoint: "10.0.0.1:9000"})
+	if !ok || literal != netip.MustParseAddrPort("10.0.0.1:9000") {
+		t.Fatalf("a literal endpoint broke: %s ok=%v", literal, ok)
+	}
+}
+
+// The resolver itself, including the parts that decide what "usable" means.
+func TestResolvingARelayEndpoint(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"10.0.0.1:9000", "10.0.0.1:9000", true},
+		{"[::1]:9000", "[::1]:9000", true},
+		{"localhost:9000", "127.0.0.1:9000", true},
+		// The shape that produced the field failure, and the ones next to it.
+		{"edge.example.invalid:9000", "", false},
+		{"edge.akdwk.in", "", false},
+		{"edge.akdwk.in:0", "", false},
+		{"edge.akdwk.in:notaport", "", false},
+		{"", "", false},
+	}
+
+	for _, tc := range cases {
+		got, err := resolveHostPort(tc.in)
+		if tc.ok && err != nil {
+			t.Fatalf("resolveHostPort(%q) failed: %v", tc.in, err)
+		}
+		if !tc.ok {
+			if err == nil {
+				t.Fatalf("resolveHostPort(%q) accepted an endpoint it cannot use: %s", tc.in, got)
+			}
+
+			continue
+		}
+		if got.String() != tc.want {
+			t.Fatalf("resolveHostPort(%q) = %s, want %s", tc.in, got, tc.want)
+		}
+	}
+}

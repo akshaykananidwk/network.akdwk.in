@@ -81,6 +81,9 @@ func (s *Server) handleHello(ctx context.Context, header disco.Header, sealed []
 		NetworkID: result.NetworkID,
 		TenantID:  result.TenantID,
 		Region:    result.Region,
+		// Kept so this device's set can be re-confirmed without waiting for
+		// it to say hello again. Never logged.
+		Token: hello.Token,
 	}
 	s.reg.Upsert(entry)
 	s.queueEndpoint(hello.DeviceUID, from, hello.LocalEndpoints)
@@ -96,6 +99,15 @@ func (s *Server) handleHello(ctx context.Context, header disco.Header, sealed []
 	// This is also what makes simultaneous open possible: both ends learn of
 	// each other at nearly the same moment and punch towards each other.
 	s.notifyPeersOf(header.Sender)
+
+	// And their own stored sets are re-confirmed, because this device's
+	// arrival is usually the thing that changed them.
+	//
+	// notifyPeersOf alone is not enough and that is the whole of defect 15: it
+	// sends each peer the set the coordinator already believes, and a peer
+	// whose stored set is empty gets nothing. The device approved five minutes
+	// ago is not in anybody's set until somebody asks the panel again.
+	s.invalidatePeersOf(header.Sender)
 }
 
 func (s *Server) handlePing(header disco.Header, sealed []byte, from netip.AddrPort) {
@@ -118,6 +130,13 @@ func (s *Server) handlePing(header disco.Header, sealed []byte, from netip.AddrP
 	}
 
 	s.sendHelloAck(header.Sender, from)
+
+	// Who this device may reach goes stale too, and unlike an address nothing
+	// about a ping reveals that it has. So it is re-confirmed with the panel
+	// on a timer — see verifyTTL for what went wrong without this.
+	if previous.NeedsVerify(verifyTTL) {
+		s.reverify(header.Sender)
+	}
 
 	// The peer list goes back on every ping, not only on hello.
 	//

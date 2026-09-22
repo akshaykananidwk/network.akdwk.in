@@ -332,3 +332,125 @@ func TestPingFromAnUnknownKeyIsIgnored(t *testing.T) {
 		t.Fatal("the coordinator answered a ping from a device that never announced itself")
 	}
 }
+
+// Defect 15, from two real Windows PCs on two ISPs.
+//
+// The laptop said hello at 08:02, when it was the only device on the network,
+// so the coordinator stored an empty allowed set for it. The second PC was
+// approved at 08:11 and said hello; the coordinator introduced it to nobody,
+// because introduction is mutual and the laptop's stored set was still empty.
+// The laptop then logged
+//
+//	Failed to send handshake initiation: no known endpoint for peer
+//
+// every five seconds until its service was restarted by hand. Every existing
+// device at a customer site broke the moment a new device was added.
+//
+// The sequence here is that sequence: one device announces alone, a second
+// appears later, and the first must learn about it without re-announcing and
+// without anybody restarting anything.
+func TestADeviceAddedLaterReachesOneThatAnnouncedAlone(t *testing.T) {
+	book := newKeyBook()
+	panel := stubPanel(t, book)
+	srv, coordPK := startCoordinator(t, panel.URL)
+
+	laptop := newTestAgent(t, "dev_laptop", srv.ListenAddr(), coordPK)
+
+	// Alone on the network, exactly as the laptop was at 08:02.
+	book.set(laptop.uid, base64.StdEncoding.EncodeToString(laptop.pub[:]))
+	laptop.hello(t)
+
+	if _, ok := laptop.awaitPeers(t, 500*time.Millisecond); ok {
+		t.Fatal("the coordinator introduced a peer that did not exist yet")
+	}
+	laptop.drain()
+
+	// Nine minutes later in the field; now, the second PC is approved and
+	// announces. The laptop has done nothing but keep pinging.
+	second := newTestAgent(t, "dev_second", srv.ListenAddr(), coordPK)
+	book.set(second.uid, base64.StdEncoding.EncodeToString(second.pub[:]))
+	second.hello(t)
+
+	// The laptop must be told, without saying hello again. It is only pinging,
+	// which is all a settled agent ever does.
+	found := false
+	deadline := time.Now().Add(6 * time.Second)
+
+	for time.Now().Before(deadline) && !found {
+		laptop.ping(t)
+
+		peers, ok := laptop.awaitPeers(t, 500*time.Millisecond)
+		if !ok {
+			continue
+		}
+
+		for _, p := range peers.Peers {
+			if p.PublicKey == second.pub {
+				found = true
+			}
+		}
+	}
+
+	if !found {
+		t.Fatal("the laptop was never told about the device added after it announced")
+	}
+
+	// And the other direction, which is the half that made it a deadlock:
+	// introduction is mutual, so the second PC could not learn about the
+	// laptop either until the laptop's own set had been re-confirmed.
+	second.drain()
+	second.ping(t)
+
+	peers, ok := second.awaitPeers(t, 3*time.Second)
+	if !ok {
+		t.Fatal("the second device was never told about the laptop")
+	}
+
+	mutual := false
+	for _, p := range peers.Peers {
+		if p.PublicKey == laptop.pub {
+			mutual = true
+		}
+	}
+	if !mutual {
+		t.Fatal("the introduction was one-sided, so neither end would have answered")
+	}
+}
+
+// The same fault reached by the other road: an agent that never re-announces
+// at all. A device running an older agent pings forever, so nothing it does
+// will ever refresh its stored set. The coordinator has to re-ask the panel on
+// its own, from the token the device announced with.
+func TestAStoredPeerSetIsReconfirmedWithoutANewHello(t *testing.T) {
+	book := newKeyBook()
+	panel := stubPanel(t, book)
+	srv, coordPK := startCoordinator(t, panel.URL)
+
+	alone := newTestAgent(t, "dev_alone", srv.ListenAddr(), coordPK)
+	book.set(alone.uid, base64.StdEncoding.EncodeToString(alone.pub[:]))
+	alone.hello(t)
+	alone.drain()
+
+	// A peer appears in the panel's answer, but never announces itself — so
+	// nothing pushes it, and only re-verification can find it.
+	var ghost [32]byte
+	ghost[0] = 9
+	book.set("dev_ghost", base64.StdEncoding.EncodeToString(ghost[:]))
+
+	// Force the stored set to look old, the way a minute of keepalives would.
+	srv.reg.Invalidate(alone.pub)
+
+	alone.ping(t)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if entry, ok := srv.reg.Get(alone.pub); ok {
+			if _, allowed := entry.Peers[ghost]; allowed {
+				return
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatal("a ping never caused the stored peer set to be re-confirmed with the panel")
+}

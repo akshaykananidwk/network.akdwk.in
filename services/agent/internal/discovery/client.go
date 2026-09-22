@@ -64,6 +64,14 @@ type Client struct {
 	// lastAck is when the coordinator last answered. It decides whether the
 	// next announcement is a full Hello or a cheap Ping.
 	lastAck time.Time
+	// lastHello is when a full announcement was last sent, so one happens
+	// periodically even while the coordinator is answering cheerfully.
+	lastHello time.Time
+	// forceHello makes the next announcement a full one, whatever the timers
+	// say. Set when the panel's configuration has moved, because a hello is
+	// the only message that carries a token and therefore the only one that
+	// makes the coordinator re-ask who this device may reach.
+	forceHello bool
 	// candidates is every address currently being tried for a peer, so a punch
 	// reply can be matched back to the peer it proves.
 	candidates map[[32]byte][]netip.AddrPort
@@ -266,11 +274,50 @@ func (c *Client) escalateStalledPeers() {
 // arrived, or because the coordinator has restarted — pinging forever would
 // leave the agent permanently undiscovered while looking healthy. So the
 // agent re-introduces itself whenever it has not been acknowledged recently.
+// helloInterval is how often a full announcement is sent regardless.
+//
+// A ping carries no token, so the coordinator cannot re-ask the panel who this
+// device may reach — it can only repeat what it already believes. Until 1.9.2
+// a settled agent sent nothing but pings, for as long as the coordinator kept
+// answering, which meant the allowed set on the coordinator was whatever it
+// was at the first announcement and stayed that way for the life of the
+// process. A device approved into the network afterwards was invisible to
+// everything already running.
+//
+// Five minutes is the backstop. The normal path is Rehello, below, which fires
+// the moment the panel's configuration revision moves — this catches the case
+// where that never happens, on an agent too old to do it or a panel that was
+// unreachable at the moment it mattered.
+const helloInterval = 5 * time.Minute
+
 func (c *Client) needsHello(keepalive time.Duration) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return c.lastAck.IsZero() || time.Since(c.lastAck) > 2*keepalive
+	if c.forceHello {
+		c.forceHello = false
+
+		return true
+	}
+
+	if c.lastAck.IsZero() || time.Since(c.lastAck) > 2*keepalive {
+		return true
+	}
+
+	return c.lastHello.IsZero() || time.Since(c.lastHello) > helloInterval
+}
+
+// Rehello makes the next announcement a full one, and sends it now.
+//
+// Called when the panel's configuration revision moves: an approval, a
+// revocation or an ACL change has happened, so the coordinator's idea of who
+// this device may reach is out of date and only a hello will refresh it.
+func (c *Client) Rehello() {
+	c.mu.Lock()
+	c.forceHello = true
+	c.mu.Unlock()
+
+	c.announce(c.needsHello(20 * time.Second))
 }
 
 // announce sends a Hello (first time, and periodically) or a lighter Ping.
@@ -287,6 +334,10 @@ func (c *Client) announce(full bool) {
 		}
 		body, err = hello.Encode()
 		msgType = disco.TypeHello
+
+		c.mu.Lock()
+		c.lastHello = time.Now()
+		c.mu.Unlock()
 	} else {
 		// A ping carries nothing; it exists to refresh the mapping and the
 		// coordinator's presence entry. It is still sealed, so it still proves

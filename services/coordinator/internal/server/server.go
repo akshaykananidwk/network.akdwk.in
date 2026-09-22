@@ -46,6 +46,8 @@ type Server struct {
 	health    *relayHealth
 	usage     *usageLedger
 
+	verifying *reverifier
+
 	mu      sync.Mutex
 	pending map[string]panelapi.EndpointReport
 }
@@ -73,6 +75,7 @@ func New(opts Options) (*Server, error) {
 		reg:       registry.New(opts.PresenceTTL),
 		health:    newRelayHealth(),
 		usage:     newUsageLedger(),
+		verifying: newReverifier(),
 		pending:   make(map[string]panelapi.EndpointReport),
 	}, nil
 }
