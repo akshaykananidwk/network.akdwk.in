@@ -356,6 +356,41 @@ stop the agent preferring UDP on their own. `https-switch` is the drill: a
 pair connects, settles for twenty seconds, and then the router starts dropping
 UDP under it.
 
+**It failed the first time it was run to completion, at about thirty seconds
+against a thirty-second budget**, and the two defects behind that are worth
+more than the number.
+
+The first: the pair was on a relay, so when the network died the relay stopped
+answering before anything else did. Three unanswered rebinds meant "this relay
+is gone", and the agent asked the coordinator for another one — which is a UDP
+packet, to a coordinator that is not answering either, over the network that
+has just stopped carrying UDP. Eighteen seconds of the budget, on a change
+that could not possibly work. A device that cannot reach one relay over UDP
+cannot reach another, so relay failover now stands down while the coordinator
+is silent, on the same signal and the same four seconds the fallback
+supervisor uses — so the two agree about when UDP has stopped working instead
+of each deciding separately. Failover is unchanged when UDP to the coordinator
+still works, which is the case it was written for.
+
+That brought it to twenty-one seconds, five times out of five. The second
+defect is what the remaining time was: **a settled agent talks to the
+coordinator once every twenty seconds**, so when the network dies under it
+nothing notices until the next keepalive is due. The cold-start scenarios do
+not have that wait because they are already announcing. A relayed pair has a
+faster signal and was not using it — rebinds go out every five seconds and are
+acknowledged — so two unanswered rebinds now send the announcement
+immediately. It decides nothing; it makes the question go out when the
+evidence appeared rather than when the clock came round.
+
+```
+── a working machine is carried onto a network that blocks UDP, five runs
+  https-switch/budget   15s   15s   15s   15s   15s      (budget 30s)
+```
+
+The five numbers are identical because the path is now fixed intervals rather
+than a wait for the next tick: ten seconds of unanswered rebinds, then the
+fallback and the handshake.
+
 ### L.2 — The defects the gate found in its own release
 
 Three, all in code written the same day, none visible by reading it.
@@ -595,6 +630,12 @@ not presented as one: the no-terminal confirmation always refused, by accident.
 * **Relay latency probes are not diverted.** A device on the fallback reports
   every relay as unreachable and the coordinator chooses from the other end's
   measurements. Honest, and it costs a better choice of relay.
+* **`systemd-resolved`.** There is none in this container, so the `resolvectl`
+  path is recorded as a SKIP — listed by name at the end of the run, with its
+  reason, and the run says plainly that the skipped checks are unproven. It is
+  not a pass and it is not being treated as one. It is also Linux-only: every
+  customer device is Windows, which uses NRPT, and the resolver checks either
+  side of it do run.
 * **Windows.** Every line of the fallback runs the same code on both platforms
   except the firewall rules, and no part of this release has run on Windows.
   Stages 18 and 19 of `docs/AK-MUST-VERIFY-ON-WINDOWS.md` are that test.
