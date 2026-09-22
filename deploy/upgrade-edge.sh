@@ -700,13 +700,13 @@ else
 
     if [ ! -f "$WINTUN_ZIP" ]; then
         fail "windows installer" "wintun is not available; fetch $WINTUN_URL to $WINTUN_ZIP"
-    elif ! WINTUN_ZIP="$WINTUN_ZIP" "$SRC_DIR/services/kit/build-windows-pack.sh" \
+    elif ! WINTUN_ZIP="$WINTUN_ZIP" AKCONNECT_BUILD_DIR="$BUILD_DIR/kit" \
+            "$SRC_DIR/services/kit/build-windows-pack.sh" \
             "$TARGET_VERSION" "$PANEL" >"$BUILD_DIR/pack.log" 2>&1; then
         fail "windows installer" "the build failed; see $BUILD_DIR/pack.log"
         tail -12 "$BUILD_DIR/pack.log" | sed 's/^/    /'
     else
-        SETUP_EXE="$(find "$SRC_DIR/services/kit" -name 'akconnect-setup.exe' -newermt '-10 minutes' | head -1)"
-        [ -n "$SETUP_EXE" ] || SETUP_EXE="$SRC_DIR/services/kit/pack/akconnect-setup.exe"
+        SETUP_EXE="$BUILD_DIR/kit/pack/akconnect-setup.exe"
 
         if [ ! -f "$SETUP_EXE" ]; then
             fail "windows installer" "the build reported success but no akconnect-setup.exe was found"
@@ -725,7 +725,7 @@ else
             # what the panel signs and offers to already-installed devices
             # (§14), so publishing it is the difference between fixing a defect
             # once and visiting every PC to fix it.
-            AGENT_EXE="$SRC_DIR/services/kit/pack/akconnect-agent.exe"
+            AGENT_EXE="$BUILD_DIR/kit/pack/akconnect-agent.exe"
 
             if [ ! -f "$AGENT_EXE" ]; then
                 fail "self-update" "the pack build left no akconnect-agent.exe to publish"

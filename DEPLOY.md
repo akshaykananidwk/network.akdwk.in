@@ -575,11 +575,23 @@ copy already on the box predates the hand-over and cannot do it, so that time
 the old script runs and behaves as it always did. Run it once more afterwards
 if you want the new behaviour immediately.
 
+**It builds outside the checkout.** The Windows installer is assembled in a
+temporary directory, not in `services/kit`, and the pack is no longer a tracked
+file. It used to be both, so a successful run left its own clone dirty and the
+*next* run refused with "has local changes" — the tool that maintains the edge
+could be run once per clone, and the second attempt looked like the operator's
+mistake.
+
 **It leaves the checkout usable.** `/opt/akconnect/src` is left on its branch
 at the release's commit, not on a detached HEAD. Earlier versions detached it,
 and the next `git pull` there answered "You are not currently on a branch" —
 so the ordinary way to update a checkout stopped working on every edge server
 this script had touched.
+
+The installer it builds is published to the panel and served from there, which
+is the URL to give a customer: it is stamped for your panel and comes from the
+release the panel is actually running. There is no copy in the repository any
+more.
 
 **To stop doing this by hand:**
 

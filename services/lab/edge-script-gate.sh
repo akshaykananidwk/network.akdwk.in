@@ -450,6 +450,59 @@ else
     bad "git pull still fails in the checkout" "$(git -C "$CLONE" pull 2>&1 | head -1)"
 fi
 
+# 8. Twice in a row.
+#
+# Defect 26: a successful run left "M services/kit/akconnect-windows-test-pack.zip"
+# in its own checkout, because the pack was built inside the source tree and
+# tracked in git. The next run hit the clean-tree guard and refused with "has
+# local changes" — so the tool that maintains the edge could be run exactly
+# once per clone, and the second attempt looked like the operator's fault.
+#
+# The guard itself is right and stays. What was wrong is a build writing into
+# the tree it builds from.
+group "running it twice in a row"
+
+env PATH="/usr/local/go/bin:$PATH" HOME="$WORK" \
+    AKCONNECT_ETC="$WORK/etc2" AKCONNECT_SRC="$CLONE" \
+    AKCONNECT_REEXEC=1 "$SCRIPT" --skip-pack >"$WORK/twice.out" 2>&1
+
+DIRT="$(git -C "$CLONE" status --porcelain)"
+if [ -z "$DIRT" ]; then
+    ok "the checkout is clean after a run"
+else
+    bad "the run dirtied its own checkout" "$(printf '%s' "$DIRT" | head -3 | tr '\n' ' ')"
+fi
+
+env PATH="/usr/local/go/bin:$PATH" HOME="$WORK" \
+    AKCONNECT_ETC="$WORK/etc2" AKCONNECT_SRC="$CLONE" \
+    AKCONNECT_REEXEC=1 "$SCRIPT" --skip-pack >"$WORK/twice2.out" 2>&1
+
+if grep -q "has local changes" "$WORK/twice2.out"; then
+    bad "the second run refused" "has local changes — the first run dirtied the tree"
+else
+    ok "the second run was not refused"
+fi
+
+# The two runs above use --skip-pack, so they prove the script does not dirty
+# the tree by itself; they do not build a Windows pack. The pack is the thing
+# that actually dirtied it, and what made that possible was the artefact being
+# a tracked file — so that is asserted directly, against THIS repository rather
+# than the throwaway fixture, which has no services/kit to track.
+if git -C "$REPO" ls-files --error-unmatch services/kit/akconnect-windows-test-pack.zip >/dev/null 2>&1; then
+    bad "the Windows pack is tracked in git" \
+        "a build output under version control dirties every checkout that builds one"
+else
+    ok "the Windows pack is not a tracked file"
+fi
+
+# And the build must honour a destination outside the tree, which is how
+# upgrade-edge.sh keeps its checkout clean while still producing a pack.
+if grep -q 'AKCONNECT_BUILD_DIR' "$REPO/services/kit/build-windows-pack.sh"; then
+    ok "the pack build can write outside the source tree"
+else
+    bad "the pack build always writes into services/kit" "it will dirty the checkout again"
+fi
+
 # --check is the other half of the contract: it reports and changes nothing.
 # A "tell me whether I am behind" that moved the working tree would be a trap.
 git -C "$CLONE" checkout --quiet --detach HEAD 2>/dev/null

@@ -52,9 +52,19 @@ Thumbs.db
 /services/kit/dist/
 /services/kit/pack/
 
-# The Windows test pack IS committed: a tester needs one URL to download, and
-# a release asset I cannot create from here is no use to them.
-!/services/kit/akconnect-windows-test-pack.zip
+# The Windows test pack is NOT committed, and was until 1.9.4.
+#
+# The reason it was is gone: a tester needed one URL, and there is one now —
+# the panel serves the installer at /download/setup.exe, published by
+# deploy/upgrade-edge.sh from the release the panel is actually running. That
+# is a better URL than a file in git, because it is stamped for their panel.
+#
+# The reason to stop is that tracking a build output made the edge upgrader
+# dirty its own checkout: a successful run left "M
+# services/kit/akconnect-windows-test-pack.zip" behind, and the next run
+# refused with "has local changes". The tool that maintains the edge could be
+# run exactly once per clone.
+/services/kit/akconnect-windows-test-pack.zip
 
 # Lab harness scratch: binaries, logs and agent state, rebuilt each run.
 /services/lab/.run/

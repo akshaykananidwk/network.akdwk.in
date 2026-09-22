@@ -17,8 +17,19 @@ VERSION="${1:-dev}"
 PANEL_URL="${2:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WINTUN_ZIP="${WINTUN_ZIP:-/tmp/wintun-check/wintun.zip}"
-STAGE="$ROOT/services/kit/pack"
-OUT="$ROOT/services/kit/akconnect-windows-test-pack.zip"
+# Where the build writes. Outside the source tree when the caller says so, and
+# that is what deploy/upgrade-edge.sh does.
+#
+# It used to write into services/kit unconditionally, and the pack was tracked
+# in git — so a successful edge upgrade left its own checkout dirty, and the
+# NEXT run refused with "has local changes". An operator could run this exactly
+# once per clone, and the tool that maintains the edge broke the checkout it
+# maintains.
+BUILD_ROOT="${AKCONNECT_BUILD_DIR:-$ROOT/services/kit}"
+mkdir -p "$BUILD_ROOT"
+
+STAGE="$BUILD_ROOT/pack"
+OUT="$BUILD_ROOT/akconnect-windows-test-pack.zip"
 
 # The exact artefacts this pack was verified against. A mismatch means the
 # upstream file changed and its licence needs re-reading before we ship it.
