@@ -24,7 +24,7 @@ set -uo pipefail
 
 SRC_DIR="${AKCONNECT_SRC:-/opt/akconnect/src}"
 BIN_DIR="/usr/local/bin"
-ETC_DIR="/etc/akconnect"
+ETC_DIR="${AKCONNECT_ETC:-/etc/akconnect}"
 WINTUN_URL="https://www.wintun.net/builds/wintun-0.14.1.zip"
 WINTUN_ZIP="${WINTUN_ZIP:-/var/cache/akconnect/wintun.zip}"
 
@@ -244,45 +244,107 @@ say "panel: $PANEL"
 
 # ------------------------------------------------------------------- the panel
 
-# sign <body-file> prints the HMAC the panel expects: sha256 over
+# sign <timestamp> <body-file> prints the HMAC the panel expects: sha256 over
 # "<timestamp>\n<body>" with the coordinator's shared secret. Same scheme the
 # coordinator itself uses — see CoordinatorMiddleware.
-TS=""
+#
+# The timestamp is an ARGUMENT, and that is the whole point. It used to be a
+# global that sign() assigned:
+#
+#     TS=""
+#     sign() { TS="$(date +%s)"; ... }
+#     sig="$(sign "$file")"          # <-- a subshell
+#
+# `$( )` is a subshell, so the assignment never reached the caller. Every
+# request went out with `X-Coordinator-Timestamp: ` — and curl silently drops a
+# header with an empty value rather than sending an empty one, so the panel saw
+# no timestamp at all, answered 401, and logged "missing signature headers".
+# The signature was correct the whole time; nothing was there to check it
+# against.
+#
+# A function that returns one value through stdout and another through a global
+# is asking for this. Both values now come from the caller, where they are used.
 sign() {
-    TS="$(date +%s)"
-    { printf '%s\n' "$TS"; cat "$1"; } \
+    { printf '%s\n' "$1"; cat "$2"; } \
         | openssl dgst -sha256 -mac HMAC -macopt "key:$SECRET" -hex \
         | awk '{print $NF}'
 }
 
+# send_signed <method> <path> <body-file|""> <out> [curl args...]
+#
+# One place that builds the headers, so there is one place for them to be
+# wrong. The emptiness check is not paranoia: an empty header value is exactly
+# what curl throws away without telling anyone, which is how this reached a
+# customer as an unexplained 401.
+send_signed() {
+    local method=$1 path=$2 body_file=$3 out=$4
+    shift 4
+
+    local ts sig
+    ts="$(date +%s)"
+    sig="$(sign "$ts" "$body_file")"
+
+    if [ -z "$ts" ] || [ -z "$sig" ]; then
+        say "refusing to send an unsigned request to $path (timestamp='$ts', signature='${sig:+set}')"
+        return 1
+    fi
+
+    # Not curl -f. With -f the body is discarded and the exit code is 22 for
+    # every HTTP error alike, so a 401 that the panel explained in its answer
+    # arrives here as "error 22" and the operator is sent to check a secret
+    # that was never wrong. The status is read instead, and named.
+    local code
+    code="$(curl -sS \
+        -X "$method" \
+        -H "X-Coordinator-Timestamp: $ts" \
+        -H "X-Coordinator-Signature: $sig" \
+        -o "$out" \
+        -w '%{http_code}' \
+        "$@" \
+        "$PANEL$path")" || return 1
+
+    case "$code" in
+        2*) return 0 ;;
+        401|403)
+            say "the panel refused this request (HTTP $code). The shared secret in"
+            say "$ETC_DIR/coordinator.env must match Platform → Coordinator in the panel."
+            return 1
+            ;;
+        000)
+            say "$PANEL could not be reached at all."
+            return 1
+            ;;
+        *)
+            say "the panel answered HTTP $code for $path."
+            return 1
+            ;;
+    esac
+}
+
 panel_post() {
     local path=$1 body_file=$2 out=$3
-    local sig
-    sig="$(sign "$body_file")"
 
-    curl -fsS --max-time 120 \
+    send_signed POST "$path" "$body_file" "$out" \
+        --max-time 120 \
         -H 'Content-Type: application/json' \
-        -H "X-Coordinator-Timestamp: $TS" \
-        -H "X-Coordinator-Signature: $sig" \
-        --data-binary "@$body_file" \
-        -o "$out" \
-        "$PANEL$path"
+        --data-binary "@$body_file"
 }
 
 panel_get() {
     local path=$1 out=$2
-    local sig empty
+    local empty status
+
     empty="$(mktemp)"
     : > "$empty"
-    sig="$(sign "$empty")"
+
+    send_signed GET "$path" "$empty" "$out" \
+        --max-time 60 \
+        -H 'Accept: application/json'
+    status=$?
+
     rm -f "$empty"
 
-    curl -fsS --max-time 60 \
-        -H 'Accept: application/json' \
-        -H "X-Coordinator-Timestamp: $TS" \
-        -H "X-Coordinator-Signature: $sig" \
-        -o "$out" \
-        "$PANEL$path"
+    return $status
 }
 
 json() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['data'].get(sys.argv[2],''))" "$1" "$2"; }

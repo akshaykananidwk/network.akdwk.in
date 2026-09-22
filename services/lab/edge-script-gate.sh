@@ -209,6 +209,116 @@ else
     ok "and claims nothing"
 fi
 
+# 6. The headers that actually leave the machine.
+#
+# Everything above is about failing honestly. This one is about succeeding: for
+# one release the script signed its requests correctly and sent the timestamp
+# as an empty header, because TS was assigned inside a function called in a
+# $( ) subshell and the assignment never escaped it. curl drops a header with
+# an empty value, so the panel saw no timestamp at all and answered 401.
+#
+# Nothing above would have caught it — those cases all stop at the preflight,
+# long before a request is made. Asserting on a status code would not have
+# caught it cleanly either; what catches it is reading the bytes that left.
+group "the signed request is actually signed"
+
+CAPTURE="$WORK/capture.jsonl"
+CAP_SECRET="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+CAP_PORT=8791
+
+python3 "$LAB/capture-panel.py" "$CAP_PORT" "$CAPTURE" --secret "$CAP_SECRET" \
+    >"$WORK/capture.log" 2>&1 &
+CAP_PID=$!
+trap 'kill "$CAP_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
+
+# Waited for on the port rather than with a request: a readiness probe is
+# recorded like anything else, and the first version of this drill then read
+# its own probe instead of the script's request — so the headers it asserted on
+# were the ones curl never sent, and the check passed while the defect was
+# still there. The reader below filters by path for the same reason.
+for _ in $(seq 1 40); do
+    (exec 3<>"/dev/tcp/127.0.0.1/$CAP_PORT") 2>/dev/null && break
+    sleep 0.25
+done
+
+# The environment file install-edge.sh would have written.
+mkdir -p "$WORK/etc"
+cat > "$WORK/etc/coordinator.env" <<ENVFILE
+AKCONNECT_PANEL_URL=http://127.0.0.1:$CAP_PORT
+AKCONNECT_COORDINATOR_SECRET=$CAP_SECRET
+ENVFILE
+
+# --check stops after asking the panel, which is exactly as far as this needs
+# to go: the request has been made and recorded.
+env PATH="/usr/local/go/bin:$PATH" HOME="$WORK" \
+    AKCONNECT_ETC="$WORK/etc" AKCONNECT_SRC="$REPO" \
+    "$SCRIPT" --check >"$WORK/signed.out" 2>&1
+
+# jq would be neater; python3 is already a hard requirement of the script under
+# test, and one fewer dependency in a gate is one fewer reason it does not run.
+#
+# Only /api/ requests count, and a null field prints as empty rather than as
+# the string "None" — which is non-empty, and which made the first version of
+# this drill report a missing header as present.
+read_field() {
+    python3 -c "
+import json, sys
+
+rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+signed = [row for row in rows if row.get('path', '').startswith('/api/')]
+
+if not signed:
+    print('')
+else:
+    value = signed[0].get(sys.argv[2])
+    print('' if value is None else value)
+" "$CAPTURE" "$1" 2>/dev/null
+}
+
+if [ -n "$(read_field path)" ]; then
+    ok "the panel was actually called"
+else
+    bad "no signed request reached the panel" "see $WORK/signed.out"
+fi
+
+TS_SENT="$(read_field timestamp)"
+SIG_SENT="$(read_field signature)"
+VERIFIES="$(read_field signature_verifies)"
+
+if [ -n "$TS_SENT" ]; then
+    ok "X-Coordinator-Timestamp arrived non-empty ($TS_SENT)"
+else
+    bad "X-Coordinator-Timestamp was empty or missing" \
+        "the panel would answer 401 and log 'missing signature headers'"
+fi
+
+if [ -n "$SIG_SENT" ]; then
+    ok "X-Coordinator-Signature arrived non-empty"
+else
+    bad "X-Coordinator-Signature was empty or missing"
+fi
+
+# Non-empty is necessary and not sufficient: a timestamp the signature was not
+# computed over would also be non-empty.
+if [ "$VERIFIES" = "true" ] || [ "$VERIFIES" = "True" ]; then
+    ok "and the signature verifies against the timestamp that was sent"
+else
+    bad "the signature does not verify against the timestamp that was sent" \
+        "verifies=$VERIFIES"
+fi
+
+# A timestamp the panel would accept. CoordinatorMiddleware refuses one outside
+# its window, so "some string arrived" is not enough either.
+if [ -n "$TS_SENT" ] && [ "$TS_SENT" -eq "$TS_SENT" ] 2>/dev/null \
+    && [ $(( $(date +%s) - TS_SENT )) -lt 300 ]; then
+    ok "and it is a current unix timestamp, not a leftover"
+else
+    bad "the timestamp is not a plausible current one" "got '$TS_SENT'"
+fi
+
+kill "$CAP_PID" 2>/dev/null
+trap 'rm -rf "$WORK"' EXIT
+
 # ---------------------------------------------------------------- the report
 
 printf '\n  ────────────────────────────────────────────────────────────\n'

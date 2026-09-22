@@ -4,7 +4,7 @@
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Fixes a 500 on every attempt to issue a join code \u2014 a boolean passed to a ?string parameter, which under strict_types throws at the call, so both buttons on the network page failed. And fixes the reason it reached you: the update channel was stored, shown and validated but never consulted, so the panel installed the head of the branch whatever the setting said. Stable and Beta now install tagged releases; following the branch is a third channel, Edge, chosen on purpose.",
+  "notes": "Fixes deploy/upgrade-edge.sh sending an empty X-Coordinator-Timestamp \u2014 a shell global assigned inside a subshell \u2014 which made the panel answer 401 on every edge upgrade. Fixes a 500 on every attempt to issue a join code: a boolean passed to a ?string parameter, which under strict_types throws at the call. And fixes the reason both reached you: the update channel was stored, shown and validated but never consulted, so the panel installed the head of the branch whatever the setting said. Stable and Beta now install tagged releases; following the branch is a third channel, Edge, chosen on purpose.",
   "migrations": [
     "2026_09_22_190000_update_channel_edge.php"
   ],

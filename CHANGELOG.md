@@ -8,9 +8,29 @@ Notable changes per release. This project follows
 
 ## [1.9.3] — 2026-09-22
 
-Two defects, and the second is why the first reached a live panel.
+Three defects, and one of them is why the others reached a live panel.
 
 ### Fixed
+
+**`upgrade-edge.sh` sent an empty `X-Coordinator-Timestamp`, so the panel
+answered 401 on every call.** `TS` was assigned inside `sign()`, which is
+called as `sig="$(sign …)"` — a subshell — so the assignment never reached the
+caller. curl drops a header whose value is empty rather than sending it, so the
+panel saw no timestamp at all and logged "missing signature headers". The
+signature was correct the whole time; there was nothing to check it against.
+
+A function returning one value through stdout and another through a global is
+what made it possible, so the timestamp is now an argument and the headers are
+built in one place, which refuses to send a request if either is empty. The
+script also reads the HTTP status instead of using `curl -f`, because `-f`
+turned a 401 the panel had explained into "error 22" and sent the operator to
+check a shared secret that was never wrong.
+
+The gate could not have caught this: every case in it stops at the preflight,
+long before a request is made. It now starts a listener that records what
+actually left the machine and asserts the timestamp arrived, that it is a
+current one, and that the signature verifies against it — three assertions that
+go red against the shipped script and green against this one.
 
 **Issuing a join code returned HTTP 500.** `$request->input('pre_approved',
 false)` passes a bool to a parameter typed `?string`; under
