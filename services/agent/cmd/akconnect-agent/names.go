@@ -177,14 +177,14 @@ func zoneFingerprint(cfg *panel.Config) string {
 // moment it happened and never again is one that disappears from the panel the
 // first time a row is updated, and these are exactly the problems somebody
 // only looks for a week later when a customer complains.
-// unansweredProblemAfter is how many unanswered announcements are worth
-// telling an administrator about.
+// unansweredProblemAfter is how long without an answer is worth telling an
+// administrator about.
 //
-// Six, which at the retry cadence is about half a minute. Fewer would report a
-// device that is merely starting up — the first announcement is unanswered by
-// definition until the reply arrives — and a support call is not worth
-// generating for that.
-const unansweredProblemAfter = 6
+// A minute. Shorter would report a device that is merely starting up — the
+// first announcement is unanswered by definition until its reply arrives — and
+// a support call is not worth generating for that. Longer and a customer
+// standing in front of the machine has already telephoned.
+const unansweredProblemAfter = time.Minute
 
 func (s *session) problems() []panel.Problem {
 	var out []panel.Problem
@@ -226,7 +226,14 @@ func (s *session) problems() []panel.Problem {
 	// on a phone hotspot an hour earlier. It says so now, and names the port,
 	// because the port is what a firewall rule has to mention.
 	if s.discovery != nil && s.discovery.TransportProblem() == "" {
-		if count, since := s.discovery.Unanswered(); count >= unansweredProblemAfter {
+		// Judged on how long it has been, not on the count.
+		//
+		// The count is reset every time the agent moves to a different port,
+		// which is precisely what it does when nothing is answering — so a
+		// threshold on the count would have reported this fault, cleared it,
+		// reported it and cleared it again, on exactly the machines that have
+		// it. Time since the last answer only goes one way.
+		if count, since := s.discovery.Unanswered(); since >= unansweredProblemAfter {
 			out = append(out, panel.Problem{
 				Code: "discovery.no_reply",
 				Detail: fmt.Sprintf(

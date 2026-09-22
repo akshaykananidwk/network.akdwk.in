@@ -245,3 +245,47 @@ func TestAnAnswerThatArrivesDuringTheSendStillCounts(t *testing.T) {
 		t.Fatalf("the port moved %d time(s) on a link that answered every announcement", moves)
 	}
 }
+
+// The unanswered clock must survive a port move.
+//
+// Moving the port is what the agent does when nothing answers, and the move
+// resets the count of unanswered announcements. Anything that reports this
+// fault by counting would therefore report it, clear it, report it and clear
+// it again — on exactly the machines that have it. The duration is measured
+// from the last answer, and there has not been one.
+func TestTheUnansweredClockSurvivesAPortMove(t *testing.T) {
+	h := newHarness(t)
+
+	moves := 0
+	h.client.opts.MovePort = func() (int, []netip.AddrPort, error) { moves++; return 50000 + moves, nil, nil }
+
+	for i := 0; i < 30; i++ {
+		h.client.announce(true)
+		h.client.maybeMovePort()
+	}
+
+	if moves == 0 {
+		t.Fatal("no port move happened, so this is not testing what it says")
+	}
+
+	count, since := h.client.Unanswered()
+	if count == 0 {
+		t.Fatal("the count was cleared to zero by a port move, with nothing ever answered")
+	}
+	if since <= 0 {
+		t.Fatal("the duration since the last answer is zero, with nothing ever answered")
+	}
+}
+
+// And an answer clears it completely — count and clock.
+func TestAnAnswerClearsTheUnansweredClock(t *testing.T) {
+	h := newHarness(t)
+
+	h.client.announce(true)
+	h.deliverAck(t)
+
+	count, since := h.client.Unanswered()
+	if count != 0 || since != 0 {
+		t.Fatalf("after an answer the agent still reports %d unanswered for %s", count, since)
+	}
+}
