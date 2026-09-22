@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/state"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/tunnel"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/winenv"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/winsvc"
@@ -47,9 +48,19 @@ func runService(ctx context.Context, args []string) error {
 
 func serviceInstall(args []string) error {
 	fs := flag.NewFlagSet("service install", flag.ExitOnError)
-	port := fs.Int("port", tunnel.DefaultListenPort, "UDP listen port to open in the firewall")
+	port := fs.Int("port", 0, "UDP listen port to open in the firewall (default: this device's own)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	// This device's port, not everybody's. Since defect 23 each device picks
+	// its own and remembers it, so a rule for 51820 would name a port nothing
+	// is listening on — and the agent re-ensures this rule at runtime anyway,
+	// with the port it actually bound. This one exists for the window before
+	// the first `up`, because the firewall prompt appears on the interactive
+	// desktop and a service running as LocalSystem has no desktop.
+	if *port == 0 {
+		*port = installedListenPort()
 	}
 
 	if err := winsvc.Install(); err != nil {
@@ -107,4 +118,23 @@ func checkEnvironment() error {
 	}
 
 	return nil
+}
+
+// installedListenPort is the port this device has recorded, or the historical
+// default when it has never run.
+//
+// Nothing is chosen here: choosing would write a port the agent might not use,
+// and the rule is re-made at runtime with whatever is actually bound.
+func installedListenPort() int {
+	store, err := state.Open()
+	if err != nil {
+		return tunnel.DefaultListenPort
+	}
+
+	st, err := store.Load()
+	if err != nil || st == nil || st.ListenPort < 1024 || st.ListenPort > 65535 {
+		return tunnel.DefaultListenPort
+	}
+
+	return st.ListenPort
 }

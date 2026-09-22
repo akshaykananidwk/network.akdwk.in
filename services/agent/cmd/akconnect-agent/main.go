@@ -95,7 +95,7 @@ func usage() {
 
     --verbose          log WireGuard handshakes
     --iface NAME       interface name (default: platform-specific)
-    --port N           UDP listen port (default: 51820)
+    --port N           UDP listen port (default: this device's own, chosen once)
 
   status   Show enrolment, approval and tunnel state.
 

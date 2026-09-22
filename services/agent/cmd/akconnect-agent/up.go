@@ -339,6 +339,21 @@ func (s *session) applyConfig(ctx context.Context, priv wgPrivate, cfg *panel.Co
 	// The overlay has to be reachable, not merely routed. Windows Firewall
 	// drops inbound ICMP on a new adapter by default, so two machines with a
 	// working tunnel could not ping each other until this rule existed.
+	// The inbound rule for THIS device's port.
+	//
+	// It used to be created once, at install time, for a fixed 51820 — which
+	// was right until defect 23 made every device pick its own port. From that
+	// moment the rule named a port nothing was listening on, and Windows
+	// dropped every inbound discovery and WireGuard packet: a device that
+	// looked healthy, announced happily, and could be reached by nobody.
+	//
+	// Done here because this is the only place that knows the port actually in
+	// use, and repeated on every configuration pass because the port can move
+	// underneath it (see movePort).
+	if err := winenv.EnsureFirewallRule(s.port); err != nil {
+		s.logf("firewall: could not allow inbound UDP %d: %v", s.port, err)
+	}
+
 	if err := winenv.EnsureOverlayFirewall(s.tun.Name(), cfg.Network.CIDR); err != nil {
 		// Not fatal: the tunnel carries traffic either way, and a machine that
 		// cannot be pinged is better than one that is not connected. Reported

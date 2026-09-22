@@ -10,6 +10,7 @@ import (
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/state"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/wgkey"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/winenv"
 )
 
 // startDiscovery brings up peer rendezvous once the tunnel exists.
@@ -156,6 +157,13 @@ func (s *session) movePort() (int, []netip.AddrPort, error) {
 
 	s.port = port
 	s.st.ListenPort = port
+
+	// The firewall rule names a port, so it moves with it. Without this the
+	// device escapes a port its router would not carry and lands on one its
+	// own firewall will not accept.
+	if err := winenv.EnsureFirewallRule(port); err != nil {
+		s.logf("firewall: could not allow inbound UDP %d: %v", port, err)
+	}
 
 	if err := s.stateSt.Save(s.st); err != nil {
 		// Worth saying, not worth refusing: the device is on the new port

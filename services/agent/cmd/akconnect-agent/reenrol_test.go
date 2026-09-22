@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/keystore"
@@ -112,5 +114,38 @@ func TestAMachineWithNoKeyIsNotReportedAsForgotten(t *testing.T) {
 	if got := stillKnown(context.Background(), server.URL,
 		&state.State{PanelURL: server.URL, DeviceUID: "dev_1"}); got == forgotten {
 		t.Error("a machine with no key was reported as forgotten by the panel")
+	}
+}
+
+// The inbound firewall rule has to name the port the agent actually uses.
+//
+// It was created once, at install time, for a fixed 51820 — right until
+// defect 23 made every device pick its own. From that moment the rule named a
+// port nothing was listening on, and Windows dropped every inbound discovery
+// and WireGuard packet: a device that announced happily, looked healthy in the
+// panel, and could be reached by nobody. The fix for two PCs behind one router
+// would have broken the inbound path for every Windows device.
+//
+// This asserts the two places that must name the live port do so.
+func TestTheFirewallRuleFollowsThePortInUse(t *testing.T) {
+	for _, file := range []string{"up.go", "discovery.go"} {
+		source, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !strings.Contains(string(source), "winenv.EnsureFirewallRule(") {
+			t.Errorf("%s does not open the firewall for the port it is using", file)
+		}
+	}
+
+	// And nothing pins the rule to the old fixed port.
+	source, err := os.ReadFile("service.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(string(source), `fs.Int("port", tunnel.DefaultListenPort`) {
+		t.Error("service install still opens the firewall for 51820 whatever this device uses")
 	}
 }
