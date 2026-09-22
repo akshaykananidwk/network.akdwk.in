@@ -46,7 +46,12 @@ final class CoordinatorController extends Controller
                 'public_host' => (string) $current['public_host'],
                 'port'        => (int) $current['port'],
                 'public_key'  => (string) $current['public_key'],
+                'fallback_url' => (string) $current['fallback_url'],
             ],
+            // What the address would be if nobody set one, shown as the
+            // field's placeholder. Derived from the panel's own address, so
+            // the ordinary deployment needs nothing typed.
+            'fallback_default' => CoordinatorSettings::defaultFallbackUrl(),
             'has_shared_secret' => (string) $current['shared_secret'] !== '',
             'has_signing_key'   => (string) $current['signing_key'] !== '',
             'problems'          => CoordinatorSettings::problems(),

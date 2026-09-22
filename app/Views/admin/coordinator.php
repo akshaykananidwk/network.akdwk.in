@@ -1,6 +1,7 @@
 <?php
 /** @var array<string,mixed> $settings */
 /** @var bool $has_shared_secret */
+/** @var string $fallback_default */
 /** @var bool $has_signing_key */
 /** @var list<string> $problems */
 declare(strict_types=1);
@@ -143,6 +144,22 @@ declare(strict_types=1);
                 this panel uses — a split-horizon DNS or a private link.
             </p>
             <?php if (field_error('public_host') !== ''): ?><p class="field-error"><?= e(field_error('public_host')) ?></p><?php endif; ?>
+        </div>
+
+        <div class="field">
+            <label for="fallback_url">HTTPS fallback address</label>
+            <input type="text" id="fallback_url" name="fallback_url" maxlength="253"
+                   value="<?= e(old('fallback_url', (string) $settings['fallback_url'])) ?>"
+                   placeholder="<?= e($fallback_default !== '' ? $fallback_default : 'wss://panel.example.com/fallback') ?>">
+            <p class="field-hint">
+                Where a device goes when the network it is on carries no UDP at all — a hotel, a
+                guest network, an office that lets UDP out and drops the replies. On those,
+                nothing else here can be reached, the coordinator included, so the device cannot
+                even ask for help. <code>deploy/install-edge.sh</code> configures Apache to serve
+                this and fills it in; change it only for a separate edge host.
+                It must be <code>wss://</code>: this is the one port every network inspects.
+            </p>
+            <?php if (field_error('fallback_url') !== ''): ?><p class="field-error"><?= e(field_error('fallback_url')) ?></p><?php endif; ?>
         </div>
 
         <div class="field">
