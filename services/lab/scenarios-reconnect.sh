@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# Reconnection after a reboot or an address change (defect 24).
+#
+# Sourced by scenarios.sh.
+#
+# Two real Windows PCs on 1.9.3 connected directly, were rebooted, and never
+# got back. The coordinator log shows why it is worth a scenario of its own:
+# everything up to the reconnection worked. The service auto-started, the
+# heartbeat resumed, the agent said hello — and then said it again every twenty
+# seconds for three minutes, while the panel showed both machines Online and
+# the laptop's endpoint still reading the address it had before the reboot.
+#
+# The interesting part is what was NOT in that log: no endpoint push to the
+# peer that stayed up, and no relay offer to the side that came back. The pair
+# was introduced once, at a moment when only one of them was there, and nothing
+# reconsidered it afterwards.
+#
+# Two shapes, because they fail differently:
+#
+#   reconnect      — B restarts on a NEW public address while A stays up. This
+#                    is the mobile-IP case: A holds an address that is now
+#                    somebody else's.
+#   reconnect-both — both restart, B returning a minute after A. This is the
+#                    power-cut case, and the one where a relay gets offered to
+#                    a side whose partner has not arrived yet.
+#
+# Both assert the same thing, which is the customer's requirement: back to a
+# working path within 30 seconds, with nothing typed.
+
+# How long a reconnection may take. This is the product requirement, not a
+# tuning knob — a laptop that takes two minutes to come back is a laptop the
+# customer reports as broken.
+RECONNECT_BUDGET=${RECONNECT_BUDGET:-30}
+
+scenario_reconnect() {
+    step "a peer restarts on a new address — the pair must find each other again"
+
+    fixture nat
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
+        record "reconnect/paired" FAIL "the pair never connected in the first place"
+        lab::tail_log alpha-up 12
+        return
+    fi
+    record "reconnect/paired" PASS "alpha and beta are connected before anything is restarted"
+
+    # Settled: both ends are pinging rather than saying hello, which is the
+    # state the field was in when the reboot happened.
+    sleep 20
+
+    local before
+    before="$(lab::settled_path alpha 10)"
+    record "reconnect/before" INFO "the path before the restart is $before"
+
+    # Beta goes away and comes back somewhere else. 10.0.0.11 → 10.0.0.21 is
+    # the lab's version of a phone getting a different mobile IP: alpha now
+    # holds an address that beta is no longer behind.
+    lab::down_agent beta
+    lab::renumber beta natgw-b 11 21 192.168.20 cone
+
+    local restarted_at
+    restarted_at="$(date +%s)"
+
+    lab::up beta
+
+    if ! lab::wait_up beta 60; then
+        record "reconnect/restarted" FAIL "beta never came back up at all"
+        lab::tail_log beta-up 12
+        return
+    fi
+    record "reconnect/restarted" PASS "beta came back on 10.0.0.21, a different public address"
+
+    if lab::wait_tunnel alpha "$BETA_IP" "$((RECONNECT_BUDGET + 15))"; then
+        local took=$(( $(date +%s) - restarted_at ))
+        if [ "$took" -le "$RECONNECT_BUDGET" ]; then
+            record "reconnect/restored" PASS "traffic resumed ${took}s after the restart"
+        else
+            record "reconnect/restored" FAIL \
+                "traffic resumed, but after ${took}s — the budget is ${RECONNECT_BUDGET}s"
+        fi
+    else
+        record "reconnect/restored" FAIL "alpha never reached beta again after it moved"
+        lab::tail_log alpha-up 15
+        lab::tail_log coordinator 15
+        return
+    fi
+
+    # The other direction as well. A pair where only one side can start the
+    # conversation is half a network.
+    if lab::wait_tunnel beta "$ALPHA_IP" 30; then
+        record "reconnect/mutual" PASS "and beta reached alpha"
+    else
+        record "reconnect/mutual" FAIL "beta cannot reach alpha, though alpha can reach beta"
+    fi
+
+    # (d) The panel has to follow. An endpoint that still reads the old
+    # address is what an administrator is looking at while they are told
+    # everything is fine.
+    local endpoint
+    endpoint="$(php "$LAB_DIR/lab-setup.php" endpoint "$UID_BETA" 2>/dev/null)"
+    if [ "${endpoint%%:*}" = "10.0.0.21" ]; then
+        record "reconnect/endpoint" PASS "the panel shows beta at its current address ($endpoint)"
+    else
+        record "reconnect/endpoint" FAIL \
+            "the panel still shows beta at $endpoint, not 10.0.0.21"
+    fi
+
+    assert_split_tunnel alpha "reconnect/R1"
+}
+
+scenario_reconnect_both() {
+    step "both peers restart, one returning a minute after the other"
+
+    fixture nat
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
+        record "both/paired" FAIL "the pair never connected in the first place"
+        lab::tail_log alpha-up 12
+        return
+    fi
+    record "both/paired" PASS "alpha and beta are connected before the power cut"
+
+    sleep 20
+
+    # Everything goes down, which is what a power cut does.
+    lab::down_agent alpha
+    lab::down_agent beta
+
+    # Alpha comes back first and is alone for a while. In the field this is
+    # where the coordinator offered a relay to the one machine that was there,
+    # for a peer that could not possibly answer — and then never revisited it.
+    lab::up alpha
+    if ! lab::wait_up alpha 60; then
+        record "both/first-back" FAIL "alpha never came back up"
+        lab::tail_log alpha-up 12
+        return
+    fi
+    record "both/first-back" PASS "alpha is back, with its peer still absent"
+
+    # A minute, as reported. Long enough that everything the coordinator did
+    # for alpha was done while beta did not exist.
+    sleep 60
+
+    lab::renumber beta natgw-b 11 22 192.168.20 cone
+
+    local returned_at
+    returned_at="$(date +%s)"
+
+    lab::up beta
+    if ! lab::wait_up beta 60; then
+        record "both/second-back" FAIL "beta never came back up"
+        lab::tail_log beta-up 12
+        return
+    fi
+    record "both/second-back" PASS "beta is back a minute later, on a new address"
+
+    if lab::wait_tunnel alpha "$BETA_IP" "$((RECONNECT_BUDGET + 15))"; then
+        local took=$(( $(date +%s) - returned_at ))
+        if [ "$took" -le "$RECONNECT_BUDGET" ]; then
+            record "both/restored" PASS "traffic resumed ${took}s after the second machine returned"
+        else
+            record "both/restored" FAIL \
+                "traffic resumed, but after ${took}s — the budget is ${RECONNECT_BUDGET}s"
+        fi
+    else
+        record "both/restored" FAIL "the pair never reconnected after both restarted"
+        lab::tail_log alpha-up 15
+        lab::tail_log coordinator 20
+        return
+    fi
+
+    # (c) The agent said hello every twenty seconds for three minutes in the
+    # field, which is what it does when the coordinator's answer never
+    # arrives. A settled agent sends hellos at helloInterval, five minutes
+    # apart — so more than a handful over a short run means the same thing is
+    # happening here.
+    local hellos
+    hellos="$(grep -c 'hello from' "$LOGS/coordinator.log" 2>/dev/null)" || hellos=0
+    if [ "$hellos" -le 12 ]; then
+        record "both/settled" PASS "the agents settled: $hellos hello(s) in total"
+    else
+        record "both/settled" FAIL \
+            "$hellos hellos — an agent that is not being answered re-announces forever"
+    fi
+
+    assert_split_tunnel alpha "both/R1"
+}

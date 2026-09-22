@@ -209,6 +209,31 @@ function labZone(int $networkId): int
 }
 
 /**
+ * Print the address the panel currently believes a device is at.
+ *
+ * Defect 24: after a reboot onto a different mobile IP, the panel still showed
+ * the laptop at the address it had before, while telling the administrator it
+ * was Online. Somebody looking at that page has no way to tell a working
+ * device from one nothing can reach — so the drill reads back what the panel
+ * would show, rather than trusting that the agent reported it.
+ */
+function labEndpoint(string $uid): int
+{
+    if ($uid === '') {
+        return fail('usage: endpoint <device-uid>');
+    }
+
+    $device = findDevice($uid);
+    if ($device === null) {
+        return fail("device {$uid} not found");
+    }
+
+    printf("%s\n", (string) ($device['last_endpoint'] ?? ''));
+
+    return 0;
+}
+
+/**
  * Print what a device has reported it could not do.
  *
  * The drill needs this because "the agent refused the route" and "somebody

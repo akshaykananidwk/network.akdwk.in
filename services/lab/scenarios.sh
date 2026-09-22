@@ -312,6 +312,7 @@ source "$LAB/scenarios-acl.sh"
 source "$LAB/scenarios-enrol.sh"
 source "$LAB/scenarios-gateway.sh"
 source "$LAB/scenarios-dns.sh"
+source "$LAB/scenarios-reconnect.sh"
 source "$LAB/scenarios-resolved.sh"
 
 # ---------------------------------------------------------------- CGNAT

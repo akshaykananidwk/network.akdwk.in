@@ -93,6 +93,91 @@ lab::up() {
 # rule that still holds afterwards is being held by the other end.
 lab::up_tampered() { lab::up "$1" akconnect-agent-tampered; }
 
+# lab::down_agent stops ONE namespace's agent, the way a reboot does.
+#
+# The scenarios that restart a peer need the other one left alone: the whole
+# question is what the surviving side does while its partner is away, and
+# taking both down answers a different question.
+#
+# It removes the pid from AGENT_PIDS so the teardown does not later wait on a
+# process that is long gone.
+lab::down_agent() {
+    local ns=$1 pid exe target remaining=()
+
+    target="$(readlink -f "$BIN/akconnect-agent")"
+
+    # Found by what each process is executing and which namespace it is in,
+    # not by a command-line pattern: pkill -f has matched this harness's own
+    # shell before now.
+    for entry in /proc/[0-9]*; do
+        pid="${entry#/proc/}"
+        exe="$(readlink "$entry/exe" 2>/dev/null)" || continue
+        [ "$exe" = "$target" ] || continue
+        [ "$(readlink "$entry/ns/net" 2>/dev/null)" = "$(readlink "/var/run/netns/$ns" 2>/dev/null)" ] \
+            && kill -TERM "$pid" 2>/dev/null
+    done
+
+    for pid in "${AGENT_PIDS[@]:-}"; do
+        [ -n "$pid" ] || continue
+        if kill -0 "$pid" 2>/dev/null; then
+            remaining+=("$pid")
+        fi
+    done
+    AGENT_PIDS=("${remaining[@]:-}")
+
+    # The interface goes with it. A reboot leaves nothing behind, and a stale
+    # wg device would let the next "up" look like it recovered when it only
+    # inherited.
+    ip netns exec "$ns" ip link del akc0 2>/dev/null || true
+}
+
+# lab::renumber gives a namespace a new public address, the way a phone gets
+# one after a reboot.
+#
+# This is the case that broke in the field: the laptop came back on a different
+# mobile IP, and everything the other end knew about it was wrong. Changing the
+# port alone would not reproduce it — the address is what the peer had stored.
+lab::renumber() {
+    local ns=$1 gw=$2 from=$3 to=$4 private=$5 mode=${6:-cone}
+
+    ip netns exec "$gw" ip address del "10.0.0.$from/24" dev "wan-$gw" 2>/dev/null || true
+    ip netns exec "$gw" ip address add "10.0.0.$to/24" dev "wan-$gw"
+
+    # The old rules point at the old address, so they go with it.
+    ip netns exec "$gw" iptables -t nat -F
+
+    apply_nat_mode_in "$gw" "$to" "$private" "$mode"
+
+    # Conntrack remembers the old mapping and would keep using it.
+    ip netns exec "$gw" conntrack -F >/dev/null 2>&1 || true
+}
+
+# apply_nat_mode_in is topology.sh's apply_nat_mode, reachable from a scenario.
+#
+# Duplicated rather than sourced because topology.sh is a command, not a
+# library: sourcing it runs it.
+apply_nat_mode_in() {
+    local gw=$1 publicLast=$2 private=$3 mode=$4
+    local wan="10.0.0.$publicLast"
+    local host="$private.2"
+
+    if [ "$mode" = "symmetric" ]; then
+        ip netns exec "$gw" iptables -t nat -A POSTROUTING -s "$private.0/24" \
+            -o "wan-$gw" -p udp -j MASQUERADE --random-fully
+        ip netns exec "$gw" iptables -t nat -A POSTROUTING -s "$private.0/24" \
+            -o "wan-$gw" -j MASQUERADE
+
+        return
+    fi
+
+    ip netns exec "$gw" iptables -t nat -A POSTROUTING -s "$host" -p udp --sport 51820 \
+        -o "wan-$gw" -j SNAT --to-source "$wan:51820"
+    ip netns exec "$gw" iptables -t nat -A PREROUTING -d "$wan" -p udp --dport 51820 \
+        -i "wan-$gw" -j DNAT --to-destination "$host:51820"
+    ip netns exec "$gw" iptables -t nat -A POSTROUTING -s "$private.0/24" \
+        -o "wan-$gw" -j MASQUERADE
+}
+
 lab::down_agents() {
     local pid
     for pid in "${AGENT_PIDS[@]:-}"; do
