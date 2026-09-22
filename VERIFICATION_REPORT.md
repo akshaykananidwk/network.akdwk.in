@@ -133,7 +133,7 @@ touching it.
 | Leaving a port the router will not carry | **Pass** | 5 unit tests, including the two that must NOT move a port: a quiet coordinator while a peer is reachable, and a dead socket |
 | **Defect 30** — service after a reboot | **Built, not proved** | Delayed auto-start, Tcpip/Dnscache dependencies, three recovery actions, non-crash failures included. Needs a Windows restart — checklist §4 |
 | **Defect 31** — health check | **Pass** | Coordinator-seen timestamp replaces a TCP probe that could not work from the panel |
-| Resume from sleep / network change | **Pass (lab)** | New `roaming` scenario: address changed under a **running** agent, traffic back in **15s** against a 30s budget, **same process**, and the log shows it noticed rather than waited |
+| Resume from sleep / network change | **Pass (lab)** | New `roaming` scenario: address changed under a **running** agent, traffic back in **15s** against a 30s budget, **same process**, and the log shows it noticed rather than waited. See K.1b item 4 for what the first version of this got wrong |
 | Uninstall from Settings → Apps | **Built, not proved** | Registry entry written; uninstaller relaunches from a temp copy so it can delete its own folder |
 | `setup.exe /S /CODE=` | **Pass (logic)** | 12-case switch table test |
 | `msiexec /qn` | **Structure checked** | The MSI's tables are read back after every build: 14 checks, including the two traps this hit |
@@ -147,6 +147,63 @@ touching it.
 | Edge upgrade timer on by default | **Pass** | Edge gate: units written and enabled with no arguments; `--no-timer` leaves an INFO row |
 | Alerts to a telephone | **Pass (logic)** | Escaping, flattening and the off-by-default behaviour; no WhatsApp API has been called |
 | Second relay | **Built, not proved** | `deploy/add-relay.sh`; the coordinator's multi-relay selection is already drilled by `relay-failover` |
+
+### K.1b — What the release gate found, after everything above was written
+
+The gate went red twice before it went green, and every cause was mine.
+Recorded here because a release note that says "all gates clean" without
+saying what it took to get there is the kind of account this project does not
+write.
+
+**Run 1 — seven red checks, and I contaminated it.** I ran builds and test
+suites on the same machine while its timing-sensitive scenarios ran. That
+alone invalidated it; the results were still worth reading, and they named two
+real faults.
+
+1. **The agent counted an announcement after sending it.** The coordinator's
+   answer is handled on another goroutine and, on a fast path, lands in
+   microseconds — so the ack could clear the counter and the sending side then
+   set it back to one, where it stayed. The agent re-announced every five
+   seconds indefinitely and, given enough of them, would have moved to a
+   different UDP port on a link that was working perfectly. Counting now
+   happens before the send and is undone if the send fails. The test delivers
+   the ack from inside the send and fails on the old ordering.
+
+2. **The lab's cone NAT was hard-coded to 51820.** One SNAT preserving that
+   port outbound, one DNAT for it inbound — correct until every device started
+   picking its own port. An agent on 52278 matched neither rule and fell
+   through to plain MASQUERADE, which is a *restricted* cone: the mapping
+   exists only for a host the agent has already sent to. So "cone NAT — both
+   sides punchable" was testing something else, and six checks that depend on
+   a direct path appearing quickly went red. A lab that says cone and gives
+   you restricted cone is the same false-pass class as a gate that prints PASS
+   after a failed preflight.
+
+**Run 2 — two red checks, on an idle machine.** Both reproduced as passes when
+run alone, which is the signature of a check measuring something other than
+what it names.
+
+3. **both/settled counted every hello in the run.** The coordinator is started
+   once for the whole gate and its log is never truncated, so the count
+   included every scenario that went first: it reported "21 hellos — an agent
+   that is not being answered re-announces forever" about agents answered every
+   time. Alone, the same code reported four. It now counts from a mark taken
+   when the scenario starts.
+
+4. **clash/overlay was a real product defect, and the most interesting one
+   here.** It reproduced with a single scenario before it. Sampling alpha's
+   routing table through the failure showed the overlay route and address
+   correct throughout — the configuration was fine and the data path was not.
+   The agent's own status file showed its reflexive endpoint changing
+   mid-scenario. The scenario adds a network interface to create the clash;
+   the address watcher added in this release saw that as a network change and
+   reopened the socket — throwing away the NAT mapping every peer was sending
+   to, and costing a full re-punch. Docking a laptop, starting a virtual
+   machine or another VPN client all look identical from in there. A wake now
+   re-announces and does not rebind; if the socket really is dead, the
+   announcement fails and the dead-socket detector owns it.
+
+**Run 3 — 108 of 108 networking checks, and every other gate clean.**
 
 ### K.2 — Defects found while building 1.9.5
 
@@ -181,6 +238,22 @@ only reason they are in this list rather than in a customer's report.
    machine goes away" removed a pid from an array and nothing else — the
    reconnect scenarios were testing a weaker thing than they claimed. Both
    scenarios were re-run after the fix and still pass.
+
+### K.2b — The gates, as they finally ran
+
+```
+$ ./services/lab/release.sh --url=http://127.0.0.1:8088
+
+  test suites (PHP)                          727 assertions, 0 failed
+  test suites (Go, -race)                    clean across all four modules
+  the edge script fails honestly             38 passed, 0 failed
+  Windows pack builds and is stamped         clean (MSI built and its tables checked)
+  the agent replaces itself, and refuses     clean
+  web gate (Apache + PHP-FPM)                clean
+  Argon2 gate (libsodium)                    clean
+  networking gate                            108 checks, 0 failed
+  update gate                                17 checks, all passed
+```
 
 ### K.3 — What is NOT proved, and cannot be from here
 
