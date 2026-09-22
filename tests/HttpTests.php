@@ -62,6 +62,7 @@ final class HttpTests
             self::rateLimiting();
             // 1.9.2: the edge's own upgrade path, end to end over HTTP.
             self::edgeUpgrade();
+            self::installLink();
             self::selfUpdate();
         } finally {
             self::removeFixtures();
@@ -118,6 +119,7 @@ final class HttpTests
 
                 $network = NetworkService::create(['name' => ucfirst($key) . ' Net', 'cidr' => $cidr]);
                 self::$fixtures[$key]['network_id'] = (int) $network['id'];
+                self::$fixtures[$key]['network_name'] = (string) $network['name'];
 
                 $code = JoinCode::issue($tenantId, (int) $network['id'], null, 0, 120);
                 self::$fixtures[$key]['join_code'] = $code['code'];
@@ -837,6 +839,100 @@ final class HttpTests
      * posts two separate forms rather than a checkbox — and the drill would
      * have caught it with either one.
      */
+    /**
+     * 1.9.5: one link a supplier can send, with the code already in it.
+     *
+     * The page has to work for somebody who is not signed in and never will
+     * be — that is the entire point of it — and it must not become a way to
+     * ask the panel which codes are real.
+     */
+    private static function installLink(): void
+    {
+        TestCase::group('HTTP — the install link a customer is sent (1.9.5)');
+
+        // The page offers the installer this panel publishes, so there has to
+        // be one. Published here and put back afterwards, the same way
+        // edgeUpgrade does it: a test that left a fake installer as the live
+        // download would break the thing it was checking.
+        $before = [];
+        foreach (['file', 'version', 'sha256', 'size', 'published_at'] as $key) {
+            $before[$key] = Setting::get('edge.windows-setup.' . $key, null);
+        }
+
+        try {
+            self::installLinkChecks();
+        } finally {
+            foreach ($before as $key => $value) {
+                Setting::set('edge.windows-setup.' . $key, $value === null ? null : (string) $value);
+            }
+            Setting::flushCache();
+
+            @unlink(APP_ROOT . '/storage/downloads/akconnect-setup-1.9.5-installlink.exe');
+        }
+    }
+
+    /** @see self::installLink() — the body, so the restore above is a finally. */
+    private static function installLinkChecks(): void
+    {
+        $name = 'akconnect-setup-1.9.5-installlink.exe';
+        $body = str_repeat('MZ', 64);
+        file_put_contents(APP_ROOT . '/storage/downloads/' . $name, $body);
+
+        Setting::set('edge.windows-setup.file', $name);
+        Setting::set('edge.windows-setup.version', '1.9.5-installlink');
+        Setting::set('edge.windows-setup.sha256', hash('sha256', $body));
+        Setting::set('edge.windows-setup.size', (string) strlen($body));
+        Setting::set('edge.windows-setup.published_at', gmdate('Y-m-d H:i:s'));
+        Setting::flushCache();
+
+        $client = self::signIn('alpha');
+        $networkId = (int) self::$fixtures['alpha']['network_id'];
+
+        $client->get('/networks/' . $networkId);
+        $client->post('/networks/' . $networkId . '/join-code', [
+            '_token' => (string) $client->csrfToken(),
+        ]);
+
+        $code = self::latestJoinCode($networkId);
+        TestCase::assert($code !== null, 'a join code was issued to link to');
+
+        $plain = (string) ($code['code'] ?? '');
+
+        // The supplier's page offers the link, with the code in it.
+        $client->get('/networks/' . $networkId);
+        TestCase::assertContains('/join/' . $plain, $client->body(),
+            'the network page offers a link with the code already in it');
+
+        // And a customer, signed in to nothing, gets a page with the code on
+        // it and a download button.
+        $anonymous = new HttpClient(self::$baseUrl);
+        $anonymous->get('/join/' . $plain);
+        TestCase::assertSame(200, $anonymous->status(), 'the install page opens without signing in');
+        TestCase::assertContains($plain, $anonymous->body(), 'and shows the code the customer has to type');
+        TestCase::assertContains('/download/setup.exe', $anonymous->body(), 'and a download button');
+
+        // Typed in lower case, or pasted with a space, is the same code. That
+        // is not the customer's mistake to pay for.
+        $anonymous->get('/join/' . strtolower($plain) . '%20');
+        TestCase::assertSame(200, $anonymous->status(), 'a code typed in lower case still opens the page');
+        TestCase::assertContains($plain, $anonymous->body(), 'and is shown back in the form the installer wants');
+
+        // A code that is not real gets the same page, not an answer. A page
+        // that said "that one is not valid" would say it for anyone asking,
+        // which is a way to hunt for codes.
+        $anonymous->get('/join/NOT-A-REAL-CODE');
+        TestCase::assertSame(200, $anonymous->status(),
+            'an unknown code is not treated as a question the panel answers');
+
+        // Nothing about the network reaches the page: not its name, not its
+        // customer. The link is sent over WhatsApp and gets forwarded.
+        $networkName = (string) self::$fixtures['alpha']['network_name'];
+        TestCase::assert(
+            !str_contains($anonymous->body(), $networkName),
+            'the install page does not name the network the code belongs to'
+        );
+    }
+
     private static function joinCodeForms(): void
     {
         TestCase::group('HTTP — issuing a join code, both buttons (1.9.2)');

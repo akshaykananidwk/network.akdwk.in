@@ -107,6 +107,9 @@ final class NetworkController extends Controller
             'install_unix'    => $detail['join_code'] !== null
                 ? NetworkService::installCommand((string) $detail['join_code']['code'], 'linux')
                 : null,
+            'install_link'    => $detail['join_code'] !== null
+                ? NetworkService::installLink((string) $detail['join_code']['code'])
+                : null,
         ]));
     }
 
@@ -200,6 +203,7 @@ final class NetworkController extends Controller
                 'expires_at'      => $code['expires_at'],
                 'install_windows' => NetworkService::installCommand($code['code'], 'windows'),
                 'install_unix'    => NetworkService::installCommand($code['code'], 'linux'),
+                'install_link'    => NetworkService::installLink($code['code']),
             ]);
         }
 

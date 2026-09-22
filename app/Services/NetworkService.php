@@ -302,6 +302,21 @@ final class NetworkService
      * join code and nothing else (§33). Printing a command there would be
      * offering the hard way as if it were the way.
      */
+    /**
+     * The one link to send a customer, with their code already in it.
+     *
+     * What a supplier actually does is paste something into WhatsApp. Two
+     * things to paste — a file and a code — is two things to get wrong, and
+     * the telephone call that follows is about a code typed with a lowercase
+     * L in it. This is one thing.
+     */
+    public static function installLink(string $joinCode): string
+    {
+        $url = rtrim((string) Config::get('app.url', ''), '/');
+
+        return $url . '/join/' . rawurlencode($joinCode);
+    }
+
     public static function installCommand(string $joinCode, string $os = 'windows'): string
     {
         $url = rtrim((string) Config::get('app.url', ''), '/');

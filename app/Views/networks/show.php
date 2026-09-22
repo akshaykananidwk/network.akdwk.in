@@ -79,11 +79,16 @@ $base = url('networks/' . $network['id']);
 
             <div class="install-commands">
                 <div class="install-block">
-                    <span class="text-muted text-sm">Windows</span>
+                    <span class="text-muted text-sm">Windows — send this one link</span>
+                    <div class="code-row">
+                        <code id="install-link"><?= e((string) ($install_link ?? '')) ?></code>
+                        <button type="button" class="btn btn-sm"
+                                data-action="copy" data-copy-target="install-link">Copy link</button>
+                    </div>
                     <p class="text-sm">
-                        Send the customer <code>akconnect-setup.exe</code> and the code above.
-                        They double-click it, type the code, and click OK — nothing else.
-                        No PowerShell, no restart.
+                        Paste it into WhatsApp or an email. It opens a page with the download
+                        button and this code already on it — the customer double-clicks, clicks
+                        OK, and is done. No PowerShell, no restart, nothing else to send.
                     </p>
                 </div>
                 <div class="install-block">

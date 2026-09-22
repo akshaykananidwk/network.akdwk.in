@@ -42,6 +42,12 @@ $router->group('', ['maintenance'], static function (Router $router): void {
     // alternative is a customer on the phone.
     $router->get('/download/setup.exe', 'DownloadController@windowsSetup', ['throttle:download']);
     $router->get('/download/windows-pack.zip', 'DownloadController@windowsPack', ['throttle:download']);
+
+    // One link to send a customer, with their join code already in it. The
+    // code is the credential and it is short-lived, limited and revocable —
+    // see InstallLinkController for why this is not behind a sign-in.
+    $router->get('/join/{code}', 'InstallLinkController@show', ['throttle:download']);
+    $router->get('/join', 'InstallLinkController@show', ['throttle:download']);
 });
 
 // ------------------------------------------------------------ dashboard
