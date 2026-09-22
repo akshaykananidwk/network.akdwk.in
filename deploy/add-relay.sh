@@ -32,13 +32,16 @@ die() { printf '\n  \033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
 say() { printf '  %s\n' "$*"; }
 
+# shellcheck source=lib-edge-args.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib-edge-args.sh"
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --name)        NAME="${2:-}"; shift 2 ;;
-        --public-host) PUBLIC_HOST="${2:-}"; shift 2 ;;
-        --coordinator) COORDINATOR="${2:-}"; shift 2 ;;
-        --region)      REGION="${2:-}"; shift 2 ;;
-        --src)         SRC_DIR="${2:-}"; shift 2 ;;
+        --name) akconnect_need_value --name "$#"; NAME="$2"; shift 2 ;;
+        --public-host) akconnect_need_value --public-host "$#"; PUBLIC_HOST="$2"; shift 2 ;;
+        --coordinator) akconnect_need_value --coordinator "$#"; COORDINATOR="$2"; shift 2 ;;
+        --region) akconnect_need_value --region "$#"; REGION="$2"; shift 2 ;;
+        --src) akconnect_need_value --src "$#"; SRC_DIR="$2"; shift 2 ;;
         *) die "unknown option: $1
     Valid options are --name, --public-host, --coordinator, --region and --src." ;;
     esac

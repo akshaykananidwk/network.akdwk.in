@@ -259,6 +259,9 @@ keep() { TEMP_PATHS+=("$1"); }
 # both cases the run did not do its job and did not say so.
 #
 # Now die() handles it, which records a FAIL and lets the trap print the table.
+# shellcheck source=lib-edge-args.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib-edge-args.sh"
+
 while [ $# -gt 0 ]; do
     case "$1" in
         # Kept so an existing runbook, cron entry or muscle memory does not
@@ -271,7 +274,7 @@ while [ $# -gt 0 ]; do
         # Set by the timer unit. See UNATTENDED below.
         --unattended)    UNATTENDED=1; shift ;;
         --skip-pack)     SKIP_PACK=1; shift ;;
-        --src)           SRC_DIR="${2:-}"; shift 2 ;;
+        --src) akconnect_need_value --src "$#"; SRC_DIR="$2"; shift 2 ;;
         *) die "unknown option: $1
     Valid options are --check, --skip-pack, --no-timer, --install-timer,
     --configure-apache, --no-configure-apache, --unattended

@@ -67,6 +67,10 @@ func (r *Relay) NewEdge(opts EdgeOptions) (*Edge, error) {
 // Live is how many agents are currently on the fallback path.
 func (e *Edge) Live() int64 { return e.live.Load() }
 
+// HealthLine is the first line of the health reply, and the one thing on the
+// machine that says the relay itself answered.
+const HealthLine = "ok akconnect-relay fallback"
+
 // Handler serves the fallback on the given path plus a health probe.
 //
 // The probe answers an ordinary GET, because the first thing to establish on a
@@ -81,7 +85,13 @@ func (e *Edge) Handler(path string) http.Handler {
 	mux.Handle(path, e)
 	mux.HandleFunc(path+"/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		fmt.Fprintf(w, "ok\nfallback sessions: %d\n", e.Live())
+		// The first word names this program. "ok" alone was not enough to
+		// tell "the relay answered" from "this site answers 200 for every
+		// path it does not recognise", which is what a panel with a front
+		// controller does — and the panel this is installed beside is one.
+		// install-edge.sh and the before/after probe both read this line to
+		// decide whether the proxy really reaches the relay.
+		fmt.Fprintf(w, "%s\nfallback sessions: %d\n", HealthLine, e.Live())
 	})
 
 	return mux

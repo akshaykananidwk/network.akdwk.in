@@ -1108,7 +1108,7 @@ CTL
 #   $4 name that leaks it over plain HTTP   $5 y|n, the operator's answer
 run_against() {
     env FIXTURE="$1" PANEL_URL="$2" LEAK="${3:-}" LEAKPLAIN="${4:-}" \
-        ANSWER="${5:-y}" REPO="$REPO" bash -c '
+        ANSWER="${5:-y}" PRELEAK="${6:-}" WRONGBLOCK="${7:-}" REPO="$REPO" bash -c '
         set -uo pipefail
         . "$REPO/deploy/lib-edge-apache.sh"
         . "$REPO/deploy/lib-edge-vhost.sh"
@@ -1123,17 +1123,42 @@ run_against() {
         # /fallback, except the panel once the include is really in its file,
         # and whatever LEAK names — which is the scope failure to catch.
         akconnect_site_probe() {
-            local out=${1:-/dev/stdout} name fb plain panel
+            local out=${1:-/dev/stdout} name fb plain panel applied=0
             panel="$FIXTURE/vhost/apache/network.akdwk.in.conf"
+            grep -q "AK Connect" "$panel" 2>/dev/null && applied=1
+
             while read -r name; do
                 fb=404; plain=404
-                if [ "$name" = network.akdwk.in ] && grep -q "AK Connect" "$panel" 2>/dev/null; then
-                    fb=200
+
+                # PRELEAK answers 200 whether or not the change went in: a site
+                # with a catch-all front controller, which answers 200 for a
+                # path it has never heard of. Thirty of those is what the
+                # target machine is. LEAK answers 200 only once the change is
+                # really in the panel file, which is what a scope leak this
+                # change caused actually looks like.
+                case " $PRELEAK " in *" $name "*) fb=200 ;; esac
+
+                if [ "$applied" = 1 ]; then
+                    [ "$name" = network.akdwk.in ] && fb=200
+                    case " $LEAK " in *" $name "*) fb=200 ;; esac
+                    case " $LEAKPLAIN " in *" $name "*) plain=200 ;; esac
                 fi
-                case " $LEAK " in *" $name "*) fb=200 ;; esac
-                case " $LEAKPLAIN " in *" $name "*) plain=200 ;; esac
+
                 printf "%s 200 %s %s\n" "$name" "$fb" "$plain"
             done < <(akconnect_site_names) > "$out"
+        }
+
+        # No Apache here, so there is no default virtual host to ask.
+        akconnect_default_vhost_leaks() { return 0; }
+
+        # Whether the RELAY answered, as opposed to the site answering 200 for
+        # a path it does not recognise. True once the include is really in the
+        # panel file — unless WRONGBLOCK says the include landed in a virtual
+        # host that is not the one serving the request, which is the case a
+        # status code alone can never see.
+        akconnect_probe_is_relay() {
+            [ -n "$WRONGBLOCK" ] && return 1
+            grep -q "AK Connect" "$FIXTURE/vhost/apache/network.akdwk.in.conf" 2>/dev/null
         }
 
         akconnect_confirm() { [ "$ANSWER" = y ]; }
@@ -1214,6 +1239,35 @@ grep -q 'RESULT=2' <<<"$OUT" \
 cmp -s "$WORK/panel.before" "$AA/$PANEL_CONF" \
     && ok "and the change is rolled back although Apache accepted it" \
     || bad "a scope leak was detected and the change was left in place"
+
+# The other half of the same judgement. A site that answered 200 for an unknown
+# path BEFORE the change has not gained a tunnel, and rolling back somebody's
+# production server over a front controller it has always had is its own kind
+# of harm. On this machine there are thirty candidates for it.
+aapanel_fixture "$AA"
+OUT="$(run_against "$AA" https://network.akdwk.in "" "" y site5.example.com)"
+
+grep -q 'RESULT=0' <<<"$OUT" \
+    && ok "a site that already answered 200 for any path is not called a leak" \
+    || bad "a pre-existing catch-all was read as a tunnel this change published"
+
+# And the case a status code cannot see at all: the panel answers 200 on
+# /fallback/health because it answers 200 on everything, while the include
+# actually landed in a virtual host that is not the one serving the request.
+# Apache accepts the configuration, every site answers as before, and the
+# tunnel does not work. Only the relay naming itself in the body tells them
+# apart.
+aapanel_fixture "$AA"
+cp "$AA/$PANEL_CONF" "$WORK/panel.before"
+OUT="$(run_against "$AA" https://network.akdwk.in "" "" y "" wrong-block)"
+
+grep -q 'RESULT=2' <<<"$OUT" \
+    && ok "a panel that answers 200 without the relay behind it fails the run" \
+    || bad "a 200 from the site itself was accepted as the tunnel working"
+
+cmp -s "$WORK/panel.before" "$AA/$PANEL_CONF" \
+    && ok "and that change is rolled back too" \
+    || bad "the include was left in a virtual host that does not serve the request"
 
 aapanel_fixture "$AA"
 cp "$AA/$PANEL_CONF" "$WORK/panel.before"
@@ -1362,6 +1416,129 @@ grep -q 'hold "Apache proxy"' "$REPO/deploy/upgrade-edge.sh" \
 grep -q 'PARTIAL.*step(s) clean' "$REPO/deploy/upgrade-edge.sh" \
     && ok "and the run ends PARTIAL rather than PASS" \
     || bad "a run that skipped a step would report a clean pass"
+
+group "what the second review found, and what now catches it"
+
+# A script has one EXIT trap. upgrade-edge.sh installs it at the top and it is
+# the only thing that prints the results table, removes the temporary files and
+# decides the exit status — the script ends with REACHED_END=1 and no explicit
+# exit. Taking EXIT inside the library meant a confirmed --configure-apache run
+# finished silently and exited 0 whatever else had failed.
+TRAPTEST="$WORK/trap-test.sh"
+cat > "$TRAPTEST" <<TRAPEOF
+set -uo pipefail
+. "$REPO/deploy/lib-edge-apache.sh"
+. "$REPO/deploy/lib-edge-vhost.sh"
+. "$REPO/deploy/lib-edge-probe.sh"
+on_exit() { echo "CALLER-EXIT-TRAP-RAN"; }
+trap on_exit EXIT
+AAPANEL_APACHE="$AA/apache"
+AKCONNECT_APACHE_CONF="$AA/etc/akconnect/apache/akconnect-fallback.conf"
+AKCONNECT_APACHE_BACKUPS="$AA/backups"
+akconnect_vhost_dirs() { printf "%s\n" "$AA/vhost/apache"; }
+akconnect_site_probe() {
+    local out=\${1:-/dev/stdout}
+    while read -r n; do printf "%s 200 404 404\n" "\$n"; done < <(akconnect_site_names) > "\$out"
+}
+akconnect_default_vhost_leaks() { return 0; }
+akconnect_confirm() { return 0; }
+systemctl() { return 1; }
+akconnect_apache_fallback "$REPO/deploy/apache" https://network.akdwk.in true >/dev/null
+TRAPEOF
+
+aapanel_fixture "$AA"
+TRAPOUT="$(bash "$TRAPTEST" 2>/dev/null)"
+
+grep -q 'CALLER-EXIT-TRAP-RAN' <<<"$TRAPOUT" \
+    && ok "configuring Apache leaves the caller EXIT trap alone" \
+    || bad "the library took the EXIT trap" \
+           "upgrade-edge.sh would exit 0 with no summary whatever else failed"
+
+grep -qE "trap[^\n]*INT TERM HUP" "$REPO/deploy/lib-edge-apache.sh" \
+    && ! grep -qE "trap '[^\n]*' INT TERM EXIT" "$REPO/deploy/lib-edge-apache.sh" \
+    && ok "and takes INT, TERM and HUP, which a caller does not rely on" \
+    || bad "the rollback trap still names EXIT"
+
+grep -q 'exit 130' "$REPO/deploy/lib-edge-apache.sh" \
+    && ok "and an interrupt stops the script instead of resuming it" \
+    || bad "the signal handler returns, so bash carries on re-applying the change"
+
+# akconnect_apache_undo read the rollback status with $? after the fi of an if
+# whose condition was the rollback. An if with a false condition and no else
+# exits 0, so the honest-reporting path always said "0 file(s) could NOT be
+# put back" — on the one branch that exists to say otherwise.
+UNDOOUT="$(
+    set -uo pipefail
+    . "$REPO/deploy/lib-edge-apache.sh"
+    akconnect_apache_undo "$WORK/no-such-backup-dir" echo "forced" 2>&1
+    echo "RC=$?"
+)"
+
+grep -q 'RC=1' <<<"$UNDOOUT" \
+    && ok "a rollback that could not run reports failure to its caller" \
+    || bad "a failed rollback is reported as success"
+
+grep -qE '0 file\(s\) could NOT' <<<"$UNDOOUT" \
+    && bad "the failure count is still read after the fi, so it is always zero" \
+    || ok "and does not claim zero files could not be put back"
+
+# /dev/tty is mode 0666, so test -r is true for every process on the machine
+# including one with no controlling terminal. The refusal was unreachable.
+CONFIRMTEST="$WORK/confirm-test.sh"
+printf '. "%s/deploy/lib-edge-apache.sh"\nakconnect_confirm "go?" && echo YES || echo NO\n' \
+    "$REPO" > "$CONFIRMTEST"
+
+setsid bash "$CONFIRMTEST" < /dev/null 2>/dev/null | grep -q '^NO$' \
+    && ok "with no controlling terminal the confirmation really does refuse" \
+    || bad "a process with no terminal is not refused" \
+           "test -r /dev/tty is true everywhere; it has to be opened"
+
+setsid bash "$CONFIRMTEST" < /dev/null 2>&1 | grep -q 'No such device' \
+    && bad "the shell prints its own redirection error over the refusal" \
+    || ok "and says so without the shell printing over it"
+
+# install-edge.sh used to configure Apache on every run, with no flag at all.
+grep -q 'configure-apache' "$REPO/deploy/install-edge.sh" \
+    && grep -q 'akconnect_may_configure_apache' "$REPO/deploy/install-edge.sh" \
+    && ok "install-edge.sh needs --configure-apache too, through the same gate" \
+    || bad "install-edge.sh edits Apache with no flag" \
+           "the requirement is --configure-apache only, in both scripts"
+
+# remove-apache-fallback.sh without --panel could not tell which domain was
+# meant to stop answering, so it read its own removal as a foreign regression
+# and put the fallback straight back.
+REMOUT="$(bash "$REPO/deploy/remove-apache-fallback.sh" --dry-run 2>&1 || true)"
+grep -qE 'panel is required|run this as root' <<<"$REMOUT" \
+    && ok "the removal script will not run without --panel" \
+    || bad "remove-apache-fallback.sh runs with no --panel and undoes its own removal"
+
+# The restore path was the one write that could still destroy the file it was
+# saving: cp opens the destination with O_TRUNC.
+grep -q 'akconnect_apache_replace' "$REPO/deploy/lib-edge-apache.sh" \
+    && ! grep -qE 'cp -p "\$dest/\$index" "\$original"' "$REPO/deploy/lib-edge-apache.sh" \
+    && ok "the rollback writes beside the file and moves it, never truncates it" \
+    || bad "the rollback still streams into the live virtual host"
+
+# A ServerName may carry a port, and a directive may be continued with a
+# backslash. Both used to produce a name no probe could be aimed at.
+PARSEFIX="$WORK/parse-fix.conf"
+cat > "$PARSEFIX" <<'PARSEEOF'
+<VirtualHost *:443>
+    ServerName ported.example.com:443
+    ServerAlias first.example.com \
+                second.example.com
+    SSLEngine on
+</VirtualHost>
+PARSEEOF
+
+PARSED="$(. "$REPO/deploy/lib-edge-vhost.sh"; akconnect_vhost_blocks "$PARSEFIX")"
+[ "$(cut -f5 <<<"$PARSED")" = "ported.example.com" ] \
+    && ok "a ServerName with a port is read as the name Apache serves" \
+    || bad "a ServerName with a port is kept verbatim and cannot be probed"
+
+[ "$(cut -f6 <<<"$PARSED")" = "first.example.com,second.example.com" ] \
+    && ok "and a directive continued with a backslash is one directive" \
+    || bad "a continued ServerAlias loses every name after the first"
 
 # ---------------------------------------------------------------- the report
 

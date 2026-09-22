@@ -55,6 +55,29 @@ akconnect_vhost_blocks() {
             start = 0; tls = 0; name = ""; aliases = ""
         }
 
+        # Apache strips a :port from a ServerName or ServerAlias, and the
+        # stock httpd.conf documents "ServerName www.example.com:80". Keeping
+        # the port made the name unprobeable, and a name that cannot be probed
+        # is a site silently exempt from the before/after comparison.
+        function bare(word) {
+            sub(/:[0-9]+$/, "", word)
+
+            return word
+        }
+
+        # A directive continued with a trailing backslash is one directive.
+        # Read as separate lines, "ServerAlias a \\" and "   b" are a name
+        # list that stops at a and a stray line that matches nothing.
+        {
+            line = $0
+            while (line ~ /\\[[:space:]]*$/) {
+                sub(/\\[[:space:]]*$/, "", line)
+                if ((getline nxt) <= 0) break
+                line = line nxt
+            }
+            $0 = line
+        }
+
         # Comments are not configuration.
         /^[[:space:]]*#/ { next }
 
@@ -71,14 +94,16 @@ akconnect_vhost_blocks() {
         /^[[:space:]]*SSLEngine[[:space:]]+[Oo][Nn][[:space:]]*$/ { tls = 1 }
         /^[[:space:]]*SSLCertificateFile[[:space:]]/              { tls = 1 }
 
+        # Last wins, as Apache does with a single-valued directive repeated in
+        # one context.
         /^[[:space:]]*ServerName[[:space:]]/ {
-            name = $2
+            name = bare($2)
             next
         }
 
         /^[[:space:]]*ServerAlias[[:space:]]/ {
             for (i = 2; i <= NF; i++) {
-                aliases = aliases (aliases == "" ? "" : ",") $i
+                aliases = aliases (aliases == "" ? "" : ",") bare($i)
             }
             next
         }
@@ -123,6 +148,38 @@ akconnect_vhost_target() {
     return 1
 }
 
+# akconnect_vhost_untls_target reports a block named for this domain that is
+# not a TLS block.
+#
+# Also for the refusal message, and the commonest of the three cases: a site
+# exists, it is the right site, and nobody has issued it a certificate. That
+# is an afternoon's work in aaPanel and a completely different instruction
+# from "another customer's site claims your domain".
+akconnect_vhost_untls_target() {
+    local domain=$1 dir file
+
+    [ -n "$domain" ] || return 1
+
+    while read -r dir; do
+        [ -d "$dir" ] || continue
+
+        for file in "$dir"/*.conf; do
+            [ -f "$file" ] || continue
+
+            while IFS=$'\t' read -r path start end kind name aliases; do
+                [ "$kind" = tls ] && continue
+                [ "$name" = "$domain" ] || continue
+
+                printf '%s\t%s\n' "$path" "$start"
+
+                return 0
+            done < <(akconnect_vhost_blocks "$file")
+        done
+    done < <(akconnect_vhost_dirs)
+
+    return 1
+}
+
 # akconnect_vhost_alias_only reports the file and host that serve this domain
 # as an alias, when no virtual host names it directly.
 #
@@ -139,6 +196,13 @@ akconnect_vhost_alias_only() {
             [ -f "$file" ] || continue
 
             while IFS=$'\t' read -r path start end kind name aliases; do
+                # A block that is itself named for this domain is not somebody
+                # else claiming it as an alias, even when it lists the domain
+                # among its own aliases as well — which aaPanel does. Saying
+                # "that is somebody else's site" about the panel's own file
+                # sends an operator looking for a hijack that is not there.
+                [ "$name" = "$domain" ] && continue
+
                 case ",$aliases," in
                     *",$domain,"*)
                         printf '%s\t%s\n' "$path" "$name"

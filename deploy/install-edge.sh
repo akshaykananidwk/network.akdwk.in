@@ -18,18 +18,26 @@ RELAY_NAME=""
 PUBLIC_HOST=""
 REGION="in"
 BIN_DIR="/usr/local/bin"
+# Empty means nothing was asked for, which is not the same as being asked for
+# no. See akconnect_may_configure_apache.
+CONFIGURE_APACHE=""
 ETC_DIR="/etc/akconnect"
 
 die()  { printf '\n  \033[31m✗ %s\033[0m\n\n' "$*" >&2; exit 1; }
 say()  { printf '  %s\n' "$*"; }
 step() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
 
+# shellcheck source=lib-edge-args.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib-edge-args.sh"
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --panel)       PANEL="${2:-}"; shift 2 ;;
-        --relay-name)  RELAY_NAME="${2:-}"; shift 2 ;;
-        --public-host) PUBLIC_HOST="${2:-}"; shift 2 ;;
-        --region)      REGION="${2:-}"; shift 2 ;;
+        --panel) akconnect_need_value --panel "$#"; PANEL="$2"; shift 2 ;;
+        --configure-apache)    CONFIGURE_APACHE=1; shift ;;
+        --no-configure-apache) CONFIGURE_APACHE=0; shift ;;
+        --relay-name) akconnect_need_value --relay-name "$#"; RELAY_NAME="$2"; shift 2 ;;
+        --public-host) akconnect_need_value --public-host "$#"; PUBLIC_HOST="$2"; shift 2 ;;
+        --region) akconnect_need_value --region "$#"; REGION="$2"; shift 2 ;;
         *) die "unknown option: $1" ;;
     esac
 done
@@ -148,13 +156,23 @@ step "the HTTPS fallback"
 # shellcheck source=lib-edge-probe.sh
 . "$(dirname "$0")/lib-edge-probe.sh"
 
-# This script is run by hand, once, by somebody installing the edge — so it
-# configures Apache. The hourly upgrade timer does not; see UNATTENDED in
-# upgrade-edge.sh. The proxy goes into the panel's own virtual host and
-# nowhere else, and every other site on the machine is asked for a status code
-# before and after.
-akconnect_apache_fallback "$(dirname "$0")/apache" "$PANEL" say
-apache_state=$?
+# Only when it is asked for, in as many words.
+#
+# This script is run by hand, so there is a person here — but "a person ran it"
+# is not the same as "a person asked for their web server to be edited", and on
+# the machine this was written for that web server carries thirty other
+# people's websites. Editing Apache is the one thing in this installer that
+# touches something the customer did not install, so it needs the flag, and
+# then it still prints the file and the exact lines and waits for a yes.
+#
+# The proxy goes into the panel's own virtual host and nowhere else, and every
+# other site on the machine is asked for a status code before and after.
+if [ "$(akconnect_may_configure_apache "$CONFIGURE_APACHE" 0)" = "1" ]; then
+    akconnect_apache_fallback "$(dirname "$0")/apache" "$PANEL" say
+    apache_state=$?
+else
+    apache_state=5
+fi
 
 case "$apache_state" in
     0)
@@ -183,6 +201,15 @@ case "$apache_state" in
     4)
         say "you said no, so Apache was not changed. Run this again, or"
         say "deploy/upgrade-edge.sh --configure-apache, whenever you want it."
+        ;;
+    5)
+        say "Apache was not touched, because --configure-apache was not given."
+        say ""
+        say "Devices on networks that pass nothing but 443 will not connect until it is."
+        say "When you want it: deploy/install-edge.sh --configure-apache (or"
+        say "deploy/upgrade-edge.sh --configure-apache). It edits one virtual host —"
+        say "the one whose ServerName is this panel's domain — shows you the file and"
+        say "the exact lines first, and asks. deploy/remove-apache-fallback.sh undoes it."
         ;;
     *)
         die "Apache is here but would not take the fallback configuration, and everything

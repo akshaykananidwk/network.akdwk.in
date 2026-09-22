@@ -85,6 +85,11 @@ akconnect_apache_layout() {
 # server, reported as success.
 AKCONNECT_MANIFEST=MANIFEST
 
+# Modules this run enabled, one per line, beside the manifest. Not in the
+# manifest itself: that file maps a saved copy to the path it came from, and a
+# module is neither.
+AKCONNECT_MODULES=MODULES
+
 # akconnect_apache_backup keeps a copy of one file and records where it came
 # from. A file that does not exist yet is recorded too, as "absent", so a
 # rollback removes what this run created rather than leaving it behind.
@@ -121,6 +126,31 @@ akconnect_apache_backup() {
 # first thing in the set used to abort the loop, leaving the production virtual
 # host untouched while the caller announced a full restore. It now tries all of
 # them, prints what it could not do, and returns the number of failures.
+# akconnect_apache_replace puts one file in place of another, atomically.
+#
+# Same directory, so the move is a rename within one filesystem and readers see
+# either the old file or the new one and never a partial write.
+akconnect_apache_replace() {
+    local from=$1 to=$2 tmp
+
+    tmp="$(mktemp "$(dirname "$to")/.akconnect.XXXXXX")" || return 1
+    [ -n "$tmp" ] || return 1
+
+    if ! cp -p "$from" "$tmp"; then
+        rm -f "$tmp"
+
+        return 1
+    fi
+
+    # Whatever the live file has now, not whatever the backup was created
+    # with: a restore must not quietly change who can read a virtual host.
+    chmod --reference="$to" "$tmp" 2>/dev/null || chmod 644 "$tmp"
+
+    mv -f "$tmp" "$to" || { rm -f "$tmp"; return 1; }
+
+    return 0
+}
+
 akconnect_apache_rollback() {
     local dest=$1 index original state failures=0
 
@@ -135,7 +165,14 @@ akconnect_apache_rollback() {
             continue
         fi
 
-        if ! cp -p "$dest/$index" "$original"; then
+        # Written beside the file and moved over it, never streamed into it.
+        # cp opens the destination with O_TRUNC, so an interrupt or a full
+        # disk half-way through leaves a production virtual host cut in two —
+        # and this is the restore path, which runs precisely when something
+        # has already gone wrong. akconnect_vhost_write was rewritten for the
+        # same reason; the copy back had been left as the one write that
+        # could still destroy the file it was saving.
+        if ! akconnect_apache_replace "$dest/$index" "$original"; then
             printf 'could not restore %s\n' "$original" >&2
             failures=$((failures + 1))
         fi
@@ -216,6 +253,8 @@ akconnect_apache_fallback() {
     local conf_dir=$1 panel=$2 report=${3:-echo}
     local service enabler ctl mainconf layout version source_conf mods
     local domain target vhost line stamp backup before after changed leaked
+    local claimed plain_block
+    local unprobeable default_leak
 
     layout="$(akconnect_apache_layout)" || {
         $report "no Apache on this machine, so the HTTPS fallback is not proxied here"
@@ -234,7 +273,11 @@ akconnect_apache_fallback() {
 
     target="$(akconnect_vhost_target "$domain")" || {
         local claimed
-        if claimed="$(akconnect_vhost_alias_only "$domain")"; then
+        if plain_block="$(akconnect_vhost_untls_target "$domain")"; then
+            $report "$domain has a virtual host of its own in $(cut -f1 <<<"$plain_block")"
+            $report "but it is not a TLS one. The fallback is a wss:// address, so it needs the"
+            $report "site's own certificate. Issue one for $domain and run this again."
+        elif claimed="$(akconnect_vhost_alias_only "$domain")"; then
             $report "no virtual host on this Apache is named $domain. It is served as an alias of"
             $report "$(cut -f2 <<<"$claimed") in $(cut -f1 <<<"$claimed")."
             $report "Refusing: that is somebody else's site, and putting a proxy inside it would"
@@ -304,10 +347,31 @@ akconnect_apache_fallback() {
     # really about, and the one the first version of this never asked.
     stamp="$(date -u +%Y%m%d-%H%M%S)"
     backup="$AKCONNECT_APACHE_BACKUPS/$stamp"
-    before="$(mktemp)"
-    after="$(mktemp)"
+    before="$(mktemp)" && after="$(mktemp)" && [ -n "$before" ] && [ -n "$after" ] || {
+        # Unchecked, these are set-but-empty, which set -u does not catch: the
+        # probes then write nothing, the comparison finds no differences, and
+        # the run reports that every site answers as it did before without
+        # having asked any of them. A full or read-only /tmp is routine enough
+        # on a small VPS running thirty PHP sites.
+        $report "could not create a temporary file, so the before/after probe could not run"
+        $report "and nothing was changed"
+        rm -f "$before" "$after"
+
+        return 2
+    }
     akconnect_site_probe "$before"
     $report "$(wc -l < "$before") site(s) on this Apache answered before the change"
+
+    # Said out loud rather than left out. A wildcard ServerAlias is a name
+    # Apache serves and curl cannot be aimed at, so it is not in the
+    # comparison — and a site left out of the comparison must not be covered
+    # by the sentence "all N sites answer exactly as they did before".
+    unprobeable="$(akconnect_site_names_unprobeable)"
+    [ -n "$unprobeable" ] && {
+        $report "$(printf '%s\n' "$unprobeable" | wc -l) name(s) cannot be probed and are NOT covered"
+        $report "by the comparison below:"
+        printf '%s\n' "$unprobeable" | while read -r row; do $report "    $row"; done
+    }
 
     # Every file that is about to be written, including our own configuration
     # file — which this used to install without a copy and delete on rollback,
@@ -329,8 +393,30 @@ akconnect_apache_fallback() {
     # a dropped ssh session leaves a virtual host carrying an untested include
     # that nothing has syntax-checked, until aaPanel reloads Apache hours later
     # for an unrelated reason.
-    trap 'akconnect_apache_rollback "'"$backup"'" >/dev/null 2>&1; trap - INT TERM EXIT' INT TERM EXIT
+    #
+    # INT, TERM and HUP, and deliberately NOT EXIT. A script has exactly one
+    # EXIT trap, and upgrade-edge.sh's is the only thing that prints its
+    # results table, removes its temporary files and decides its exit status —
+    # its last line is REACHED_END=1 and there is no explicit exit anywhere.
+    # Taking EXIT here meant a confirmed --configure-apache run finished
+    # silently and exited 0 whatever else had failed. remove-apache-fallback.sh
+    # has one too, for the same reason.
+    #
+    # The handler exits rather than returning. A bash signal handler that
+    # returns normally resumes the script at the next command, so the previous
+    # version rolled everything back, disarmed itself, and then carried
+    # straight on re-applying the change with nothing left to undo it. Exiting
+    # also runs the caller's EXIT trap, so the summary still gets printed.
+    AKCONNECT_APACHE_BACKUP_DIR="$backup"
+    AKCONNECT_APACHE_REPORT="$report"
+    trap 'akconnect_apache_interrupted' INT TERM HUP
 
+    # Which modules this run switched on, so the removal script can switch off
+    # exactly those and no others. On the Debian layout a2enmod writes symlinks
+    # under mods-enabled/ that no file in the manifest covers, so a rollback
+    # restored every file and left the modules enabled — which is harmless in
+    # itself and still a change to somebody's web server that nothing recorded
+    # and nothing could undo.
     for mod in $mods; do
         akconnect_apache_has_module "$ctl" "$mod" && continue
 
@@ -339,6 +425,9 @@ akconnect_apache_fallback() {
         else
             akconnect_apache_load_module "$mainconf" "$mod"
         fi
+
+        akconnect_apache_has_module "$ctl" "$mod" \
+            && printf '%s\n' "$mod" >> "$backup/$AKCONNECT_MODULES"
     done
 
     for mod in $mods; do
@@ -375,8 +464,11 @@ akconnect_apache_fallback() {
     fi
 
     akconnect_apache_reload "$service" "$ctl" || {
-        akconnect_apache_undo "$backup" "$report" "Apache would not reload"
-        akconnect_apache_reload "$service" "$ctl"
+        if akconnect_apache_undo "$backup" "$report" "Apache would not reload"; then
+            akconnect_apache_reload "$service" "$ctl"
+        else
+            $report "Apache has NOT been reloaded again. Put the files above back by hand first."
+        fi
         rm -f "$before" "$after"
 
         return 2
@@ -392,6 +484,13 @@ akconnect_apache_fallback() {
         # differently because a cron job happened to be running is not a
         # regression this change caused, and rolling back somebody's
         # production server over one is its own kind of harm.
+        #
+        # Only the after. Re-measuring the baseline here would record the
+        # machine as it is WITH the change and compare it against itself,
+        # which is not a second opinion — it is throwing the evidence away. A
+        # transient in the baseline is dealt with where it happens, by
+        # akconnect_probe_code asking twice before it records an unreachable
+        # site.
         akconnect_site_probe "$after"
         changed="$(akconnect_sites_changed "$before" "$after")"
     fi
@@ -399,7 +498,15 @@ akconnect_apache_fallback() {
     # The panel's own /fallback is expected to change — that is the change.
     changed="$(grep -v "^$domain /fallback " <<<"$changed" | grep -v '^$')"
 
-    leaked="$(akconnect_fallback_exclusive "$domain" "$after")" || true
+    # With the baseline, so a site that already answered 200 for a path it
+    # has never heard of is not accused of carrying a tunnel it is not.
+    leaked="$(akconnect_fallback_exclusive "$domain" "$after" "$before")" || true
+
+    # And the one question no probe by name can answer: whether a request that
+    # names nothing at all gets the tunnel, because the block it went into
+    # happens to be Apache's default for that address and port.
+    default_leak="$(akconnect_default_vhost_leaks "$domain")" || true
+    [ -n "$default_leak" ] && leaked="$(printf '%s\n%s' "$leaked" "$default_leak" | grep -v '^$')"
 
     if [ -n "$changed" ] || [ -n "$leaked" ]; then
         [ -n "$changed" ] && {
@@ -411,18 +518,29 @@ akconnect_apache_fallback() {
             printf '%s\n' "$leaked" | while read -r row; do $report "    $row"; done
         }
 
-        akconnect_apache_undo "$backup" "$report" "putting everything back"
-        akconnect_apache_reload "$service" "$ctl"
+        if akconnect_apache_undo "$backup" "$report" "putting everything back"; then
+            akconnect_apache_reload "$service" "$ctl"
+        else
+            # Not reloaded, deliberately. The undo above has just said this
+            # server is part-way through a change and to put the files back by
+            # hand before reloading — and then this used to reload anyway,
+            # which is the one action that makes a half-restored configuration
+            # live on thirty other people's websites.
+            $report "Apache has NOT been reloaded. It is still serving the configuration it"
+            $report "had before this run, and it will keep doing so until somebody reloads it."
+        fi
         rm -f "$before" "$after"
 
         return 2
     fi
 
-    trap - INT TERM EXIT
+    trap - INT TERM HUP
 
     $report "all $(wc -l < "$after") site(s) answer exactly as they did before"
     $report "and only $domain answers /fallback, over TLS and not on port 80"
     $report "a copy of every file changed is in $backup"
+    [ -f "$backup/$AKCONNECT_MODULES" ] && \
+        $report "and the module(s) it enabled are listed in $backup/$AKCONNECT_MODULES"
     $report "Apache proxies https://$domain/fallback to the relay on 127.0.0.1:9443"
 
     rm -f "$before" "$after"
@@ -441,15 +559,21 @@ akconnect_apache_undo() {
 
     $report "$why"
 
-    if akconnect_apache_rollback "$backup"; then
-        trap - INT TERM EXIT
+    # Read before anything else runs. It used to be read after the `fi` of an
+    # `if akconnect_apache_rollback ...; then return 0; fi` — and an `if` whose
+    # condition is false and which has no else branch exits 0, so the count was
+    # always zero and the honest-reporting fix reported "0 file(s) could NOT be
+    # put back" on the one path that exists to say otherwise.
+    akconnect_apache_rollback "$backup"
+    failures=$?
+
+    trap - INT TERM HUP
+
+    if [ "$failures" -eq 0 ]; then
         $report "everything this run changed has been put back"
 
         return 0
     fi
-
-    failures=$?
-    trap - INT TERM EXIT
 
     $report "WARNING: $failures file(s) could NOT be put back. This server is part-way"
     $report "through a change. The copies are in $backup and"
@@ -457,6 +581,24 @@ akconnect_apache_undo() {
     $report "Restore them by hand before reloading Apache."
 
     return 1
+}
+
+# akconnect_apache_interrupted is the signal handler, and it stops the script.
+#
+# It reports what it did: a restore that fails during an interrupt is the worst
+# moment to be quiet, and the previous handler sent both the "could not restore"
+# lines and the failure count to /dev/null. An operator whose ssh session drops
+# mid-write would have been told nothing at all.
+akconnect_apache_interrupted() {
+    local report="${AKCONNECT_APACHE_REPORT:-printf '  %s\n'}"
+
+    trap - INT TERM HUP
+
+    printf '\n' >&2
+    akconnect_apache_undo "$AKCONNECT_APACHE_BACKUP_DIR" "$report" \
+        "interrupted part-way through the Apache change; putting everything back"
+
+    exit 130
 }
 
 # akconnect_may_configure_apache answers the one question that keeps an hourly
@@ -495,14 +637,32 @@ akconnect_may_configure_apache() {
 akconnect_confirm() {
     local prompt=$1 reply
 
-    if [ ! -r /dev/tty ]; then
+    # Opened, not tested. /dev/tty is mode 0666 and `test -r` is an access(2)
+    # check on the path, so it is true for every process on the machine
+    # including one with no controlling terminal at all — the guard was true
+    # always and the refusal was unreachable. What actually distinguishes the
+    # two cases is that opening /dev/tty fails with ENXIO when there is no
+    # controlling terminal, so that is what this does.
+    # The 2>/dev/null belongs to the group, not to exec: a redirection that
+    # fails is reported by the shell before the command's own redirections are
+    # in effect, so `exec 9<>/dev/tty 2>/dev/null` still prints "No such device
+    # or address" over the top of the message below.
+    if ! { exec 9<>/dev/tty; } 2>/dev/null; then
         printf '  refusing: there is no terminal here to confirm on.\n' >&2
 
         return 1
     fi
 
-    printf '\n  %s [y/N] ' "$prompt" > /dev/tty
-    read -r reply < /dev/tty || return 1
+    # Anything already sitting in the terminal's input queue was typed before
+    # the question was asked and is not an answer to it. The confirmation comes
+    # after a git fetch, a Go build and a service restart, which is long enough
+    # for somebody to have pressed Return at something else — and a stray "y"
+    # would be read as consent to edit a production web server.
+    while read -r -t 0 -u 9; do read -r -u 9 || break; done
+
+    printf '\n  %s [y/N] ' "$prompt" >&9
+    read -r reply <&9 || { exec 9<&-; return 1; }
+    exec 9<&-
 
     case "$reply" in
         y|Y|yes|YES) return 0 ;;
@@ -580,8 +740,10 @@ akconnect_fallback_reachable() {
 
     body="$(curl -fsS --max-time 10 "${panel%/}/fallback/health" 2>/dev/null)" || return 1
 
+    # The relay names itself, so a 200 from a panel that answers every unknown
+    # path with its front controller is not mistaken for the tunnel.
     case "$body" in
-        ok*) return 0 ;;
+        "ok akconnect-relay fallback"*) return 0 ;;
         *)   return 1 ;;
     esac
 }
