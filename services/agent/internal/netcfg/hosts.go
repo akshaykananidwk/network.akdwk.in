@@ -3,11 +3,13 @@ package netcfg
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // The hosts file, as the fallback when nothing better exists.
@@ -164,8 +166,52 @@ func replaceFile(path string, content []byte) error {
 	}
 
 	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("dns: replacing %s: %w", path, err)
+		// A rename onto a bind mount fails with EBUSY, and /etc/hosts is a
+		// bind mount on every machine running in a container — including,
+		// since 1.9.2, every namespace in this product's own lab, because
+		// `ip netns exec` bind-mounts /etc/netns/<ns>/hosts over it.
+		//
+		// Atomicity is worth having and is not worth having *instead* of
+		// working name resolution, so the fallback writes through the
+		// existing inode. The window where the file is short is microseconds
+		// and nothing resolves from it in that window that would not also
+		// have failed a moment earlier.
+		if !errors.Is(err, syscall.EBUSY) {
+			return fmt.Errorf("dns: replacing %s: %w", path, err)
+		}
+
+		if writeErr := writeThrough(path, content); writeErr != nil {
+			return fmt.Errorf("dns: %s cannot be renamed over (%v) and cannot be written through: %w",
+				path, err, writeErr)
+		}
 	}
 
 	return nil
+}
+
+// writeThrough replaces a file's contents without replacing the file.
+//
+// The only caller is replaceFile, for the case where the target cannot be
+// renamed over. It is deliberately not the default: a reader that opens the
+// file in the middle of this sees a partial hosts file, which a rename would
+// have made impossible.
+func writeThrough(path string, content []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+
+	if _, err := file.Write(content); err != nil {
+		_ = file.Close()
+
+		return err
+	}
+
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+
+		return err
+	}
+
+	return file.Close()
 }

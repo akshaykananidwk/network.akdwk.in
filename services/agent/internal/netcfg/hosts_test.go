@@ -201,3 +201,68 @@ func TestOutputIsStable(t *testing.T) {
 		t.Fatal("the same records in a different order produced a different file")
 	}
 }
+
+// A hosts file that cannot be renamed over is the ordinary case inside a
+// container — /etc/hosts is a bind mount there — and since 1.9.2 it is the
+// case in this product's own lab, because `ip netns exec` bind-mounts
+// /etc/netns/<ns>/hosts over it. The rename fails with EBUSY and, until the
+// fallback existed, every name in the network stopped resolving with nothing
+// but one line in the agent log to say why.
+//
+// A bind mount needs root and a mount namespace, so the failure is produced
+// here the only other way a rename returns EBUSY on Linux: a directory
+// standing where the file should be is refused differently, so this test
+// drives writeThrough itself and asserts the property that matters — the
+// inode does not change and the contents do.
+func TestAFileThatCannotBeRenamedOverIsStillUpdated(t *testing.T) {
+	path := tempHosts(t, existingHosts)
+
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := existingHosts + "10.50.0.2\tbeta.customer.internal\n"
+
+	if err := writeThrough(path, []byte(want)); err != nil {
+		t.Fatalf("writing through failed: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("the file was not updated:\n%s", got)
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !os.SameFile(before, after) {
+		t.Fatal("the file was replaced rather than written through; a bind mount would have refused that")
+	}
+}
+
+// Writing through truncates. A shorter hosts file must not leave the tail of
+// the longer one behind it — that would resurrect a name the panel removed.
+func TestWritingThroughLeavesNoTail(t *testing.T) {
+	path := tempHosts(t, existingHosts+strings.Repeat("10.50.0.9\tstale.internal\n", 40))
+
+	if err := writeThrough(path, []byte(existingHosts)); err != nil {
+		t.Fatalf("writing through failed: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != existingHosts {
+		t.Fatalf("something survived the truncation:\n%s", got)
+	}
+	if strings.Contains(string(got), "stale.internal") {
+		t.Fatal("a removed name is still resolving")
+	}
+}
