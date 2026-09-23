@@ -372,6 +372,20 @@ func (s *session) peerStatus() []state.RuntimePeer {
 // one the fallback handed out, rather than by remembering that it once did.
 // The two stop matching the instant discovery adopts a real relay port, which
 // is exactly when this should stop being true.
+// diverted reports whether the fallback is carrying this peer right now.
+//
+// Told from the fallback's own table rather than remembered, so it stops being
+// true the moment releasePeers hands the peers back to UDP.
+func (s *session) diverted(peer [32]byte) bool {
+	if s.fallback == nil || !s.fallback.Up() {
+		return false
+	}
+
+	_, ok := s.fallback.Endpoint(peer)
+
+	return ok
+}
+
 func (s *session) onFallback(peer [32]byte, endpoint string) bool {
 	if s.fallback == nil || !s.fallback.Up() || endpoint == "" {
 		return false

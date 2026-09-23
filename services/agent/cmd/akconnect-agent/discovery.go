@@ -68,6 +68,9 @@ func (s *session) startDiscovery(ctx context.Context, cfg *panel.Config, priv wg
 		// And so a port a router will not carry is escaped rather than
 		// announced into forever. See discovery/port.go, defect 23.
 		MovePort: s.movePort,
+		// And so a relay offer arriving through the fallback does not point
+		// WireGuard at a port this network cannot reach. See adoptRelay.
+		Diverted: s.diverted,
 	})
 	if err != nil {
 		s.logf("discovery: %v", err)

@@ -111,6 +111,14 @@ func (f *fakePeers) SetPeerEndpoint(key, endpoint string) error {
 	return nil
 }
 
+// endpointOf returns the endpoint WireGuard was last pointed at for a peer.
+func (f *fakePeers) endpointOf(key string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.endpoints[key]
+}
+
 // harness is a client wired to fakes, plus the coordinator keys needed to
 // seal messages to it.
 type harness struct {

@@ -527,3 +527,42 @@ func TestDoesNotAskTheCoordinatorWhileTheRelayAnswers(t *testing.T) {
 		t.Fatalf("announced %d time(s) while the relay was answering normally", got-before)
 	}
 }
+
+// While the fallback is carrying a peer, a relay offer must not point
+// WireGuard at the relay's real port.
+//
+// A relay bind is answered twice on a network with no UDP: once by the relay
+// naming a real port, once by the fallback naming a tunnelled one — and the
+// relay's answer arrives THROUGH the fallback, so it arrives even though the
+// port it names is unreachable. Applying it made the endpoint flap between the
+// two, and while it was flapped the device reported relay-udp: the wrong
+// answer, on the release whose point is telling those two apart.
+func TestARelayOfferDoesNotStealAPeerTheFallbackIsCarrying(t *testing.T) {
+	h := newHarness(t)
+
+	var peer [32]byte
+	peer[0] = 19
+
+	diverted := true
+	h.client.opts.Diverted = func([32]byte) bool { return diverted }
+
+	real := netip.MustParseAddrPort("10.0.0.1:52386")
+	h.client.adoptRelay(peer, real)
+
+	if got := h.peers.endpointOf(base64Key(peer)); got != "" {
+		t.Fatalf("pointed WireGuard at %s while the fallback was carrying the peer", got)
+	}
+
+	// The path is still relayed, because it is — the panel has to say so.
+	if h.client.Path(peer) != "relay" {
+		t.Fatalf("path is %q, so the device would not report a relayed path at all", h.client.Path(peer))
+	}
+
+	// And once the fallback hands the peer back, the next offer is applied.
+	diverted = false
+	h.client.adoptRelay(peer, real)
+
+	if got := h.peers.endpointOf(base64Key(peer)); got != real.String() {
+		t.Fatalf("endpoint is %q after the fallback released the peer, want %s", got, real)
+	}
+}

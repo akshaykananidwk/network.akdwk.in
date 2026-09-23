@@ -243,6 +243,21 @@ func (c *Client) adoptRelay(peer [32]byte, at netip.AddrPort) {
 
 		return
 	}
+
+	// The fallback owns this peer's endpoint while it is carrying it. The path
+	// is still recorded — the pair IS relayed, and the panel has to say so —
+	// but WireGuard is not pointed at the relay's real port, which on a
+	// network with no UDP is an address nothing can reach. Applying it made
+	// the endpoint flap between the two for as long as offers kept arriving,
+	// and while it was flapped the device reported relay-udp: the wrong
+	// answer, on the one release whose point is telling those two apart.
+	if c.opts.Diverted != nil && c.opts.Diverted(peer) {
+		c.paths[peer] = pathRelay
+		c.mu.Unlock()
+
+		return
+	}
+
 	c.established[peer] = at
 	c.paths[peer] = pathRelay
 	c.mu.Unlock()
@@ -415,7 +430,10 @@ func (c *Client) rebindRelays() {
 		// A relay that has gone quiet is a reason to talk to the coordinator
 		// now rather than at the next keepalive, whether the answer turns out
 		// to be "that relay is gone" or "so has the network".
-		if c.relayMissed[peer] >= relayMissesBeforeAsking {
+		// On the transition only. Asking on every tick afterwards is a fresh
+		// relay offer every five seconds for as long as the relay stays quiet,
+		// and each one is an endpoint to apply.
+		if c.relayMissed[peer] == relayMissesBeforeAsking {
 			askCoordinator = true
 		}
 
