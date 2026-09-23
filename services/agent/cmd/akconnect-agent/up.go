@@ -20,6 +20,7 @@ import (
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/fallback"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/keystore"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/netcfg"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/netmap"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/selfupdate"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/state"
@@ -140,6 +141,9 @@ type session struct {
 	// pendingProbes are reachability tests the panel has asked for and this
 	// agent has not yet run.
 	pendingProbes []panel.ProbeRequest
+	// mappings translates the ranges this device is the gateway for, when it
+	// is one. Nil on every device that is not.
+	mappings *netmap.Table
 	// revokedSince and revokedSeen count consecutive "not authorized" answers
 	// from the panel, so one is never acted on. See confirmRevoked.
 	revokedSince time.Time
@@ -367,7 +371,12 @@ func (s *session) applyConfig(ctx context.Context, priv wgPrivate, cfg *panel.Co
 
 	// Subnet mapping before the gateway's own forwarding rules, and before the
 	// ACL: from here up, every address in this process is a mapped one.
-	s.tun.SetMappings(buildMappings(cfg))
+	mappings := buildMappings(cfg)
+	s.tun.SetMappings(mappings)
+
+	// Kept for the reachability test, which has to translate a mapped
+	// address back to the LAN before probing it. See runProbes.
+	s.mappings = mappings
 
 	// Names last of the three, because they are built from mapped addresses.
 	// The overlay has to be reachable, not merely routed. Windows Firewall

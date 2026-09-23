@@ -1,11 +1,13 @@
 {
-  "version": "1.9.7-dev.8",
+  "version": "1.9.7-dev.9",
   "released_at": "2026-09-23T09:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "A relayed pair bound on both ends and carried nothing, because dev.6 taught the agent to drop a bind acknowledgement an older relay could not name. And agents are offered the panel's own channel, so a panel on Edge no longer tells every device there is nothing newer.",
-  "migrations": [],
+  "notes": "Testing the router of a shared network from the gateway itself now tests the real LAN address. The gateway has no route for the mapped one — the mapping applies to traffic arriving from the overlay, not to what the gateway sends.",
+  "migrations": [
+    "2026_09_23_140000_probe_method_wider.php"
+  ],
   "protected": [
     ".env",
     "config/config.php",

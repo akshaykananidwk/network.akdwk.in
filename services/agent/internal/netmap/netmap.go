@@ -107,6 +107,24 @@ func (t *Table) Mappings() []Mapping {
 	return append([]Mapping(nil), t.mappings...)
 }
 
+// Real turns an address the overlay uses into the one on this gateway's own
+// LAN, when this gateway is the one that advertises it.
+//
+// Exported for the reachability test. A gateway asked to check the router on
+// the network it shares was sending to the MAPPED address — 10.128.5.1 rather
+// than 192.168.10.1 — and its own machine has no route for that: the mapping
+// is applied to traffic arriving FROM the overlay, not to traffic the gateway
+// itself originates. The router was reported unreachable while a browser on
+// the same machine was showing its login page.
+func (t *Table) Real(addr netip.Addr) (netip.Addr, bool) {
+	mapped, real, ok := t.toReal(addr)
+	if !ok {
+		return netip.Addr{}, false
+	}
+
+	return translate(addr, mapped, real), true
+}
+
 // toReal finds the mapping covering an address the overlay used.
 func (t *Table) toReal(addr netip.Addr) (netip.Prefix, netip.Prefix, bool) {
 	for _, m := range t.mappings {

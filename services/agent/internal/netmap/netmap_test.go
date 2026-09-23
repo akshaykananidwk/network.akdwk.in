@@ -370,3 +370,38 @@ func TestRunts(t *testing.T) {
 		}
 	}
 }
+
+// The gateway for a shared range must test the real address, not the mapped
+// one.
+//
+// A gateway asked to check the router on the network it shares sent to
+// 10.128.5.1. The mapping is applied to traffic arriving FROM the overlay,
+// not to traffic the gateway itself originates, so its own machine has no
+// route for that address at all — the probe went nowhere and the router was
+// reported unreachable while a browser on the same machine was showing its
+// login page. A false "no answer" on a customer's router sends somebody to a
+// site to fix nothing.
+func TestRealTranslatesAMappedAddressForTheGatewayItself(t *testing.T) {
+	table := NewTable()
+	table.Add("10.128.5.0/24", "192.168.10.0/24")
+
+	got, ok := table.Real(netip.MustParseAddr("10.128.5.1"))
+	if !ok {
+		t.Fatal("the gateway could not translate an address in a range it advertises")
+	}
+	if got.String() != "192.168.10.1" {
+		t.Fatalf("10.128.5.1 translated to %s, want 192.168.10.1", got)
+	}
+
+	// The host part is kept, which is what makes a camera at .50 reachable.
+	got, _ = table.Real(netip.MustParseAddr("10.128.5.50"))
+	if got.String() != "192.168.10.50" {
+		t.Fatalf("10.128.5.50 translated to %s, want 192.168.10.50", got)
+	}
+
+	// An address outside every mapping is left alone: a peer on the overlay
+	// is not on anybody's LAN and must be probed exactly as asked.
+	if _, ok := table.Real(netip.MustParseAddr("10.50.0.4")); ok {
+		t.Fatal("an overlay address was translated as though it were a shared LAN")
+	}
+}

@@ -104,7 +104,7 @@ final class DeviceProbe extends Model
             [
                 's'       => $ok ? 'ok' : 'failed',
                 'l'       => $latencyMs,
-                'm'       => $method !== null ? substr($method, 0, 16) : null,
+                'm'       => $method !== null ? substr($method, 0, 64) : null,
                 'e'       => $error !== null ? substr($error, 0, 255) : null,
                 'id'      => $probeId,
                 'd'       => $deviceId,

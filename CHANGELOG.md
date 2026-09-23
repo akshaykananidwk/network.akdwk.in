@@ -6,6 +6,23 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.9] — development
+
+**The gateway reported its own router unreachable.** Asked to test 10.128.5.1
+— the mapped address of the router on the network it shares — the gateway sent
+to exactly that, and its own machine has no route for it: the mapping is
+applied to traffic arriving FROM the overlay, not to traffic the gateway
+itself originates. The probe went nowhere, the router was reported as no
+answer, and a browser on the same machine was showing that router's login page
+at the time.
+
+When the probing device is the one sharing the range, the address is
+translated to the real LAN address before it is tested, and the result says
+"tested directly on the LAN, because this computer is the one sharing that
+range". A false "no answer" on a customer's router sends somebody to a site to
+fix nothing, and a result that surprises the person reading it has to explain
+itself or it will be argued with.
+
 ## [1.9.7-dev.8] — development
 
 **A relayed pair bound on both ends and carried nothing.** dev.6 taught the

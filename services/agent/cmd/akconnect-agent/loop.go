@@ -155,12 +155,38 @@ func (s *session) runProbes(ctx context.Context) []panel.ProbeAnswer {
 
 	answers := make([]panel.ProbeAnswer, 0, len(take))
 	for _, request := range take {
-		result := probe.Do(ctx, request.Target)
+		// On the gateway for this range, test the REAL address.
+		//
+		// The mapping is applied to traffic arriving from the overlay, not to
+		// traffic this machine originates, so the gateway has no route for
+		// 10.128.5.1 at all — it sent the probe nowhere and reported the
+		// router unreachable while a browser on the same machine was showing
+		// that router's login page. A false "no answer" on a customer's
+		// router sends somebody to a site to fix nothing.
+		target := request.Target
+		onLAN := ""
+
+		if s.mappings != nil {
+			if asked, err := netip.ParseAddr(request.Target); err == nil {
+				if real, ok := s.mappings.Real(asked); ok {
+					target = real.String()
+					onLAN = real.String()
+				}
+			}
+		}
+
+		result := probe.Do(ctx, target)
+
+		// Say which address was actually tested, so a result nobody expected
+		// can be explained without reading the code.
+		if onLAN != "" && result.Method != "" {
+			result.Method += " lan"
+		}
 
 		if result.OK {
-			s.logf("probe: %s answered in %dms over %s", request.Target, result.LatencyMS, result.Method)
+			s.logf("probe: %s answered in %dms over %s", target, result.LatencyMS, result.Method)
 		} else {
-			s.logf("probe: %s did not answer: %s", request.Target, result.Error)
+			s.logf("probe: %s did not answer: %s", target, result.Error)
 		}
 
 		answers = append(answers, panel.ProbeAnswer{
