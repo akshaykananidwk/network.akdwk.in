@@ -366,6 +366,16 @@ const relayFailoverNeedsCoordinator = 4 * time.Second
 // before relay failover stands down, for the same reason.
 const relayFailoverNeedsAnswers = 2
 
+// relayOfferTimeout is how long to wait for the coordinator's answer before
+// asking again.
+//
+// The request and the answer are both single datagrams, so either can be
+// lost, and until this existed losing one stranded the pair until somebody
+// restarted the service. Twelve seconds: long enough that a busy coordinator
+// answering in its own time is not asked twice, short enough that a lost
+// packet costs one punch cycle rather than an afternoon.
+const relayOfferTimeout = 12 * time.Second
+
 // relayFailoverStandDownMax bounds how long failover waits for the
 // coordinator.
 //
