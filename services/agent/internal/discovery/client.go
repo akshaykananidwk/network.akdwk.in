@@ -156,6 +156,9 @@ type Client struct {
 	// on this side can see it, because a dead relay simply goes quiet.
 	relayName   map[[32]byte]string
 	relayMissed map[[32]byte]int
+	// standDownSince is when relay failover last began waiting for the
+	// coordinator to start answering again. Zero when it is not waiting.
+	standDownSince time.Time
 	// relays is the fleet this device measures against, and relayRTT is what
 	// it measured. Reported to the coordinator, which is the only place that
 	// can compare one device's view against its peer's.

@@ -583,3 +583,85 @@ func TestARelayOfferDoesNotStealAPeerTheFallbackIsCarrying(t *testing.T) {
 		t.Fatalf("endpoint is %q after the fallback released the peer, want %s", got, real_)
 	}
 }
+
+// Standing down while the coordinator is silent must not last for ever.
+//
+// A home PC on its own ISP went from "Online · relay-udp" to
+// "Online · connecting" by itself, minutes after traffic had been flowing.
+// The relay had stopped answering and the coordinator had stopped answering
+// at the same moment — they share one socket, so whatever broke one broke
+// both — and failover stood down waiting for a takeover that was never
+// coming: that panel's Apache had not been configured yet, so the fallback
+// could not connect at all. The agent sat pinned on a dead relay until its
+// WireGuard handshake went stale and the panel called it "connecting".
+//
+// Past the bound, asking costs one packet and is the only move left.
+func TestFailoverStandDownIsBounded(t *testing.T) {
+	h := newHarness(t)
+
+	var peer [32]byte
+	peer[0] = 23
+
+	h.client.mu.Lock()
+	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
+	h.client.relayTicket[peer] = []byte("ticket")
+	h.client.paths[peer] = pathRelay
+	// The network stopped carrying UDP and has not started again.
+	h.client.unacked = relayFailoverNeedsAnswers
+	h.client.firstSend = time.Now().Add(-2 * relayFailoverNeedsCoordinator)
+	h.client.lastAck = time.Time{}
+	h.client.mu.Unlock()
+
+	for i := 0; i <= relayMissesBeforeFailover*3; i++ {
+		h.client.rebindRelays()
+	}
+
+	if got := h.transport.count(disco.TypeRelayRequest); got != 0 {
+		t.Fatalf("asked for another relay %d time(s) while still inside the stand-down", got)
+	}
+
+	// Wind the clock past the bound. Nothing else changes: the coordinator is
+	// still silent and the fallback still has not taken over.
+	h.client.mu.Lock()
+	h.client.standDownSince = time.Now().Add(-2 * relayFailoverStandDownMax)
+	h.client.mu.Unlock()
+
+	for i := 0; i <= relayMissesBeforeFailover; i++ {
+		h.client.rebindRelays()
+	}
+
+	if got := h.transport.count(disco.TypeRelayRequest); got == 0 {
+		t.Fatalf("never asked for another relay, %s after the coordinator went quiet",
+			relayFailoverStandDownMax)
+	}
+}
+
+// And the clock is about the coordinator, not about one peer: it restarts
+// once the coordinator is answering again, so a later silence gets its own
+// full stand-down instead of inheriting a spent one.
+func TestTheStandDownClockRestartsWhenTheCoordinatorAnswers(t *testing.T) {
+	h := newHarness(t)
+
+	var peer [32]byte
+	peer[0] = 29
+
+	h.client.mu.Lock()
+	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
+	h.client.relayTicket[peer] = []byte("ticket")
+	h.client.paths[peer] = pathRelay
+	h.client.standDownSince = time.Now().Add(-2 * relayFailoverStandDownMax)
+	// The coordinator is answering.
+	h.client.unacked = 0
+	h.client.lastAck = time.Now()
+	h.client.mu.Unlock()
+
+	h.client.rebindRelays()
+
+	h.client.mu.Lock()
+	spent := h.client.standDownSince
+	h.client.mu.Unlock()
+
+	if !spent.IsZero() {
+		t.Fatal("the stand-down clock kept running while the coordinator was answering")
+	}
+}
