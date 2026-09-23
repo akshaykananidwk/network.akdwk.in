@@ -372,6 +372,21 @@ scenario_ticket_renewal() {
     # ticket therefore matters for every packet.
     fixture cgnat symmetric
 
+    # Proof the setting arrived, not just that it was exported. Everything
+    # below is timed against this lifetime; against the ten-minute default it
+    # would run out of drill before the first renewal and pass without ever
+    # testing one.
+    local in_force
+    in_force="$(lab::ticket_seconds_in_force || true)"
+    if [ "$in_force" != "60s" ] && [ "$in_force" != "1m0s" ]; then
+        record "renewal/ticket" FAIL \
+            "the coordinator is minting ${in_force:-ten-minute} tickets, so this drill would not reach a renewal"
+        unset LAB_TICKET_SECONDS
+
+        return
+    fi
+
+
     if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
         record "ticket/paired" FAIL "the pair never connected, so there is no ticket to outlive"
         lab::tail_log alpha-up 20
@@ -443,6 +458,21 @@ scenario_relay_both_ways() {
 
     fixture cgnat symmetric
 
+    # Proof the setting arrived, not just that it was exported. Everything
+    # below is timed against this lifetime; against the ten-minute default it
+    # would run out of drill before the first renewal and pass without ever
+    # testing one.
+    local in_force
+    in_force="$(lab::ticket_seconds_in_force || true)"
+    if [ "$in_force" != "60s" ] && [ "$in_force" != "1m0s" ]; then
+        record "bothways/ticket" FAIL \
+            "the coordinator is minting ${in_force:-ten-minute} tickets, so this drill would not reach a renewal"
+        unset LAB_TICKET_SECONDS
+
+        return
+    fi
+
+
     if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
         record "bothways/up" FAIL "the pair never connected at all"
         lab::tail_log alpha-up 20
@@ -507,13 +537,29 @@ scenario_relay_both_ways() {
 scenario_panel_maintenance() {
     step "a panel that goes away must not interrupt traffic"
 
-    # Sixty-second tickets, so five minutes of outage spans four renewals —
-    # each of which needs the coordinator to mint a ticket without being able
-    # to ask the panel anything.
+    # Sixty-second tickets. Set before the coordinator is restarted below,
+    # which is where it is read — an earlier version set it here and the
+    # coordinator was already running with the ten-minute default, so the
+    # drill it was meant to sharpen ran blunt.
     LAB_TICKET_SECONDS=60
     export LAB_TICKET_SECONDS
 
     fixture cgnat symmetric
+
+    # Proof the setting arrived, not just that it was exported. Everything
+    # below is timed against this lifetime; against the ten-minute default it
+    # would run out of drill before the first renewal and pass without ever
+    # testing one.
+    local in_force
+    in_force="$(lab::ticket_seconds_in_force || true)"
+    if [ "$in_force" != "60s" ] && [ "$in_force" != "1m0s" ]; then
+        record "maint/ticket" FAIL \
+            "the coordinator is minting ${in_force:-ten-minute} tickets, so this drill would not reach a renewal"
+        unset LAB_TICKET_SECONDS
+
+        return
+    fi
+
 
     if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
         record "maint/paired" FAIL "the pair never connected, so there is nothing to protect"
@@ -522,11 +568,39 @@ scenario_panel_maintenance() {
 
         return
     fi
+
+    # Asserted, not assumed. A direct pair survives anything the control
+    # plane does, so a drill that let the pair go direct would pass on a
+    # build with none of this fixed — and the first version of this one did
+    # not check, which is how it passed on the build it was written to fail.
+    if ! lab::wait_path alpha relay 30; then
+        record "maint/paired" FAIL "the pair is not relayed, so this proves nothing about relays"
+        lab::tail_log alpha-up 20
+        unset LAB_TICKET_SECONDS
+
+        return
+    fi
     record "maint/paired" PASS "connected over a relay before the panel goes down"
 
-    # The panel goes away. Nothing else changes: both agents keep running,
-    # both networks keep working, the coordinator and relay stay up.
+    # The panel goes away, and the coordinator restarts — which is what
+    # pressing Update Now does, because upgrade-edge.sh puts the panel into
+    # maintenance and then restarts both services.
+    #
+    # The restart is the essential part, and leaving it out is why an earlier
+    # version of this drill was green on the build that failed in the field.
+    # Without it the agents are settled: the coordinator keeps acknowledging
+    # their pings from a registry it never lost, no Hello is ever sent, and
+    # the code path that asks the panel is never entered. A coordinator that
+    # starts empty ignores pings from keys it does not know, so both agents
+    # must re-introduce themselves — with a full Hello, carrying a token, to
+    # a panel that cannot answer. That is the moment R6 is actually about.
     lab::panel_stop
+
+    say "restarting the coordinator and the relay with no panel, as Update Now does"
+    lab::stop_pid "${COORD_PID:-}"
+    lab::coord_start
+    lab::stop_pid "${RELAY_PID:-}"
+    lab::relay_start
 
     local lost=0 checks=0 deadline=$(( $(date +%s) + 300 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -536,22 +610,26 @@ scenario_panel_maintenance() {
         lab::ping alpha "$BETA_IP" 2 || lost=$((lost + 1))
     done
 
-    if [ "$lost" -eq 0 ]; then
+    # One lost check is allowed, and only one: the relay restart above costs
+    # up to a rebind interval, and a check that lands inside it is the
+    # upgrade's own few seconds rather than a pair that did not recover.
+    if [ "$lost" -le 1 ]; then
         record "maint/during" PASS \
-            "traffic never stopped across 5 minutes with no panel ($checks checks)"
+            "traffic survived 5 minutes with no panel and a restarted coordinator ($lost of $checks checks lost)"
     else
         record "maint/during" FAIL \
             "traffic stopped on $lost of $checks checks while the panel was down"
         lab::tail_log alpha-up 25
+        lab::tail_log coordinator 25
     fi
 
-    # And it comes back, with nothing restarted anywhere.
+    # And it comes back, with nothing restarted on either PC.
     lab::panel_start
 
     sleep 30
 
     if lab::ping alpha "$BETA_IP" 3; then
-        record "maint/after" PASS "still carrying traffic once the panel returned, nothing restarted"
+        record "maint/after" PASS "still carrying traffic once the panel returned, no agent restarted"
     else
         record "maint/after" FAIL \
             "the pair did not recover after the panel returned"
@@ -591,6 +669,13 @@ scenario_edge_upgrade() {
 
     if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
         record "upgrade/paired" FAIL "the pair never connected, so there is nothing to interrupt"
+        lab::tail_log alpha-up 20
+        unset LAB_TICKET_SECONDS
+
+        return
+    fi
+    if ! lab::wait_path alpha relay 30; then
+        record "upgrade/paired" FAIL "the pair is not relayed, so the restart proves nothing about relays"
         lab::tail_log alpha-up 20
         unset LAB_TICKET_SECONDS
 

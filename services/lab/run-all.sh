@@ -82,6 +82,11 @@ fixture() {
     # the build, every time.
     lab::relay_hostname
 
+    # Before any agent starts, and after the topology exists: a scenario that
+    # asked for a different ticket lifetime gets a coordinator that is really
+    # running with it. See lab::coord_retune.
+    lab::coord_retune
+
     rm -rf "$RUN/state"
 
     # Enrolment is throttled per address, and the drill enrols two devices per

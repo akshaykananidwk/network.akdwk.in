@@ -1,10 +1,10 @@
 {
-  "version": "1.9.7-dev.15",
-  "released_at": "2026-09-23T12:00:00Z",
+  "version": "1.9.7-dev.16",
+  "released_at": "2026-09-23T13:30:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "php cli/maintenance.php on|off puts this panel alone into maintenance, so nobody has to stop a web server that is serving other people's sites to test it. The edge-upgrade drill measures what restarting the coordinator and relay costs a live pair.",
+  "notes": "Three networking drills had been running against ten-minute relay tickets when they were written for sixty-second ones, so none of them ever reached the renewal they existed to test. The setting now takes effect, each drill proves it arrived, and the panel-maintenance drill reproduces what Update Now really does.",
   "migrations": [],
   "protected": [
     ".env",

@@ -300,9 +300,45 @@ lab::coord_start() {
             --relays "lab-a::$RELAY_HOST:$RELAY_PORT,lab-b::$RELAY_HOST:$RELAY_B_PORT" \
         >"$LOGS/coordinator.log" 2>&1 &
     COORD_PID=$!
+    COORD_TICKET_SECONDS="${LAB_TICKET_SECONDS:-}"
     sleep 1
     kill -0 "$COORD_PID" 2>/dev/null || die "the coordinator exited (see $LOGS/coordinator.log)"
     say "coordinator on :$COORD_PORT, reachable as $HOST_IP (pid $COORD_PID)"
+}
+
+# lab::coord_retune restarts the coordinator when a scenario wants a different
+# ticket lifetime than the running one was started with.
+#
+# AKCONNECT_TICKET_SECONDS is read once, at start. The coordinator is started
+# in the control-plane phase, before any scenario runs, and fixture() does not
+# restart it — lab::stop_servers only stops the per-scenario helpers. So a
+# scenario that set LAB_TICKET_SECONDS and then called fixture got the
+# ten-minute default and never knew.
+#
+# Three drills were written to exercise ticket renewal under a sixty-second
+# lifetime — ticket-renewal, relay-both-ways and panel-maintenance — and all
+# three had been running against ten-minute tickets, which none of them is
+# long enough to reach. They passed, and what they proved was not what they
+# claimed. This is called from fixture(), so setting the variable is now
+# enough to make it true.
+lab::coord_retune() {
+    [ "${LAB_TICKET_SECONDS:-}" = "${COORD_TICKET_SECONDS:-}" ] && return 0
+
+    lab::stop_pid "${COORD_PID:-}"
+    lab::coord_start
+}
+
+# lab::ticket_seconds_in_force reports what the running coordinator is really
+# minting, read back from its own log rather than from the variable that was
+# meant to set it.
+#
+# A drill that depends on a short lifetime asserts this. The bug above was
+# invisible precisely because nothing ever checked that the setting arrived.
+lab::ticket_seconds_in_force() {
+    local line
+    line="$(grep -o 'relay tickets shortened to [0-9a-z]*' "$LOGS/coordinator.log" 2>/dev/null | tail -1)"
+    [ -n "$line" ] || return 1
+    printf '%s\n' "${line##* }"
 }
 
 # Two relays, so failover has somewhere to fail over to. A fleet of one only

@@ -6,6 +6,39 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.16] — development
+
+**Three drills were passing without testing the thing they were written for.**
+`AKCONNECT_TICKET_SECONDS` is read once, when the coordinator starts. The
+coordinator starts in the lab's control-plane phase, before any scenario runs,
+and `fixture()` never restarted it — so a scenario that set
+`LAB_TICKET_SECONDS=60` and then called `fixture` got the ten-minute default.
+Ticket-renewal, relay-both-ways and panel-maintenance were all written around
+a sixty-second lifetime and all three ran against ten minutes, which none of
+them is long enough to reach. They were green, and what they proved was not
+what they claimed.
+
+`fixture()` now restarts the coordinator when a scenario asks for a different
+lifetime, and each of the three reads the lifetime back out of the
+coordinator's own log and fails if it is not the one it asked for. A setting
+that silently does not arrive cannot be green again.
+
+**The panel-maintenance drill did not reproduce the failure it was written
+from.** Stopping the panel alone leaves the agents settled: the coordinator
+keeps acknowledging their pings from a registry it never lost, no Hello is
+ever sent, and the code path that asks the panel is never entered. Pressing
+Update Now does more than stop the panel — `upgrade-edge.sh` restarts the
+coordinator too, and a coordinator that starts empty ignores pings from keys
+it does not know, so both agents must re-introduce themselves with a full
+Hello to a panel that cannot answer. That is the moment R6 is about, and the
+drill now contains it. It also asserts the pair is relayed rather than
+assuming it: a direct pair survives anything the control plane does.
+
+Red on 1.9.7-dev.12 (4 of 15 checks lost, and the pair never recovered),
+green on this build (0 of 15, with the relay restarted mid-drill).
+
+---
+
 ## [1.9.7-dev.15] — development
 
 **A way to take this panel down without taking the server down.**
