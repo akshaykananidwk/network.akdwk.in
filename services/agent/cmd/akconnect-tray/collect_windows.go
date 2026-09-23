@@ -66,8 +66,19 @@ func machineSources() []source {
 // everything else in it, and the gap says what happened rather than being
 // silently absent.
 func powershell(statement string) string {
+	// Wrapped so a failure explains itself.
+	//
+	// "(could not run: exit status 1)" is what a bundle said about the
+	// firewall query, and an exit code is not a diagnosis: it does not say
+	// whether the module was missing, the policy refused, or the query
+	// returned nothing. PowerShell knows, and will say so if it is asked to
+	// catch rather than propagate — so the statement runs inside a try, the
+	// exception message is printed, and the process always exits zero.
+	wrapped := "try { " + statement + " } catch { " +
+		"Write-Output ('(Windows refused this query: ' + $_.Exception.Message + ')') }; exit 0"
+
 	cmd := exec.Command("powershell.exe",
-		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", statement)
+		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", wrapped)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
 	done := make(chan struct{})
@@ -91,10 +102,16 @@ func powershell(statement string) string {
 
 	text := strings.TrimSpace(string(out))
 	if err != nil {
-		return fmt.Sprintf("(could not run: %v)\n%s\n", err, text)
+		// With the wrapper above this should not happen; when it does, the
+		// output is worth more than the exit code, so it goes first.
+		if text != "" {
+			return text + "\n(powershell also exited with: " + err.Error() + ")\n"
+		}
+
+		return fmt.Sprintf("(could not run, and printed nothing: %v)\n", err)
 	}
 	if text == "" {
-		return "(nothing to report)\n"
+		return "(nothing to report — the query ran and matched nothing)\n"
 	}
 
 	return text + "\n"

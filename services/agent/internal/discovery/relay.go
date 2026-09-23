@@ -75,6 +75,9 @@ func (c *Client) handleRelayOffer(header disco.Header, sealed []byte) {
 	c.mu.Lock()
 	c.relayControl[offer.Peer] = control
 	c.relayTicket[offer.Peer] = offer.Ticket
+	// A fresh ticket restarts the renewal clock.
+	c.relayTicketSeen[offer.Peer] = time.Now()
+	c.relayRenewed[offer.Peer] = false
 	c.relayName[offer.Peer] = offer.Name
 	// A fresh offer starts the liveness count over. Without this a peer moved
 	// to a new relay would inherit the dead one's missed acknowledgements and
@@ -145,6 +148,9 @@ func (c *Client) bindAfterResolving(offer *disco.RelayOffer) {
 	c.mu.Lock()
 	c.relayControl[offer.Peer] = addr
 	c.relayTicket[offer.Peer] = offer.Ticket
+	// A fresh ticket restarts the renewal clock.
+	c.relayTicketSeen[offer.Peer] = time.Now()
+	c.relayRenewed[offer.Peer] = false
 	c.relayName[offer.Peer] = offer.Name
 	c.relayMissed[offer.Peer] = 0
 	// Remembered under its name, so the next offer for this relay takes the
@@ -256,6 +262,54 @@ func (c *Client) handleRelayBindAck(from netip.AddrPort, body []byte) {
 
 	endpoint := netip.AddrPortFrom(from.Addr(), port)
 	c.adoptRelay(peer, endpoint)
+}
+
+// handleRelayBindRefused renews a ticket the relay would not accept.
+//
+// This is the whole point of the relay saying why. An expired ticket and a
+// dead relay used to look identical from here — both were silence — and the
+// agent treated both as a dead relay: it asked the coordinator for a
+// DIFFERENT one, every twenty seconds, and those requests are counted as
+// complaints. Enough of them took the only relay in the fleet out of
+// rotation, after which no offer could be made at all and the pair stayed
+// dead until somebody restarted the service.
+//
+// So a refusal renews and never fails over. The relay is working — it just
+// told us so, in the act of refusing.
+func (c *Client) handleRelayBindRefused(from netip.AddrPort, body []byte) {
+	reason := byte(0)
+	if len(body) > 0 {
+		reason = body[0]
+	}
+
+	c.mu.Lock()
+	var peers [][32]byte
+	for peer, control := range c.relayControl {
+		if control == from {
+			peers = append(peers, peer)
+		}
+	}
+	// The ticket is what was refused, so the renewal clock is reset for these
+	// peers: the next tick asks for a replacement rather than re-presenting
+	// what has just been rejected.
+	for _, peer := range peers {
+		c.relayRenewed[peer] = false
+		c.relayTicketSeen[peer] = time.Time{}
+		// Not a miss. The relay answered.
+		c.relayMissed[peer] = 0
+	}
+	c.mu.Unlock()
+
+	why := "the relay would not accept our ticket"
+	if reason == disco.RefusedTicketExpired {
+		why = "our relay ticket has expired"
+	}
+
+	for _, peer := range peers {
+		c.opts.Logf("discovery: %s for %x…; asking for a fresh one (the relay is up)", why, peer[:6])
+		// No relay named to avoid: this is a renewal, not a complaint.
+		c.requestRelay(peer, "")
+	}
 }
 
 // adoptRelay routes a peer's traffic through the relay.
@@ -399,6 +453,26 @@ const relayFailoverNeedsCoordinator = 4 * time.Second
 // before relay failover stands down, for the same reason.
 const relayFailoverNeedsAnswers = 2
 
+// relayRenewAt is the fraction of a ticket's life at which a fresh one is
+// asked for.
+//
+// A ticket is the relay's whole authorisation model and it expires. Until
+// 1.9.7-dev.6 nothing renewed it: the agent was handed one at the start and
+// re-presented it for ever. Ten minutes later the relay began refusing every
+// bind — silently, because a refusal looked exactly like a relay that had
+// stopped answering — and the agent concluded its relay was dead and asked
+// the coordinator for a different one, every twenty seconds.
+//
+// That complaint is counted. Enough of them take the relay out of rotation
+// for the whole fleet, and on a deployment with ONE relay that left nothing
+// to offer: no answer ever came, and the pair stayed dead until somebody
+// restarted the service. Both breaks in the field report were eight to nine
+// minutes after a bind, which is this and nothing else.
+//
+// Half, so a renewal that is lost still has half the remaining life to be
+// retried in.
+const relayRenewAt = 0.5
+
 // relayOfferTimeout is how long to wait for the coordinator's answer before
 // asking again.
 //
@@ -447,6 +521,64 @@ const relayFailoverStandDownMax = 30 * time.Second
 // never fires.
 const relayMissesBeforeAsking = 2
 
+// ticketNeedsRenewalLocked reports whether a peer's ticket is past the point
+// where a fresh one should have been asked for.
+//
+// The expiry is read out of the ticket itself. The agent cannot verify a
+// ticket — only the relay can, and only with the coordinator's key — but the
+// expiry is in the clear and the agent needs nothing else. Reading it here
+// means no protocol change and no second source of truth about when a ticket
+// dies.
+//
+// Called with c.mu held.
+func (c *Client) ticketNeedsRenewalLocked(peer [32]byte) bool {
+	raw := c.relayTicket[peer]
+	if len(raw) == 0 {
+		return false
+	}
+
+	// Once per ticket, checked first.
+	//
+	// Every path below returns true at most once for a given ticket. Without
+	// that, a ticket past its half-life — or one that will not decode at all
+	// — produces a fresh request every five seconds for as long as it is
+	// held, which is the same flood of requests this change exists to stop,
+	// arriving from the other direction.
+	if c.relayRenewed[peer] {
+		return false
+	}
+
+	ticket, err := disco.DecodeTicket(raw)
+	if err != nil {
+		// Unreadable is worse than expiring: ask for a new one, once.
+		c.relayRenewed[peer] = true
+
+		return true
+	}
+
+	issued, ok := c.relayTicketSeen[peer]
+	if !ok {
+		issued = time.Now()
+		c.relayTicketSeen[peer] = issued
+	}
+
+	expires := time.Unix(ticket.ExpiresAt, 0)
+	life := expires.Sub(issued)
+	if life <= 0 {
+		c.relayRenewed[peer] = true
+
+		return true
+	}
+
+	if time.Now().After(issued.Add(time.Duration(float64(life) * relayRenewAt))) {
+		c.relayRenewed[peer] = true
+
+		return true
+	}
+
+	return false
+}
+
 // rebindRelays re-presents tickets and notices when a relay stops answering.
 func (c *Client) rebindRelays() {
 	c.mu.Lock()
@@ -466,6 +598,7 @@ func (c *Client) rebindRelays() {
 	}
 
 	var bindings []binding
+	var renewing [][32]byte
 	askCoordinator := false
 	for peer, control := range c.relayControl {
 		// Any peer with a relay assigned, not only one whose relay has already
@@ -484,6 +617,16 @@ func (c *Client) rebindRelays() {
 		// yet. That is the coordinator's silence, not a relay's, and there is
 		// nothing to bind to.
 		if !control.IsValid() {
+			continue
+		}
+
+		// Is this ticket close enough to expiry to be replaced?
+		//
+		// Asked before the bind is counted, because a ticket about to expire
+		// is not a relay that has failed and must not be reported as one.
+		if c.ticketNeedsRenewalLocked(peer) {
+			renewing = append(renewing, peer)
+
 			continue
 		}
 
@@ -535,6 +678,15 @@ func (c *Client) rebindRelays() {
 	// One announcement for the whole tick, however many peers are stalled.
 	if askCoordinator {
 		c.announce(false)
+	}
+
+	// Tickets nearing expiry are replaced before they expire, and WITHOUT
+	// naming the relay to avoid: this is a renewal, not a complaint. Asking
+	// for "another relay" here is what took the only relay in a one-relay
+	// fleet out of rotation and left nothing to offer.
+	for _, peer := range renewing {
+		c.opts.Logf("discovery: renewing the relay ticket for %x… before it expires", peer[:6])
+		c.requestRelay(peer, "")
 	}
 
 	for _, b := range bindings {

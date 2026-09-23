@@ -2,6 +2,7 @@ package forwarder
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -184,6 +185,26 @@ func (r *Relay) handleBind(pkt []byte, from netip.AddrPort) {
 	if err := ticket.Verify(r.opts.Secret, time.Now()); err != nil {
 		r.opts.Logf("refused a bind from %s: %v", from, err)
 
+		// Say why, rather than going quiet.
+		//
+		// Silence is indistinguishable from a relay that has stopped running,
+		// and an agent that cannot tell those apart does the wrong thing with
+		// confidence: it concluded this relay was dead and asked the
+		// coordinator for a different one every twenty seconds, until its
+		// complaints took the only relay in the fleet out of rotation and no
+		// offer could be made at all. An expired ticket is not a dead relay.
+		// Only an EXPIRED ticket gets an answer.
+		//
+		// Presenting one with a valid MAC proves the coordinator issued it,
+		// so telling that holder to renew costs nothing and saves a pair. A
+		// ticket that does not verify at all is an unauthenticated stranger,
+		// and answering it would make the relay confirm its own existence to
+		// anybody who sends it a packet — which a relay test already required
+		// it not to do, and was right to.
+		if errors.Is(err, disco.ErrTicketExpired) {
+			r.sendBindRefused(from, disco.RefusedTicketExpired)
+		}
+
 		return
 	}
 
@@ -213,6 +234,17 @@ func (r *Relay) handleBind(pkt []byte, from netip.AddrPort) {
 	r.opts.Logf("bound %s to pair %x… on port %d", from, pair[:6], sd.port)
 
 	r.sendBindAck(from, sd.port, ticket.Peer)
+}
+
+// sendBindRefused tells the agent why its bind was not accepted.
+func (r *Relay) sendBindRefused(to netip.AddrPort, reason byte) {
+	pkt := make([]byte, disco.HeaderLen)
+	disco.WriteHeader(pkt, disco.TypeRelayBindRefused, [32]byte{})
+	pkt = append(pkt, reason)
+
+	if _, err := r.control.WriteToUDPAddrPort(pkt, to); err != nil {
+		r.opts.Logf("telling %s why its bind was refused failed: %v", to, err)
+	}
 }
 
 func (r *Relay) sendBindAck(to netip.AddrPort, port uint16, peer [32]byte) {

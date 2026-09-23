@@ -18,6 +18,25 @@ import (
 // not have to round-trip the coordinator for every reconnection.
 const ticketLifetime = 10 * time.Minute
 
+// ticketLife is the lifetime actually used, so the lab can make it short
+// enough to watch a renewal happen.
+//
+// Ten minutes is right in production and useless in a drill: proving that a
+// pair survives its ticket expiring would take an hour of wall clock per run.
+// AKCONNECT_TICKET_SECONDS shortens it, and is read once at start.
+//
+// Environment rather than a flag because the relay and the coordinator have
+// to agree about nothing here — the expiry travels inside the ticket — so
+// there is no configuration to keep in step, only a number the coordinator
+// stamps.
+func (s *Server) ticketLife() time.Duration {
+	if s.ticketLifeOverride > 0 {
+		return s.ticketLifeOverride
+	}
+
+	return ticketLifetime
+}
+
 // handleRelayRequest answers an agent that cannot reach a peer directly.
 //
 // The coordinator decides, not the agent: the agent says "I cannot reach this
@@ -65,7 +84,7 @@ func (s *Server) handleRelayRequest(header disco.Header, sealed []byte, from net
 
 	ticket := &disco.Ticket{
 		TenantID:  uint64(self.TenantID),
-		ExpiresAt: time.Now().Add(ticketLifetime).Unix(),
+		ExpiresAt: time.Now().Add(s.ticketLife()).Unix(),
 		Self:      header.Sender,
 		Peer:      request.Peer,
 	}
@@ -107,7 +126,7 @@ func (s *Server) offerToPeer(peerKey, selfKey [32]byte, relay *RelayTarget) {
 
 	ticket := &disco.Ticket{
 		TenantID:  uint64(peer.TenantID),
-		ExpiresAt: time.Now().Add(ticketLifetime).Unix(),
+		ExpiresAt: time.Now().Add(s.ticketLife()).Unix(),
 		Self:      peerKey,
 		Peer:      selfKey,
 	}
@@ -168,7 +187,42 @@ func (s *Server) pickRelayAvoiding(self, peer *registry.Entry, avoid string) *Re
 	// Nothing else in the fleet. Offering the failed relay again is the only
 	// thing left, and a relay that has since come back beats refusing to
 	// answer at all.
-	return s.pickRelay(self, peer, "")
+	if relay := s.pickRelay(self, peer, ""); relay != nil {
+		return relay
+	}
+
+	// And if the only relay there is has been marked down by complaints,
+	// offer it anyway.
+	//
+	// This is the difference between a degraded pair and a dead one. A
+	// one-relay deployment — which is every deployment until somebody adds a
+	// second — had its single relay taken out of rotation by an agent whose
+	// TICKET had expired, complaining every twenty seconds that the relay was
+	// unusable. It was not: it was refusing an expired ticket, correctly.
+	// With the relay marked down, both the avoiding pick and the fallback
+	// above skipped it, no offer was ever sent, and the pair stayed dead
+	// until somebody restarted the agent.
+	//
+	// A relay that some devices cannot use is still the only thing that might
+	// work. Refusing to answer guarantees it will not.
+	return s.pickRelayIgnoringHealth(self, peer)
+}
+
+// pickRelayIgnoringHealth is the last resort: the best relay in the fleet
+// even if health has taken it out of rotation, because having no relay to
+// offer is worse than offering one that may be unwell.
+func (s *Server) pickRelayIgnoringHealth(self, peer *registry.Entry) *RelayTarget {
+	var best *RelayTarget
+
+	for _, relay := range s.opts.Relays {
+		candidate := relay
+
+		if best == nil {
+			best = &RelayTarget{Name: candidate.Name, Endpoint: candidate.Endpoint, Region: candidate.Region}
+		}
+	}
+
+	return best
 }
 
 // avoid names a relay to exclude from this decision — the one an agent just

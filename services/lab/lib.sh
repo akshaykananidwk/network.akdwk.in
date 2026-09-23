@@ -278,6 +278,7 @@ lab::coord_start() {
     AKCONNECT_COORDINATOR_SECRET="$COORD_SECRET" \
     AKCONNECT_RELAY_SECRET_LAB_A="$RELAY_SECRET" \
     AKCONNECT_RELAY_SECRET_LAB_B="$RELAY_B_SECRET" \
+    AKCONNECT_TICKET_SECONDS="${LAB_TICKET_SECONDS:-}" \
         "$BIN/akconnect-coordinator" serve \
             --listen ":$COORD_PORT" \
             --panel "$PANEL_URL" \

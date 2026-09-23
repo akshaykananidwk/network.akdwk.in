@@ -158,6 +158,12 @@ type Client struct {
 	relayMissed map[[32]byte]int
 	// relayAskedAt is when a relay was last asked for and not yet offered.
 	relayAskedAt map[[32]byte]time.Time
+	// relayTicketSeen is when each peer's current ticket arrived, and
+	// relayRenewed whether a replacement has already been asked for. A ticket
+	// carries its expiry but not its issue time, and the agent needs both to
+	// know when half its life has gone.
+	relayTicketSeen map[[32]byte]time.Time
+	relayRenewed    map[[32]byte]bool
 	// standDownSince is when relay failover last began waiting for the
 	// coordinator to start answering again. Zero when it is not waiting.
 	standDownSince time.Time
@@ -232,20 +238,22 @@ func New(opts Options) (*Client, error) {
 	}
 
 	return &Client{
-		opts:           opts,
-		candidates:     make(map[[32]byte][]netip.AddrPort),
-		established:    make(map[[32]byte]netip.AddrPort),
-		paths:          make(map[[32]byte]path),
-		firstSeen:      make(map[[32]byte]time.Time),
-		relayControl:   make(map[[32]byte]netip.AddrPort),
-		relayTicket:    make(map[[32]byte][]byte),
-		relayName:      make(map[[32]byte]string),
-		relayMissed:    make(map[[32]byte]int),
-		relayAskedAt:   make(map[[32]byte]time.Time),
-		relayRTT:       make(map[string]uint16),
-		probesInFlight: make(map[[disco.ProbeNonceLen]byte]pendingProbe),
-		repunchCount:   make(map[[32]byte]int),
-		nextRepunch:    make(map[[32]byte]time.Time),
+		opts:            opts,
+		candidates:      make(map[[32]byte][]netip.AddrPort),
+		established:     make(map[[32]byte]netip.AddrPort),
+		paths:           make(map[[32]byte]path),
+		firstSeen:       make(map[[32]byte]time.Time),
+		relayControl:    make(map[[32]byte]netip.AddrPort),
+		relayTicket:     make(map[[32]byte][]byte),
+		relayName:       make(map[[32]byte]string),
+		relayMissed:     make(map[[32]byte]int),
+		relayAskedAt:    make(map[[32]byte]time.Time),
+		relayTicketSeen: make(map[[32]byte]time.Time),
+		relayRenewed:    make(map[[32]byte]bool),
+		relayRTT:        make(map[string]uint16),
+		probesInFlight:  make(map[[disco.ProbeNonceLen]byte]pendingProbe),
+		repunchCount:    make(map[[32]byte]int),
+		nextRepunch:     make(map[[32]byte]time.Time),
 	}, nil
 }
 

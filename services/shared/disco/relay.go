@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -20,6 +21,16 @@ const (
 	// the relay has no key agreement with the agent; the ticket's MAC is what
 	// authenticates it.
 	TypeRelayBind MessageType = 0x12
+	// TypeRelayBindRefused tells the agent WHY a bind was refused.
+	//
+	// Silence was the old answer, and silence is indistinguishable from a
+	// relay that has stopped running — so an agent whose ticket had expired
+	// concluded its relay was dead and asked the coordinator for a different
+	// one, every twenty seconds, until the only relay in the fleet was taken
+	// out of rotation by its own complaints. Saying "your ticket expired" is
+	// the difference between renewing and failing over.
+	TypeRelayBindRefused MessageType = 0x14
+
 	// TypeRelayBindAck tells the agent which port to send its tunnel traffic to.
 	TypeRelayBindAck MessageType = 0x13
 )
@@ -106,6 +117,15 @@ func (t *Ticket) Sign(secret []byte) {
 	copy(t.MAC[:], t.mac(secret))
 }
 
+// ErrTicketExpired is a ticket whose MAC verifies and whose time has passed.
+//
+// Separate from a ticket that does not verify at all, and the difference
+// decides whether the relay answers. A holder of an expired ticket proved, by
+// presenting a valid MAC, that the coordinator once issued it one — telling
+// that party to renew costs nothing. A bad MAC is an unauthenticated
+// stranger, and the relay stays silent.
+var ErrTicketExpired = errors.New("ticket expired")
+
 // Verify checks the MAC and the expiry. Called by the relay on every bind.
 func (t *Ticket) Verify(secret []byte, now time.Time) error {
 	// Constant time: a relay verifying thousands of tickets must not leak the
@@ -115,7 +135,7 @@ func (t *Ticket) Verify(secret []byte, now time.Time) error {
 	}
 
 	if now.Unix() > t.ExpiresAt {
-		return fmt.Errorf("%w: ticket expired at %s", ErrMalformed,
+		return fmt.Errorf("%w: %w at %s", ErrMalformed, ErrTicketExpired,
 			time.Unix(t.ExpiresAt, 0).UTC().Format(time.RFC3339))
 	}
 
@@ -236,3 +256,18 @@ func DecodeRelayOffer(b []byte) (*RelayOffer, error) {
 
 	return &out, nil
 }
+
+// Reasons a relay refuses a bind.
+//
+// A byte rather than a string: this is a datagram on the wire, and the agent
+// needs to branch on it rather than show it to anybody.
+const (
+	// RefusedTicketExpired means the ticket was valid and is now too old.
+	// The agent should ask the coordinator for a fresh one and keep using
+	// this relay.
+	RefusedTicketExpired byte = 1
+	// RefusedTicketInvalid means it did not verify at all — wrong key, wrong
+	// pair, corrupt. A fresh ticket is still the right move; it is separate
+	// because the two mean very different things in a log.
+	RefusedTicketInvalid byte = 2
+)

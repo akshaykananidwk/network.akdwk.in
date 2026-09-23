@@ -8,6 +8,29 @@ import (
 	"github.com/akshaykananidwk/network.akdwk.in/services/shared/disco"
 )
 
+// liveTicket builds a ticket that is real enough to decode and nowhere near
+// expiry, so a test about failover is not quietly also a test about renewal.
+//
+// The earlier tests used liveTicket(h.client.opts.SelfPublic, peer), which stopped being good enough
+// the moment the agent learned to read a ticket's expiry: an undecodable
+// ticket now asks for a replacement, which is correct behaviour and was
+// making three unrelated tests fail.
+func liveTicket(self, peer [32]byte) []byte {
+	return ticketExpiring(self, peer, time.Hour)
+}
+
+// ticketExpiring builds one that dies after a chosen interval.
+func ticketExpiring(self, peer [32]byte, in time.Duration) []byte {
+	ticket := &disco.Ticket{
+		TenantID:  1,
+		ExpiresAt: time.Now().Add(in).Unix(),
+		Self:      self,
+		Peer:      peer,
+	}
+
+	return ticket.Encode()
+}
+
 // Relay offers, failover and latency reporting.
 //
 // Split from discovery_test.go, which covers punching and candidates, so that
@@ -20,8 +43,12 @@ func (h *harness) deliverRelayOffer(t *testing.T, peer [32]byte, endpoint, name 
 	offer := &disco.RelayOffer{
 		Peer:     peer,
 		Endpoint: endpoint,
-		Ticket:   make([]byte, disco.TicketLen),
-		Name:     name,
+		// A real ticket, far from expiry. A zeroed one decodes to an
+		// expiry of 1970 and the agent — correctly — asks for a
+		// replacement immediately, which turns every test that counts
+		// relay requests into a test about renewal.
+		Ticket: liveTicket(h.client.opts.SelfPublic, peer),
+		Name:   name,
 	}
 
 	body, err := offer.Encode()
@@ -404,7 +431,7 @@ func TestDoesNotChangeRelayWhileTheCoordinatorIsAlsoSilent(t *testing.T) {
 
 	h.client.mu.Lock()
 	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
-	h.client.relayTicket[peer] = []byte("ticket")
+	h.client.relayTicket[peer] = liveTicket(h.client.opts.SelfPublic, peer)
 	h.client.relayName[peer] = "lab-b"
 	h.client.paths[peer] = pathRelay
 	h.client.mu.Unlock()
@@ -444,7 +471,7 @@ func TestStillChangesRelayWhenTheCoordinatorIsAnswering(t *testing.T) {
 
 	h.client.mu.Lock()
 	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
-	h.client.relayTicket[peer] = []byte("ticket")
+	h.client.relayTicket[peer] = liveTicket(h.client.opts.SelfPublic, peer)
 	h.client.relayName[peer] = "lab-a"
 	h.client.paths[peer] = pathRelay
 	// The coordinator answered a moment ago, so UDP is working.
@@ -476,7 +503,7 @@ func TestAsksTheCoordinatorWhenRebindsGoQuiet(t *testing.T) {
 
 	h.client.mu.Lock()
 	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
-	h.client.relayTicket[peer] = []byte("ticket")
+	h.client.relayTicket[peer] = liveTicket(h.client.opts.SelfPublic, peer)
 	h.client.paths[peer] = pathRelay
 	h.client.lastAck = time.Now()
 	h.client.mu.Unlock()
@@ -508,7 +535,7 @@ func TestDoesNotAskTheCoordinatorWhileTheRelayAnswers(t *testing.T) {
 
 	h.client.mu.Lock()
 	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
-	h.client.relayTicket[peer] = []byte("ticket")
+	h.client.relayTicket[peer] = liveTicket(h.client.opts.SelfPublic, peer)
 	h.client.paths[peer] = pathRelay
 	h.client.lastAck = time.Now()
 	h.client.mu.Unlock()
@@ -604,7 +631,7 @@ func TestFailoverStandDownIsBounded(t *testing.T) {
 
 	h.client.mu.Lock()
 	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
-	h.client.relayTicket[peer] = []byte("ticket")
+	h.client.relayTicket[peer] = liveTicket(h.client.opts.SelfPublic, peer)
 	h.client.paths[peer] = pathRelay
 	// The network stopped carrying UDP and has not started again.
 	h.client.unacked = relayFailoverNeedsAnswers
@@ -647,7 +674,7 @@ func TestTheStandDownClockRestartsWhenTheCoordinatorAnswers(t *testing.T) {
 
 	h.client.mu.Lock()
 	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
-	h.client.relayTicket[peer] = []byte("ticket")
+	h.client.relayTicket[peer] = liveTicket(h.client.opts.SelfPublic, peer)
 	h.client.paths[peer] = pathRelay
 	h.client.standDownSince = time.Now().Add(-2 * relayFailoverStandDownMax)
 	// The coordinator is answering.
@@ -787,5 +814,105 @@ func TestTwoPeersOnOneRelayKeepTheirOwnPorts(t *testing.T) {
 	}
 	if got := h.peers.endpointOf(base64Key(second)); got != "10.0.0.9:52165" {
 		t.Fatalf("an unnamed acknowledgement moved a peer to %q by guessing", got)
+	}
+}
+
+// A ticket is renewed before it expires, and the renewal is not a complaint.
+//
+// The field failure this comes from: the agent was handed a ticket, held it
+// for its whole ten-minute life, and then presented an expired one. The relay
+// refused it silently — which is indistinguishable from a relay that has
+// stopped running — so the agent asked the coordinator for ANOTHER relay
+// every twenty seconds. Those requests name the relay to avoid and are
+// counted as complaints; enough of them took the only relay in the fleet out
+// of rotation, after which no offer could be made at all. Two breaks, both
+// eight to nine minutes after a bind, dead until the service was restarted.
+func TestATicketIsRenewedBeforeItExpires(t *testing.T) {
+	h := newHarness(t)
+
+	var peer [32]byte
+	peer[0] = 37
+
+	h.client.mu.Lock()
+	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
+	h.client.relayTicket[peer] = liveTicket(h.client.opts.SelfPublic, peer)
+	h.client.paths[peer] = pathRelay
+	// Issued a minute ago, expiring in an hour: nowhere near half life.
+	h.client.relayTicketSeen[peer] = time.Now().Add(-time.Minute)
+	h.client.mu.Unlock()
+
+	h.client.rebindRelays()
+
+	if got := h.transport.count(disco.TypeRelayRequest); got != 0 {
+		t.Fatalf("asked for a ticket %d time(s) while the current one was fresh", got)
+	}
+
+	// Past half life. Life is measured from issue to expiry, so both ends
+	// matter: a ticket with a minute left, handed over nine minutes ago, has
+	// a ten-minute life of which nine are gone.
+	h.client.mu.Lock()
+	h.client.relayTicket[peer] = ticketExpiring(h.client.opts.SelfPublic, peer, time.Minute)
+	h.client.relayTicketSeen[peer] = time.Now().Add(-9 * time.Minute)
+	h.client.mu.Unlock()
+
+	h.client.rebindRelays()
+
+	if got := h.transport.count(disco.TypeRelayRequest); got != 1 {
+		t.Fatalf("asked %d time(s) past half the ticket's life, want exactly 1", got)
+	}
+
+	// And only once. A ticket past half life must not produce a request every
+	// five seconds for the rest of its life — that is the same flood arriving
+	// from the other direction.
+	//
+	// The relay answers each rebind, as a live one does: without that the
+	// miss counter climbs and the requests that follow are ordinary failover,
+	// which is correct behaviour and not what this is measuring.
+	ack := append([]byte{0xA0, 0x08}, peer[:]...)
+	for i := 0; i < 10; i++ {
+		h.client.rebindRelays()
+		h.client.handleRelayBindAck(netip.MustParseAddrPort("10.0.0.9:9000"), ack)
+	}
+
+	if got := h.transport.count(disco.TypeRelayRequest); got != 1 {
+		t.Fatalf("asked %d time(s) in total; renewal must happen once per ticket", got)
+	}
+}
+
+// A refused bind renews the ticket and does NOT fail over.
+//
+// The relay saying why is the whole point: an expired ticket and a dead relay
+// used to be the same silence, and the agent did the wrong thing with
+// confidence.
+func TestARefusedBindRenewsRatherThanFailingOver(t *testing.T) {
+	h := newHarness(t)
+
+	var peer [32]byte
+	peer[0] = 41
+	control := netip.MustParseAddrPort("10.0.0.9:9000")
+
+	h.client.mu.Lock()
+	h.client.relayControl[peer] = control
+	h.client.relayTicket[peer] = liveTicket(h.client.opts.SelfPublic, peer)
+	h.client.paths[peer] = pathRelay
+	h.client.relayMissed[peer] = relayMissesBeforeFailover
+	h.client.mu.Unlock()
+
+	h.client.handleRelayBindRefused(control, []byte{disco.RefusedTicketExpired})
+
+	// It asked for a ticket…
+	if got := h.transport.count(disco.TypeRelayRequest); got != 1 {
+		t.Fatalf("sent %d request(s) after a refusal, want 1", got)
+	}
+
+	// …and the miss counter was cleared, because the relay answered. Leaving
+	// it set would fail over on the very next tick, which is the behaviour
+	// being removed.
+	h.client.mu.Lock()
+	missed := h.client.relayMissed[peer]
+	h.client.mu.Unlock()
+
+	if missed != 0 {
+		t.Fatalf("the miss counter is %d after the relay answered a refusal, want 0", missed)
 	}
 }

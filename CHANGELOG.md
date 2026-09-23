@@ -6,6 +6,40 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.6] — development
+
+**A relayed pair died eight to nine minutes after every bind.** The ticket is
+the relay's whole authorisation model and it expires after ten minutes.
+Nothing renewed it. The agent held the one it was given and presented it
+forever.
+
+Three faults, each of which alone would have been survivable:
+
+The agent never renewed. It now asks for a replacement at half the ticket's
+life, reading the expiry out of the ticket itself — once per ticket, so a
+renewal is not its own flood.
+
+The relay refused an expired ticket in silence, which is indistinguishable
+from a relay that has stopped running. It says so now, and the agent renews
+instead of failing over. Only an expired ticket gets an answer: one that does
+not verify at all is an unauthenticated stranger and still gets nothing, which
+a relay test already required and was right to.
+
+And the coordinator would not offer its only relay. Asking for "another relay"
+is counted as a complaint, enough complaints take a relay out of rotation for
+the whole fleet, and on a one-relay deployment — which is every deployment
+until somebody adds a second — that left nothing to offer. No answer ever
+came, and the pair stayed dead until the service was restarted. A relay some
+devices cannot use is still the only thing that might work; refusing to answer
+guarantees it will not.
+
+**Diagnostics say whether the agent was running.** At the top of the first
+file, because it decides how to read every other file. A bundle collected
+during a restart reported an unreadable status file, an empty firewall query
+and a listener table with no agent port — three puzzles with one answer the
+bundle never stated. A PowerShell query that fails now prints what Windows
+said rather than "(could not run: exit status 1)".
+
 ## [1.9.7-dev.5] — development
 
 **The Test button answered 500 the first time it was pressed.** The probe

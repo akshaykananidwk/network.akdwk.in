@@ -68,9 +68,19 @@ func gatherSources() []source {
 	// that still work are exactly the parts that explain that kind of fault,
 	// so they are collected anyway.
 	if store, err := state.Open(); err != nil {
+		// Named for what it is rather than for the file that is missing.
+		// "runtime.json could not be read" sent somebody looking for a
+		// corrupt file when the answer was that the service was restarting
+		// and had not written one yet.
+		running, _ := serviceRunning()
+		why := "The agent is not running, so it has published no status."
+		if running {
+			why = "The agent is running but its state directory could not be read: " + err.Error()
+		}
+
 		sources = append(sources, source{
 			Name: "status.txt",
-			Text: "state directory unreadable: " + err.Error() + "\n",
+			Text: why + "\n",
 		})
 	} else {
 		sources = append(sources, source{
@@ -101,8 +111,30 @@ func about() string {
 		"%s diagnostics\n"+
 		"collected : %s\n"+
 		"computer  : %s\n"+
-		"tray      : %s\n",
-		displayName, time.Now().Format(time.RFC1123), host, version)
+		"tray      : %s\n"+
+		"agent     : %s\n",
+		displayName, time.Now().Format(time.RFC1123), host, version, agentStateLine())
+}
+
+// agentStateLine says whether the agent was running when this was collected.
+//
+// At the top of the first file, because it decides how to read every other
+// file in the bundle. A collection taken while the service was restarting
+// reported "runtime.json could not be read", an empty firewall query and a
+// UDP listener table with no agent port in it — three separate puzzles, all
+// of them explained by one fact that the bundle never stated.
+func agentStateLine() string {
+	running, detail := serviceRunning()
+
+	switch {
+	case running:
+		return "running" + detail
+	case detail != "":
+		return "NOT RUNNING" + detail +
+			" — the files below describe a machine with no agent on it"
+	default:
+		return "NOT RUNNING — the files below describe a machine with no agent on it"
+	}
 }
 
 // desktopDir is where the file lands. USERPROFILE rather than a shell API,

@@ -1,10 +1,10 @@
 {
-  "version": "1.9.7-dev.5",
+  "version": "1.9.7-dev.6",
   "released_at": "2026-09-23T09:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "The Test button answered 500: the probe model assumed a deleted_at column its table does not have. Fixed, and every model's finder is now run against the real migrated schema so a disagreement cannot reach a user again.",
+  "notes": "The relay ticket expires after ten minutes and nothing renewed it, so a relayed pair died eight to nine minutes after every bind. The agent renews at half life, the relay says when a ticket has expired instead of going quiet, and the coordinator will offer its only relay even when complaints have marked it down.",
   "migrations": [],
   "protected": [
     ".env",

@@ -343,3 +343,79 @@ scenario_relay_offer_lost() {
             ;;
     esac
 }
+
+# ------------------------------------------------ the ticket that expired
+#
+# A relayed pair went dead eight to nine minutes after each bind, twice, and
+# stayed dead until the service was restarted. The ticket is the relay's whole
+# authorisation model and it expires after ten minutes; nothing renewed it.
+#
+# The agent kept presenting the expired one, the relay refused it silently —
+# indistinguishable from a relay that has stopped running — and the agent
+# concluded its relay was dead and asked the coordinator for a different one
+# every twenty seconds. Those requests are counted as complaints, enough of
+# them take a relay out of rotation for the whole fleet, and on a deployment
+# with ONE relay that left nothing to offer. No answer ever came.
+#
+# Proved here with a sixty-second ticket: the pair must stay up for five times
+# its life, with nothing restarted. That is four renewals it has to get right,
+# in five minutes rather than the hour a production ticket would need.
+scenario_ticket_renewal() {
+    step "a relayed pair must outlive its relay ticket"
+
+    # Sixty-second tickets for this scenario only. The fixture restarts the
+    # control plane, so it is set before and cleared after.
+    LAB_TICKET_SECONDS=60
+    export LAB_TICKET_SECONDS
+
+    # Symmetric on both sides so a relay is the only path they have, and the
+    # ticket therefore matters for every packet.
+    fixture cgnat symmetric
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
+        record "ticket/paired" FAIL "the pair never connected, so there is no ticket to outlive"
+        lab::tail_log alpha-up 20
+        unset LAB_TICKET_SECONDS
+
+        return
+    fi
+    record "ticket/paired" PASS "connected over a relay with a 60s ticket"
+
+    # Five times the ticket's life. Nothing is restarted and nothing about the
+    # network changes: the only thing that happens is time.
+    local deadline=$(( $(date +%s) + 300 )) lost=0 checks=0
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        sleep 20
+        checks=$((checks + 1))
+
+        if ! lab::ping alpha "$BETA_IP" 2; then
+            lost=$((lost + 1))
+        fi
+    done
+
+    if [ "$lost" -eq 0 ]; then
+        record "ticket/survived" PASS \
+            "still carrying traffic after 5 ticket lifetimes ($checks checks, nothing restarted)"
+    else
+        record "ticket/survived" FAIL \
+            "traffic stopped on $lost of $checks checks across 5 ticket lifetimes"
+        lab::tail_log alpha-up 25
+    fi
+
+    # And it must have renewed rather than failed over: a renewal keeps the
+    # relay, a failover complains about it.
+    if grep -aq "renewing the relay ticket" "$LOGS/alpha-up.log" 2>/dev/null; then
+        record "ticket/renewed" PASS "the agent renewed its ticket before it expired"
+    else
+        record "ticket/renewed" FAIL "no renewal in the log; it survived for some other reason"
+    fi
+
+    if grep -aq "stopped answering" "$LOGS/alpha-up.log" 2>/dev/null; then
+        record "ticket/no-complaint" FAIL \
+            "the agent reported its relay dead, which is what takes the only relay out of rotation"
+    else
+        record "ticket/no-complaint" PASS "and never reported the relay dead"
+    fi
+
+    unset LAB_TICKET_SECONDS
+}

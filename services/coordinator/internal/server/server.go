@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -46,6 +48,10 @@ type Server struct {
 	health    *relayHealth
 	usage     *usageLedger
 
+	// ticketLifeOverride shortens relay tickets, for the drill that proves a
+	// pair survives its ticket expiring. Zero means the production lifetime.
+	ticketLifeOverride time.Duration
+
 	verifying *reverifier
 	// talking notices a device whose hellos keep coming with no ping between
 	// them, which is the shape of an agent that never hears our replies. See
@@ -73,15 +79,27 @@ func New(opts Options) (*Server, error) {
 		return nil, err
 	}
 
+	// Shortened only when asked, and only by the environment the lab sets.
+	// The drill that proves a pair survives its ticket expiring cannot wait
+	// ten minutes per run, and a production coordinator never sets this.
+	var ticketOverride time.Duration
+	if raw := os.Getenv("AKCONNECT_TICKET_SECONDS"); raw != "" {
+		if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+			ticketOverride = time.Duration(seconds) * time.Second
+			opts.Logf("relay tickets shortened to %s by AKCONNECT_TICKET_SECONDS", ticketOverride)
+		}
+	}
+
 	return &Server{
-		opts:      opts,
-		publicKey: pub,
-		reg:       registry.New(opts.PresenceTTL),
-		health:    newRelayHealth(),
-		usage:     newUsageLedger(),
-		verifying: newReverifier(),
-		talking:   newTalkers(),
-		pending:   make(map[string]panelapi.EndpointReport),
+		opts:               opts,
+		publicKey:          pub,
+		ticketLifeOverride: ticketOverride,
+		reg:                registry.New(opts.PresenceTTL),
+		health:             newRelayHealth(),
+		usage:              newUsageLedger(),
+		verifying:          newReverifier(),
+		talking:            newTalkers(),
+		pending:            make(map[string]panelapi.EndpointReport),
 	}, nil
 }
 

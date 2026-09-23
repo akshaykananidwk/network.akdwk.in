@@ -25,6 +25,8 @@ func (c *Client) handle(pkt []byte, from netip.AddrPort) {
 		c.handlePunchAck(header, from)
 	case disco.TypeRelayOffer:
 		c.handleRelayOffer(header, rest)
+	case disco.TypeRelayBindRefused:
+		c.handleRelayBindRefused(from, rest)
 	case disco.TypeRelayBindAck:
 		c.handleRelayBindAck(from, rest)
 	case disco.TypeRelayProbeAck:
