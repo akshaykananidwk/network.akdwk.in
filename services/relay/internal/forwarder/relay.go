@@ -212,15 +212,27 @@ func (r *Relay) handleBind(pkt []byte, from netip.AddrPort) {
 	pair := ticket.Pair()
 	r.opts.Logf("bound %s to pair %x… on port %d", from, pair[:6], sd.port)
 
-	r.sendBindAck(from, sd.port)
+	r.sendBindAck(from, sd.port, ticket.Peer)
 }
 
-func (r *Relay) sendBindAck(to netip.AddrPort, port uint16) {
+func (r *Relay) sendBindAck(to netip.AddrPort, port uint16, peer [32]byte) {
 	pkt := make([]byte, disco.HeaderLen)
 	// The relay has no key of its own in this exchange; the header's sender
 	// field is unused here and left zero.
 	disco.WriteHeader(pkt, disco.TypeRelayBindAck, [32]byte{})
 	pkt = disco.AppendUint16(pkt, port)
+
+	// Which peer this port is for, because the agent cannot work it out.
+	//
+	// Two peers of one device are commonly on the same relay, and the
+	// acknowledgement arrives from the relay's one control address — so an
+	// agent matching the answer to a peer by that address alone matched it to
+	// whichever entry its map happened to yield first. In the field that
+	// swapped two peers' ports back and forth every five seconds for seven
+	// minutes, each swap a WireGuard endpoint change, on a pair that had been
+	// carrying traffic. The relay is the only party that knows, and the
+	// ticket says so.
+	pkt = append(pkt, peer[:]...)
 
 	if _, err := r.control.WriteToUDPAddrPort(pkt, to); err != nil {
 		r.opts.Logf("sending bind ack to %s failed: %v", to, err)
