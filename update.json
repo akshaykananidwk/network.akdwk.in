@@ -1,12 +1,14 @@
 {
-  "version": "1.9.5",
-  "released_at": "2026-09-22T23:30:00Z",
+  "version": "1.9.6",
+  "released_at": "2026-09-23T06:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Two PCs behind one shop router can now reach each other: every device picks its own UDP port instead of all of them using 51820, prefers a peer's LAN address when they are on the same network, and leaves a port its router will not carry. The Windows agent is a Windows program \u2014 listed in Settings so it uninstalls like any other app, silent install with /S /CODE=, an MSI for deployment tools, a notification-area icon showing whether it works, and a refusal to downgrade itself. It survives a reboot, and now notices a resume and a network change instead of waiting out a keepalive. The device page answers \"has it restarted?\" and \"what went wrong last?\", and has an Update now button. One link, with the join code in it, is all a customer needs to be sent. One click shares a computer's LAN. The edge keeps itself current by default, and critical alerts reach a telephone.",
+  "notes": "Any network a browser works on. A device on a network that carries no UDP at all — hotel wifi, a guest network, an office that drops the replies — now connects over TCP 443, carrying both its control messages and its tunnel traffic through the same port a browser uses. It keeps trying UDP the whole time and returns to it by itself when the network allows it, with nothing restarted. The panel says which path each device is on, and what each device did about the last release — a machine that never checked and one that refused a badly signed release used to look identical. The diagnostics bundle can read the two files it exists to collect. Firewall rules name the program rather than a port. The installer reads back what happened instead of announcing success because its calls returned. The panel says when the public key it publishes is not the one the coordinator is running — a fault that otherwise has no symptom at all. Apache is configured for the fallback only when asked for by name, into the panel's own virtual host and nowhere else, after showing exactly what it will change.",
   "migrations": [
-    "2026_09_22_210000_device_uptime_and_error.php"
+    "2026_09_22_230000_device_coordinator_unanswered.php",
+    "2026_09_22_235900_device_relay_https_state.php",
+    "2026_09_22_235930_device_update_state.php"
   ],
   "protected": [
     ".env",
