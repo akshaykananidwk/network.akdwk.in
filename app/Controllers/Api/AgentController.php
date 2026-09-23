@@ -11,6 +11,7 @@ use App\Core\Response;
 use App\Middleware\RateLimitMiddleware;
 use App\Models\AgentRelease;
 use App\Models\Device;
+use App\Models\DeviceProbe;
 use App\Models\Network;
 use App\Models\UsageCounter;
 use App\Services\CoordinatorSettings;
@@ -270,6 +271,28 @@ final class AgentController
                 isset($update['version']) ? mb_substr((string) $update['version'], 0, 32) : null,
                 isset($update['error']) ? (string) $update['error'] : null
             );
+        }
+
+        // Answers to the reachability tests somebody asked for.
+        //
+        // Scoped to this device inside the model, so an agent cannot answer a
+        // probe addressed to a different machine — the device id comes from
+        // the token this request authenticated with, not from the body.
+        if (isset($input['probes']) && is_array($input['probes'])) {
+            foreach ($input['probes'] as $answer) {
+                if (!is_array($answer) || !isset($answer['id'])) {
+                    continue;
+                }
+
+                DeviceProbe::answer(
+                    (int) $answer['id'],
+                    (int) $device['id'],
+                    (bool) ($answer['ok'] ?? false),
+                    isset($answer['latency_ms']) ? (int) $answer['latency_ms'] : null,
+                    isset($answer['method']) ? (string) $answer['method'] : null,
+                    isset($answer['error']) ? (string) $answer['error'] : null
+                );
+            }
         }
 
         // How long the agent has been running, which is how the page answers

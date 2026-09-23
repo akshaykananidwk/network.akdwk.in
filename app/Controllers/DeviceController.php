@@ -10,11 +10,13 @@ use App\Core\Response;
 use App\Core\Session;
 use App\Core\Validator;
 use App\Models\Device;
+use App\Models\DeviceProbe;
 use App\Models\Network;
 use App\Core\ValidationException;
 use App\Services\AuditService;
 use App\Services\DeviceService;
 use App\Services\IpamService;
+use App\Services\ProbeService;
 use App\Services\RouteService;
 
 /**
@@ -74,6 +76,18 @@ final class DeviceController extends Controller
             'shared_lans'   => $device['network_id'] !== null
                 ? RouteService::forDevice((int) $device['id'])
                 : [],
+            // The other devices on this network, so each can be tested from
+            // this one. Reachability is a property of a pair, and the panel
+            // can measure it from neither end.
+            'network_peers' => $device['network_id'] !== null
+                ? array_values(array_filter(
+                    Device::where(['network_id' => (int) $device['network_id']], 'name'),
+                    static fn (array $peer): bool => (int) $peer['id'] !== (int) $device['id']
+                ))
+                : [],
+            // The most recent answer for each address this device has been
+            // asked about, keyed by address.
+            'probe_results' => DeviceProbe::latestByTarget((int) $device['id']),
         ]);
     }
 
@@ -173,6 +187,41 @@ final class DeviceController extends Controller
      *
      * @param array<string,string> $params
      */
+    /**
+     * Ask this device to test whether it can reach an address.
+     *
+     * The device answers, not the panel: the panel is on the public internet
+     * and can reach neither the overlay nor anybody's camera recorder, and
+     * the agent is already inside both.
+     *
+     * @param array<string,string> $params
+     */
+    public function probe(Request $request, array $params): Response
+    {
+        $deviceId = (int) $params['id'];
+
+        $device = Device::find($deviceId);
+        if ($device === null) {
+            throw new NotFoundException('App\\Models\\Device #' . $deviceId . ' not found');
+        }
+
+        $probe = ProbeService::request(
+            $deviceId,
+            (string) $request->input('target', ''),
+            $request->input('label') !== null ? (string) $request->input('label') : null
+        );
+
+        if ($request->wantsJson()) {
+            return Response::api(['status' => 'requested', 'probe_id' => (int) $probe['id']]);
+        }
+
+        return $this->redirect(
+            'devices/' . $deviceId,
+            'Testing ' . $probe['target'] . ' from this computer. The answer appears here '
+                . 'within a minute — it is measured on the machine, not from the panel.'
+        );
+    }
+
     public function requestUpdate(Request $request, array $params): Response
     {
         $deviceId = (int) $params['id'];

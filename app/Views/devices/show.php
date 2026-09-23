@@ -284,6 +284,108 @@ declare(strict_types=1);
 </section>
 <?php endif; ?>
 
+<?php if (can('device.update') && (($network_peers ?? []) !== [] || ($shared_lans ?? []) !== [])): ?>
+<?php
+/**
+ * Reachability, measured from this computer.
+ *
+ * "Both devices are Online" and "these two devices can reach each other" are
+ * different facts, and until this existed the panel could only show the first
+ * — so answering the second meant telephoning somebody and asking them to
+ * open a command prompt. The panel cannot measure it itself from out here on
+ * the public internet; the agent is already inside the overlay and inside the
+ * customer's own network, so it is asked and it answers on its next
+ * heartbeat.
+ *
+ * A result is shown with HOW it was proved. A camera recorder that ignores
+ * ping but answers on port 80 is working, and showing that as a red cross
+ * would send a technician to a site for nothing.
+ */
+?>
+<section class="card">
+    <header class="card-header">
+        <h2>Test what this computer can reach</h2>
+        <p class="text-muted">
+            Measured on the machine itself, not from here — this panel has no route to
+            either the overlay or the customer's own network. The answer appears within a
+            minute, on the heartbeat the agent was going to send anyway.
+        </p>
+    </header>
+
+    <table class="table">
+        <thead><tr><th>Address</th><th>What it is</th><th>Last result</th><th></th></tr></thead>
+        <tbody>
+        <?php foreach (($network_peers ?? []) as $peer): ?>
+            <?php $target = (string) ($peer['virtual_ip'] ?? ''); ?>
+            <?php if ($target === '') { continue; } ?>
+            <tr>
+                <td><code><?= e($target) ?></code></td>
+                <td><?= e((string) $peer['name']) ?></td>
+                <td><?= \App\Core\View::partial('partials.probe_result', ['probe' => ($probe_results ?? [])[$target] ?? null]) ?></td>
+                <td class="text-right">
+                    <form method="post" class="inline"
+                          action="<?= e(url('devices/' . $device['id'] . '/probe')) ?>">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="target" value="<?= e($target) ?>">
+                        <input type="hidden" name="label" value="<?= e((string) $peer['name']) ?>">
+                        <button type="submit" class="btn btn-sm">Test</button>
+                    </form>
+                </td>
+            </tr>
+        <?php endforeach; ?>
+
+        <?php foreach (($shared_lans ?? []) as $route): ?>
+            <?php
+            // The .1 of a mapped range is the customer's own router almost
+            // everywhere, which makes it the one address worth offering: if
+            // that answers, the tunnel, the forwarding and the NAT are all
+            // working, and if it does not, one of them is not.
+            $mapped = (string) $route['mapped_cidr'];
+            $base = strtok($mapped, '/');
+            $gatewayGuess = $base !== false
+                ? preg_replace('/\.\d+$/', '.1', $base)
+                : '';
+            ?>
+            <?php if ($gatewayGuess === '' || $gatewayGuess === null) { continue; } ?>
+            <tr>
+                <td><code><?= e($gatewayGuess) ?></code></td>
+                <td>
+                    Router on the shared network
+                    <span class="text-muted">(<?= e((string) $route['destination_cidr']) ?> as <?= e($mapped) ?>)</span>
+                </td>
+                <td><?= \App\Core\View::partial('partials.probe_result', ['probe' => ($probe_results ?? [])[$gatewayGuess] ?? null]) ?></td>
+                <td class="text-right">
+                    <form method="post" class="inline"
+                          action="<?= e(url('devices/' . $device['id'] . '/probe')) ?>">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="target" value="<?= e($gatewayGuess) ?>">
+                        <input type="hidden" name="label" value="Router on <?= e((string) $route['destination_cidr']) ?>">
+                        <button type="submit" class="btn btn-sm">Test</button>
+                    </form>
+                </td>
+            </tr>
+        <?php endforeach; ?>
+        </tbody>
+    </table>
+
+    <form method="post" class="form" action="<?= e(url('devices/' . $device['id'] . '/probe')) ?>">
+        <?= csrf_field() ?>
+        <div class="field">
+            <label for="probe_target">Or test another address on a shared range</label>
+            <input type="text" id="probe_target" name="target" placeholder="10.128.1.50">
+            <p class="field-hint">
+                Only addresses on this network's overlay or inside a range shared through
+                this computer. Anything else is refused — a test box that took any address
+                would be a port scanner with a login page.
+            </p>
+        </div>
+        <div class="form-actions">
+            <button type="submit" class="btn">Test address</button>
+        </div>
+    </form>
+</section>
+<?php endif; ?>
+
 <?php if (can('device.update')): ?>
 <section class="card">
     <header class="card-header"><h2>Agent</h2></header>

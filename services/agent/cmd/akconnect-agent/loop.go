@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/probe"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/state"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/tunnel"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/wgkey"
@@ -124,9 +125,54 @@ func (s *session) heartbeat(ctx context.Context) error {
 		hb.Endpoint = endpoint
 	}
 
+	hb.Probes = s.runProbes(ctx)
+
 	_, err := s.client.SendHeartbeat(ctx, hb)
 
 	return err
+}
+
+// runProbes answers the reachability tests the panel asked for.
+//
+// Bounded per heartbeat rather than run all at once: a device that was
+// offline while somebody clicked Test a dozen times comes back to a dozen
+// requests, and running them together would put a burst of traffic on a
+// customer's network at the moment it is least expected.
+func (s *session) runProbes(ctx context.Context) []panel.ProbeAnswer {
+	if len(s.pendingProbes) == 0 {
+		return nil
+	}
+
+	const perHeartbeat = 4
+
+	take := s.pendingProbes
+	if len(take) > perHeartbeat {
+		take = take[:perHeartbeat]
+		s.pendingProbes = s.pendingProbes[perHeartbeat:]
+	} else {
+		s.pendingProbes = nil
+	}
+
+	answers := make([]panel.ProbeAnswer, 0, len(take))
+	for _, request := range take {
+		result := probe.Do(ctx, request.Target)
+
+		if result.OK {
+			s.logf("probe: %s answered in %dms over %s", request.Target, result.LatencyMS, result.Method)
+		} else {
+			s.logf("probe: %s did not answer: %s", request.Target, result.Error)
+		}
+
+		answers = append(answers, panel.ProbeAnswer{
+			ID:        request.ID,
+			OK:        result.OK,
+			LatencyMS: result.LatencyMS,
+			Method:    result.Method,
+			Error:     result.Error,
+		})
+	}
+
+	return answers
 }
 
 func (s *session) reflexive() string {

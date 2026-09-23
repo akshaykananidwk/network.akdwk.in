@@ -92,6 +92,7 @@ $router->group('', ['maintenance', 'auth'], static function (Router $router): vo
     $router->post('/devices/{id:int}/approve', 'DeviceController@approve', ['csrf', 'can:device.approve']);
     $router->post('/devices/{id:int}/revoke', 'DeviceController@revoke', ['csrf', 'can:device.revoke']);
     $router->post('/devices/{id:int}/update-now', 'DeviceController@requestUpdate', ['csrf', 'can:device.update']);
+    $router->post('/devices/{id:int}/probe', 'DeviceController@probe', ['csrf', 'can:device.update']);
     // One click for the thing most customers buy this for: let the others
     // reach the camera recorder on this computer's LAN.
     $router->post('/devices/{id:int}/share-lan', 'DeviceController@shareLan', ['csrf', 'can:network.update']);

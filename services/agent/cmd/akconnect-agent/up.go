@@ -136,15 +136,18 @@ type session struct {
 	updateState *panel.UpdateState
 	// peerMeta maps a peer's hex public key to the names the panel gave it,
 	// which the WireGuard device itself does not carry.
-	peerMeta  map[string]peerNames
-	logf      func(string, ...any)
-	iface     string
-	port      int
-	verbose   bool
-	applied   bool
-	lastRX    int64
-	lastTX    int64
-	startedAt time.Time
+	peerMeta map[string]peerNames
+	// pendingProbes are reachability tests the panel has asked for and this
+	// agent has not yet run.
+	pendingProbes []panel.ProbeRequest
+	logf          func(string, ...any)
+	iface         string
+	port          int
+	verbose       bool
+	applied       bool
+	lastRX        int64
+	lastTX        int64
+	startedAt     time.Time
 	// updateRequested is an administrator having pressed "Update now" on this
 	// device's page, carried in the configuration the panel publishes.
 	updateRequested bool
@@ -299,6 +302,13 @@ func (s *session) applyConfig(ctx context.Context, priv wgPrivate, cfg *panel.Co
 	// second path to the same thing, which is how two paths drift apart.
 	if cfg.UpdateRequested {
 		s.updateRequested = true
+	}
+
+	// Same latching for reachability tests: they are run from the heartbeat,
+	// where there is a context and a place to put the answers, rather than
+	// from inside configuration application.
+	if len(cfg.Probes) > 0 {
+		s.pendingProbes = append(s.pendingProbes, cfg.Probes...)
 	}
 
 	plan, err := netcfg.Build(cfg)

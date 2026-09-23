@@ -85,6 +85,9 @@ type Config struct {
 	// right for a rollout and useless for somebody standing in front of a
 	// machine trying to fix it.
 	UpdateRequested bool `json:"update_requested,omitempty"`
+	// Probes are reachability tests an administrator asked this device to
+	// run. Answered on the next heartbeat.
+	Probes []ProbeRequest `json:"probes,omitempty"`
 
 	IssuedAt string `json:"issued_at"`
 }
@@ -224,6 +227,22 @@ type PeerLink struct {
 	LatencyMS int `json:"latency_ms,omitempty"`
 }
 
+// ProbeRequest is one address somebody asked this device to test.
+type ProbeRequest struct {
+	ID     int    `json:"id"`
+	Target string `json:"target"`
+	Label  string `json:"label,omitempty"`
+}
+
+// ProbeAnswer is what came back.
+type ProbeAnswer struct {
+	ID        int    `json:"id"`
+	OK        bool   `json:"ok"`
+	LatencyMS int    `json:"latency_ms,omitempty"`
+	Method    string `json:"method,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
 // Heartbeat is what the agent reports on each cycle.
 //
 // The byte fields are deltas since the last heartbeat, not totals. The panel
@@ -265,6 +284,9 @@ type Heartbeat struct {
 	// when there is nothing to reach, say that instead of blaming this
 	// device for it.
 	Peers []PeerLink `json:"peers,omitempty"`
+	// Probes are answers to the reachability tests this device was asked to
+	// run, carried on the heartbeat it was going to send anyway.
+	Probes []ProbeAnswer `json:"probes,omitempty"`
 	// Update is this agent's own account of what it did about the last
 	// release it was offered.
 	//

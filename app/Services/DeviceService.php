@@ -462,6 +462,15 @@ final class DeviceService
             // panel what it is offered and still refuses a binary whose
             // signature does not verify against the controller key above.
             'update_requested' => Device::updateRequested((int) $device['id']),
+            // Reachability tests somebody asked this device to run. Answered
+            // on the next heartbeat, which it was going to send anyway.
+            //
+            // Sent in the configuration rather than pushed, because that is
+            // the only direction that works: the panel cannot open a
+            // connection to a machine behind a customer's router, and the one
+            // thing this product must never need is an inbound port on a
+            // shop PC.
+            'probes'      => \App\Models\DeviceProbe::pendingFor((int) $device['id']),
             'issued_at'   => gmdate('c'),
         ];
 

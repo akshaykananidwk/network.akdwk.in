@@ -6,6 +6,24 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.3] — development
+
+**"Can these two actually reach each other?" can now be asked from the panel.**
+Two devices both showing Online said nothing about whether either could reach
+the other, and the only way to find out was to telephone somebody and ask them
+to open a command prompt. The device page has a Test button per peer and per
+shared LAN now. The panel does not do the measuring — it has no route to the
+overlay and none at all to a customer's own network — it writes the question
+down and the agent answers it on the heartbeat it was going to send anyway.
+
+ICMP first, then a TCP connect to 80, 443, 554, 8000, 37777 and 22, because a
+great deal of this equipment ignores ping and Windows blocks echo by default:
+"no ping reply, but port 80 answered" is the ordinary state of a working
+recorder and showing it as a red cross would send a technician to a site for
+nothing. What may be asked is limited to the overlay and to ranges shared
+through that device, rate-limited, and written to the audit log — a test box
+that took any address would be a port scanner with a login page.
+
 ## [1.9.7-dev.2] — development
 
 **A shared range could be created and not removed.** "Share this computer's
