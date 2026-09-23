@@ -18,7 +18,7 @@ final class Network extends Model
     protected static array $jsonColumns = ['dns_json'];
     protected static array $sortable = ['id', 'name', 'cidr', 'status', 'created_at'];
     protected static array $fillable = [
-        'tenant_id', 'name', 'network_uid', 'description', 'cidr', 'dns_json',
+        'tenant_id', 'name', 'network_uid', 'description', 'cidr', 'mapped_pool', 'dns_json',
         'search_domain', 'mtu', 'keepalive_seconds', 'auto_assign_ip',
         'auto_approve_devices', 'private', 'acl_default_action', 'status', 'created_by',
     ];
@@ -76,7 +76,10 @@ final class Network extends Model
         $rows = DB::select(
             'SELECT network_id,
                     COUNT(*) AS total,
-                    SUM(CASE WHEN connection_type <> \'offline\' THEN 1 ELSE 0 END) AS online,
+                    SUM(CASE WHEN last_seen_at IS NOT NULL
+                              AND last_seen_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL '
+                                  . Device::OFFLINE_AFTER_SECONDS . ' SECOND)
+                             THEN 1 ELSE 0 END) AS online,
                     SUM(CASE WHEN status = \'pending\' THEN 1 ELSE 0 END) AS pending
              FROM ' . DB::table('devices') . '
              WHERE network_id IN (' . implode(', ', $placeholders) . ') AND deleted_at IS NULL

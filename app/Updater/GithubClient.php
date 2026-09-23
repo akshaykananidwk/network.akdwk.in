@@ -49,7 +49,18 @@ final class GithubClient
         try {
             $repo = $this->request('GET', sprintf('/repos/%s/%s', $this->owner, $this->repo));
         } catch (UpdateException $e) {
-            return ['ok' => false, 'message' => $e->getMessage()];
+            $message = $e->getMessage();
+
+            // GitHub answers 404 rather than 403 for a private repository the
+            // caller cannot see, so "not found" usually means "no token".
+            if (str_contains($message, 'HTTP 404') && ($this->token === null || $this->token === '')) {
+                $message .= ' — if this repository is private, add an access token with the "repo" scope.';
+            }
+            if (str_contains($message, 'HTTP 401')) {
+                $message .= ' — the access token was rejected. Check it has not expired or been revoked.';
+            }
+
+            return ['ok' => false, 'message' => $message];
         }
 
         try {
@@ -95,6 +106,100 @@ final class GithubClient
         }
 
         return $this->normaliseCommit($commits[0]);
+    }
+
+    /**
+     * One commit, by sha — the commit a tag points at.
+     *
+     * @return array{sha:string,message:string,author:string,date:string,url:string}
+     */
+    public function commit(string $sha): array
+    {
+        $commit = $this->request('GET', sprintf(
+            '/repos/%s/%s/commits/%s',
+            $this->owner,
+            $this->repo,
+            rawurlencode($sha)
+        ));
+
+        if (!isset($commit['sha'])) {
+            throw new UpdateException('Commit ' . substr($sha, 0, 12) . ' could not be read.');
+        }
+
+        return $this->normaliseCommit($commit);
+    }
+
+    /**
+     * The newest released tag, or null when the repository has none.
+     *
+     * This is what "stable" means. Until 1.9.3 the updater followed the branch
+     * head, so every push was immediately offered to every panel as an
+     * update — including a push made halfway through a piece of work. A tag is
+     * a deliberate act, which is the whole point: nothing reaches a production
+     * panel because somebody committed.
+     *
+     * Null rather than a fallback to the branch. Falling back is how the
+     * setting would quietly stop meaning anything again.
+     *
+     * @return array{name:string,sha:string,version:string}|null
+     */
+    public function latestTag(bool $includePrereleases = false): ?array
+    {
+        $tags = $this->request('GET', sprintf(
+            '/repos/%s/%s/tags?per_page=100',
+            $this->owner,
+            $this->repo
+        ));
+
+        $candidates = [];
+
+        foreach ($tags as $tag) {
+            if (!is_array($tag) || !isset($tag['name'], $tag['commit']['sha'])) {
+                continue;
+            }
+
+            $version = self::versionOfTag((string) $tag['name'], $includePrereleases);
+            if ($version === null) {
+                continue;
+            }
+
+            $candidates[] = [
+                'name'    => (string) $tag['name'],
+                'sha'     => (string) $tag['commit']['sha'],
+                'version' => $version,
+            ];
+        }
+
+        if ($candidates === []) {
+            return null;
+        }
+
+        // Sorted here rather than trusted from the API: /tags is documented as
+        // returning tags, not as returning them newest first, and "whichever
+        // one GitHub happened to list first" is not a release process.
+        usort($candidates, static fn (array $a, array $b): int => version_compare($b['version'], $a['version']));
+
+        return $candidates[0];
+    }
+
+    /**
+     * The version a tag names, or null when it does not name one.
+     *
+     * "v1.9.2" and "1.9.2" both count. "1.9.3-rc1" counts only on a channel
+     * that asked for prereleases, so a release candidate cannot arrive on a
+     * customer's panel by being the newest thing in the list.
+     */
+    public static function versionOfTag(string $tag, bool $includePrereleases): ?string
+    {
+        if (preg_match('/^v?(\d+\.\d+\.\d+)$/', $tag, $matches) === 1) {
+            return $matches[1];
+        }
+
+        if ($includePrereleases && preg_match('/^v?(\d+\.\d+\.\d+-[0-9A-Za-z.-]+)$/', $tag, $matches) === 1) {
+            return $matches[1];
+        }
+
+        return null;
     }
 
     /**
@@ -154,7 +259,7 @@ final class GithubClient
     public function fileAtRef(string $path, string $ref): ?string
     {
         try {
-            return $this->requestRaw('GET', sprintf(
+            $body = $this->requestRaw('GET', sprintf(
                 '/repos/%s/%s/contents/%s?ref=%s',
                 $this->owner,
                 $this->repo,
@@ -167,6 +272,18 @@ final class GithubClient
             }
             throw $e;
         }
+
+        // Belt and braces: if something along the way rewrote Accept and we
+        // got the metadata envelope, decode it rather than handing the caller
+        // JSON it will fail to parse as the file.
+        $decoded = json_decode($body, true);
+        if (is_array($decoded) && ($decoded['encoding'] ?? '') === 'base64' && isset($decoded['content'])) {
+            $raw = base64_decode((string) $decoded['content'], true);
+
+            return $raw === false ? $body : $raw;
+        }
+
+        return $body;
     }
 
     /**
@@ -288,7 +405,7 @@ final class GithubClient
             CURLOPT_MAXREDIRS      => 5,
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
-            CURLOPT_HTTPHEADER     => array_merge($this->headers(), $extraHeaders),
+            CURLOPT_HTTPHEADER     => self::mergeHeaders($this->headers(), $extraHeaders),
             CURLOPT_USERAGENT      => $this->userAgent,
         ]);
 
@@ -311,6 +428,32 @@ final class GithubClient
         }
 
         return $body;
+    }
+
+    /**
+     * Merge header lists so a caller's header replaces the default of the
+     * same name rather than being sent alongside it.
+     *
+     * This matters: fetching a file's raw contents needs
+     * "Accept: application/vnd.github.raw". Appending it to the default
+     * "Accept: application/vnd.github+json" makes GitHub answer with the
+     * metadata envelope — name, path, base64 content — instead of the file,
+     * and the manifest then parses as "missing a version".
+     *
+     * @param list<string> $defaults
+     * @param list<string> $overrides
+     * @return list<string>
+     */
+    private static function mergeHeaders(array $defaults, array $overrides): array
+    {
+        $byName = [];
+
+        foreach ([...$defaults, ...$overrides] as $header) {
+            $name = strtolower(trim(strtok($header, ':') ?: $header));
+            $byName[$name] = $header;
+        }
+
+        return array_values($byName);
     }
 
     /** @return list<string> */

@@ -77,13 +77,20 @@ declare(strict_types=1);
             <div class="field">
                 <label for="branch">Branch</label>
                 <input type="text" id="branch" name="branch" value="<?= e($settings['branch'] ?? 'main') ?>" required>
+                <p class="hint">Only used by the Edge channel. Stable and Beta follow tags.</p>
             </div>
             <div class="field">
                 <label for="channel">Channel</label>
                 <select id="channel" name="channel">
-                    <option value="stable" <?= ($settings['channel'] ?? '') === 'stable' ? 'selected' : '' ?>>Stable</option>
-                    <option value="beta" <?= ($settings['channel'] ?? '') === 'beta' ? 'selected' : '' ?>>Beta</option>
+                    <option value="stable" <?= ($settings['channel'] ?? '') === 'stable' ? 'selected' : '' ?>>Stable — released versions only</option>
+                    <option value="beta" <?= ($settings['channel'] ?? '') === 'beta' ? 'selected' : '' ?>>Beta — released versions and release candidates</option>
+                    <option value="edge" <?= ($settings['channel'] ?? '') === 'edge' ? 'selected' : '' ?>>Edge — whatever is on the branch right now</option>
                 </select>
+                <p class="hint">
+                    Stable installs tagged releases (<code>v1.9.3</code>). Edge installs the
+                    latest commit, finished or not — useful while a fix is being written,
+                    and not what a panel with customers on it should be set to.
+                </p>
             </div>
         </div>
 

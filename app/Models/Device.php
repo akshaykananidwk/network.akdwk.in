@@ -167,11 +167,302 @@ final class Device extends Model
     }
 
     /**
+     * Record what a device says it could not do.
+     *
+     * Replaced wholesale on every heartbeat rather than appended to, because
+     * the agent reports its *current* problems: one that has been fixed stops
+     * being sent, and a list that only grew would need somebody to clear it by
+     * hand.
+     *
+     * @param list<array{code: string, detail: string}> $problems
+     */
+    public static function recordProblems(int $deviceId, array $problems): void
+    {
+        DB::execute(
+            'UPDATE ' . self::tableName() . '
+             SET problems_json = :p, problems_at = :at
+             WHERE id = :id',
+            [
+                'p'  => $problems === [] ? null : json_encode(array_values($problems)),
+                'at' => $problems === [] ? null : gmdate('Y-m-d H:i:s'),
+                'id' => $deviceId,
+            ]
+        );
+
+        // Kept after it clears, because problems_json holds what is wrong NOW
+        // and empties when it stops. The fault that was happening an hour ago,
+        // when the customer rang, otherwise leaves no trace by the time
+        // anybody looks at the page.
+        if ($problems !== []) {
+            $first = $problems[array_key_first($problems)];
+            $detail = is_array($first) ? (string) ($first['detail'] ?? '') : '';
+
+            if ($detail !== '') {
+                DB::execute(
+                    'UPDATE ' . self::tableName() . '
+                     SET last_error = :e, last_error_at = :at
+                     WHERE id = :id',
+                    [
+                        'e'  => mb_substr($detail, 0, 500),
+                        'at' => gmdate('Y-m-d H:i:s'),
+                        'id' => $deviceId,
+                    ]
+                );
+            }
+        }
+    }
+
+    /**
+     * Record where the coordinator saw this device.
+     *
+     * Written here rather than through update(), which filters by $fillable —
+     * and last_endpoint is deliberately not fillable, because it is not a
+     * field anybody submits. The consequence was that every endpoint report
+     * the coordinator has ever sent was accepted, counted as applied, and
+     * silently written nowhere: the panel's Public endpoint came from the
+     * device's own heartbeat and nothing else. A device that cannot hear the
+     * coordinator still heartbeats, so the one case where the coordinator's
+     * view is the ONLY view is exactly the case it was being dropped in.
+     */
+    public static function recordEndpoint(int $deviceId, ?string $endpoint, ?string $lanEndpoint): bool
+    {
+        $sets = [];
+        $bindings = ['id' => $deviceId];
+
+        if ($endpoint !== null && $endpoint !== '') {
+            $sets[] = 'last_endpoint = :ep';
+            $bindings['ep'] = substr($endpoint, 0, 64);
+        }
+        if ($lanEndpoint !== null && $lanEndpoint !== '') {
+            $sets[] = 'last_lan_endpoint = :lan';
+            $bindings['lan'] = substr($lanEndpoint, 0, 64);
+        }
+
+        if ($sets === []) {
+            return false;
+        }
+
+        DB::execute(
+            'UPDATE ' . self::tableName() . '
+             SET ' . implode(', ', $sets) . ', updated_at = UTC_TIMESTAMP()
+             WHERE id = :id',
+            $bindings
+        );
+
+        return true;
+    }
+
+    /**
+     * Record what the coordinator says about the path back to this device.
+     *
+     * Kept beside the device's own reported problems rather than inside them,
+     * because it is a different kind of statement: the agent reports what IT
+     * could not do, and this is what the coordinator observed ABOUT it. A
+     * device that cannot hear the coordinator cannot report that it cannot
+     * hear the coordinator.
+     */
+    public static function recordUnanswered(int $deviceId, bool $unanswered): void
+    {
+        DB::execute(
+            'UPDATE ' . self::tableName() . '
+             SET coordinator_unanswered_at = ' . ($unanswered ? 'UTC_TIMESTAMP()' : 'NULL') . '
+             WHERE id = :id',
+            ['id' => $deviceId]
+        );
+
+        if ($unanswered) {
+            DB::execute(
+                'UPDATE ' . self::tableName() . '
+                 SET last_error = :e, last_error_at = UTC_TIMESTAMP()
+                 WHERE id = :id',
+                [
+                    'e'  => 'The coordinator is answering this device and the replies are not '
+                        . 'arriving: it keeps re-announcing itself. Something on that network '
+                        . 'is dropping them.',
+                    'id' => $deviceId,
+                ]
+            );
+        }
+    }
+
+    /**
+     * Record what a device did about the last release it was offered.
+     *
+     * Raw SQL and not through update(), because these are not in $fillable and
+     * never will be: an administrator does not type them, a device reports
+     * them, and a mass-assignment path for a column that governs what software
+     * a fleet runs is not a thing to have.
+     *
+     * The valid states are the ones the column holds; anything else is filed
+     * as idle rather than refused, because a newer agent inventing a state is
+     * not a reason to lose its heartbeat.
+     */
+    public static function recordUpdateState(
+        int $deviceId,
+        string $state,
+        ?string $version,
+        ?string $error
+    ): void {
+        if (!in_array($state, self::UPDATE_STATES, true)) {
+            $state = 'idle';
+        }
+
+        DB::execute(
+            'UPDATE ' . self::tableName() . '
+             SET update_state = :s,
+                 update_version = :v,
+                 update_error = :e,
+                 update_checked_at = UTC_TIMESTAMP(),
+                 updated_at = UTC_TIMESTAMP()
+             WHERE id = :id',
+            [
+                's'  => $state,
+                'v'  => $version === '' ? null : $version,
+                // Truncated rather than refused: a long error is still worth
+                // most of itself, and losing the whole heartbeat over it is
+                // losing the device.
+                'e'  => ($error === null || $error === '') ? null : mb_substr($error, 0, 255),
+                'id' => $deviceId,
+            ]
+        );
+    }
+
+    /** The states a device may report about an update. */
+    public const UPDATE_STATES = ['idle', 'offered', 'downloading', 'installed', 'failed'];
+
+    /**
+     * Ask a device to check for an update now, instead of in six hours.
+     *
+     * Recorded rather than pushed. The agent asks the panel for its
+     * configuration on a short cycle and carries the request back on that —
+     * there is no channel from here to a PC behind a shop router, and
+     * inventing one would mean the panel could reach into customer machines.
+     */
+    public static function requestUpdate(int $deviceId): void
+    {
+        DB::execute(
+            'UPDATE ' . self::tableName() . '
+             SET update_requested_at = UTC_TIMESTAMP()
+             WHERE id = :id',
+            ['id' => $deviceId]
+        );
+    }
+
+    /**
+     * Whether a request is outstanding, WITHOUT consuming it.
+     *
+     * The configuration endpoint answers "nothing has changed" whenever the
+     * agent's revision matches the network's, and it builds no configuration
+     * on that path. A request recorded here is not a change to the network, so
+     * without this the agent would be told nothing had changed and the
+     * administrator's click would sit unseen until something else moved.
+     *
+     * Not the same call as updateRequested(), which clears as it reads:
+     * clearing on the not-changed path would throw the request away and send
+     * nothing.
+     */
+    public static function hasUpdateRequest(int $deviceId): bool
+    {
+        $at = DB::scalar(
+            'SELECT update_requested_at FROM ' . self::tableName() . ' WHERE id = :id',
+            ['id' => $deviceId]
+        );
+
+        return $at !== null && $at !== '';
+    }
+
+    /**
+     * Whether a request is outstanding, and consuming it if so.
+     *
+     * Cleared as it is read, because the alternative is an agent that checks
+     * for an update on every configuration poll for ever after one click.
+     * A request that is lost — the configuration fetched by an agent that then
+     * died — costs the administrator one more click, which is the right way
+     * for this to fail.
+     */
+    public static function updateRequested(int $deviceId): bool
+    {
+        $at = DB::scalar(
+            'SELECT update_requested_at FROM ' . self::tableName() . ' WHERE id = :id',
+            ['id' => $deviceId]
+        );
+
+        if ($at === null || $at === '') {
+            return false;
+        }
+
+        DB::execute(
+            'UPDATE ' . self::tableName() . ' SET update_requested_at = NULL WHERE id = :id',
+            ['id' => $deviceId]
+        );
+
+        return true;
+    }
+
+    /**
+     * When the agent process came up, as the agent reports it.
+     *
+     * "Has it restarted?" is where a support call starts, and a device that
+     * reboots nightly looks exactly like one that has been up for three weeks
+     * without this. Clamped: a machine with a wrong clock, or an agent that
+     * reports nonsense, must not put a date in the next century on the page.
+     */
+    public static function recordAgentStart(int $deviceId, int $uptimeSeconds): void
+    {
+        if ($uptimeSeconds <= 0 || $uptimeSeconds > 86400 * 365) {
+            return;
+        }
+
+        DB::execute(
+            'UPDATE ' . self::tableName() . '
+             SET agent_started_at = :at
+             WHERE id = :id',
+            [
+                'at' => gmdate('Y-m-d H:i:s', time() - $uptimeSeconds),
+                'id' => $deviceId,
+            ]
+        );
+    }
+
+    /**
+     * Every authorized device in a network, including the one asking.
+     *
+     * peersFor() deliberately excludes the caller, because a device is not its
+     * own peer. A name, though, is a name: a technician typing
+     * `laptop.acme.internal` on the laptop itself should get an answer, not
+     * NXDOMAIN.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public static function activeInNetwork(int $networkId): array
+    {
+        return DB::select(
+            'SELECT id, device_uid, name, virtual_ip, is_gateway
+             FROM ' . self::tableName() . '
+             WHERE network_id = :n AND status = \'authorized\'
+               AND virtual_ip IS NOT NULL AND deleted_at IS NULL
+             ORDER BY id ASC',
+            ['n' => $networkId]
+        );
+    }
+
+    /**
      * Mark devices that stopped heartbeating as offline.
      *
      * Runs in the worker rather than on read so the dashboard never has to
      * compute staleness per row.
      */
+    /**
+     * How long without a heartbeat before a device is offline.
+     *
+     * One number, used by the sweep that writes the column and by the view
+     * that reads it, because two numbers would disagree and the disagreement
+     * would show as a device that is offline in the list and online on its own
+     * page. The agent heartbeats every ten seconds, so ninety is nine missed
+     * in a row.
+     */
+    public const OFFLINE_AFTER_SECONDS = 90;
+
     public static function markStaleOffline(int $staleSeconds): int
     {
         return TenantScope::acrossAllTenants('offline sweep', static fn (): int => DB::execute(
@@ -194,21 +485,30 @@ final class Device extends Model
         }
 
         $row = DB::selectOne(
+            // Online is measured from the heartbeat, not from the path. A
+            // device that is running and has not yet found a peer is online;
+            // counting it as offline is what made a working pair look dead.
             'SELECT COUNT(*) AS total,
-                    SUM(CASE WHEN connection_type <> \'offline\' THEN 1 ELSE 0 END) AS online,
+                    SUM(CASE WHEN last_seen_at IS NOT NULL
+                              AND last_seen_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL '
+                                  . self::OFFLINE_AFTER_SECONDS . ' SECOND)
+                             THEN 1 ELSE 0 END) AS online,
                     SUM(CASE WHEN connection_type = \'direct\' THEN 1 ELSE 0 END) AS direct,
-                    SUM(CASE WHEN connection_type = \'relay\' THEN 1 ELSE 0 END) AS relay,
+                    SUM(CASE WHEN connection_type IN (\'relay\', \'relay_https\')
+                             THEN 1 ELSE 0 END) AS relay,
+                    SUM(CASE WHEN connection_type = \'connecting\' THEN 1 ELSE 0 END) AS connecting,
                     SUM(CASE WHEN status = \'pending\' THEN 1 ELSE 0 END) AS pending
              FROM ' . self::tableName() . ' WHERE ' . $where,
             $params
         ) ?? [];
 
         return [
-            'total'   => (int) ($row['total'] ?? 0),
-            'online'  => (int) ($row['online'] ?? 0),
-            'direct'  => (int) ($row['direct'] ?? 0),
-            'relay'   => (int) ($row['relay'] ?? 0),
-            'pending' => (int) ($row['pending'] ?? 0),
+            'total'      => (int) ($row['total'] ?? 0),
+            'online'     => (int) ($row['online'] ?? 0),
+            'direct'     => (int) ($row['direct'] ?? 0),
+            'relay'      => (int) ($row['relay'] ?? 0),
+            'connecting' => (int) ($row['connecting'] ?? 0),
+            'pending'    => (int) ($row['pending'] ?? 0),
         ];
     }
 }

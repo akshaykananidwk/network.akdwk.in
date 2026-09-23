@@ -78,7 +78,7 @@ if ($verbose) {
 task('devices.offline', static function (): string {
     // Three missed heartbeats before a device is called offline, so a single
     // dropped packet does not flap the dashboard.
-    $marked = Device::markStaleOffline(90);
+    $marked = Device::markStaleOffline(Device::OFFLINE_AFTER_SECONDS);
 
     return $marked > 0 ? $marked . ' device(s) marked offline' : 'no change';
 }, $results, $verbose);

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Core;
 
 use App\Middleware\ApiKeyMiddleware;
+use App\Middleware\CoordinatorMiddleware;
 use App\Middleware\AuthMiddleware;
 use App\Middleware\CsrfMiddleware;
 use App\Middleware\GuestMiddleware;
@@ -110,6 +111,7 @@ final class Kernel
             'can'         => RbacMiddleware::handle($request, $argument),
             'api'         => ApiKeyMiddleware::handle($request),
             'device'      => ApiKeyMiddleware::handleDevice($request),
+            'coordinator' => CoordinatorMiddleware::handle($request),
             'throttle'    => RateLimitMiddleware::handle($request, $argument !== '' ? $argument : 'default'),
             default       => throw new AppException('Unknown middleware: ' . $middleware),
         };

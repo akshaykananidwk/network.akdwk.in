@@ -42,7 +42,22 @@ final class DeviceService
             throw new ValidationException(['public_key' => 'Must be a base64-encoded 32-byte Curve25519 public key.']);
         }
 
-        $joinCode = JoinCode::redeem($code);
+        // Looked at before it is used. A device re-presenting a code it has
+        // already redeemed is the upgrade case — the installer run again over
+        // an existing install — and burning a use for it would make a
+        // single-use code refuse the very machine it had just admitted.
+        $joinCode = JoinCode::peek($code);
+
+        // A spent code still identifies its network, and that is enough *if*
+        // this key is already on it. The public-key check below is what makes
+        // this safe: a spent code admits nobody new.
+        if ($joinCode === null) {
+            $spent = JoinCode::peekIncludingSpent($code);
+            if ($spent !== null && self::keyBelongsToTenant($publicKey, (int) $spent['tenant_id'])) {
+                $joinCode = $spent;
+            }
+        }
+
         if ($joinCode === null) {
             // Deliberately vague: a valid-looking code should not be
             // distinguishable from an expired one by an enumerating client.
@@ -51,8 +66,16 @@ final class DeviceService
 
         $tenantId = (int) $joinCode['tenant_id'];
         $networkId = (int) $joinCode['network_id'];
+        $preApproved = (int) ($joinCode['pre_approved'] ?? 0) === 1;
 
-        return TenantScope::asTenant($tenantId, static function () use ($input, $publicKey, $tenantId, $networkId): array {
+        return TenantScope::asTenant($tenantId, static function () use (
+            $input,
+            $code,
+            $publicKey,
+            $tenantId,
+            $networkId,
+            $preApproved
+        ): array {
             $network = Network::find($networkId);
             if ($network === null || $network['status'] !== 'active') {
                 throw new ValidationException(['join_code' => 'That network is no longer accepting devices.']);
@@ -78,12 +101,21 @@ final class DeviceService
                     'agent_version' => $input['agent_version'] ?? $existing['agent_version'],
                 ]);
 
+                // No use consumed: this machine is already on the network and
+                // is re-presenting the code it joined with.
                 return [
                     'device_uid'  => (string) $existing['device_uid'],
                     'status'      => (string) $existing['status'],
                     'network_uid' => (string) $network['network_uid'],
                     'poll_after'  => 10,
                 ];
+            }
+
+            // A new device, so the use is claimed now — atomically, which is
+            // what stops fifty machines enrolling together from all taking the
+            // same last use.
+            if (JoinCode::redeem($code) === null) {
+                throw new ValidationException(['join_code' => 'That join code is not valid or has expired.']);
             }
 
             BillingService::assertCanAddDevice($tenantId);
@@ -110,9 +142,21 @@ final class DeviceService
                 'os'       => $input['os'] ?? null,
             ]);
 
-            // A network may opt into auto-approval; it is off by default and
-            // the choice is audited on the network, not silently here.
-            if ((int) $network['auto_approve_devices'] === 1) {
+            // Two ways a device can be admitted without a click, and both are
+            // an administrator's explicit decision recorded before the device
+            // existed — which is what keeps R4 true. Neither is a default.
+            //
+            //   - a pre-approved join code: this code, single- or
+            //     limited-use, short-lived and revocable, issued by a named
+            //     administrator who chose the option;
+            //   - the network's auto-approve setting, off by default.
+            if ($preApproved || (int) $network['auto_approve_devices'] === 1) {
+                AuditService::log('device.pre_approved', 'device', $deviceId, null, [
+                    'reason' => $preApproved
+                        ? 'the join code was issued pre-approved'
+                        : 'the network approves devices automatically',
+                ]);
+
                 self::approve($deviceId, null);
 
                 return [
@@ -130,6 +174,23 @@ final class DeviceService
                 'poll_after'  => 10,
             ];
         });
+    }
+
+    /**
+     * Is this public key already a device of this customer?
+     *
+     * Asked across tenants because an enrolling agent has no identity yet, and
+     * answered as a plain yes or no: nothing about the device is returned
+     * here, and a key belonging to another customer answers no.
+     */
+    private static function keyBelongsToTenant(string $publicKey, int $tenantId): bool
+    {
+        $device = TenantScope::acrossAllTenants(
+            're-enrolment identity check',
+            static fn (): ?array => Device::findByPublicKey($publicKey)
+        );
+
+        return $device !== null && (int) $device['tenant_id'] === $tenantId;
     }
 
     /**
@@ -301,6 +362,22 @@ final class DeviceService
                 'name'       => $device['name'],
                 'virtual_ip' => $device['virtual_ip'],
                 'status'     => $device['status'],
+                // Gateway mode. The agent configures forwarding only for the
+                // prefixes named here — the routes list below also carries
+                // prefixes *other* gateways advertise, which this device
+                // installs as routes rather than forwards for.
+                'is_gateway' => (int) $device['is_gateway'] === 1,
+                // Both prefixes for each LAN this device routes for. The
+                // gateway is the only place that needs each: the real range to
+                // forward into and NAT for, and the mapped range to recognise
+                // arriving on the tunnel and to rewrite to.
+                'advertises' => array_map(
+                    static fn (array $r): array => [
+                        'destination'      => (string) ($r['mapped_cidr'] ?: $r['destination_cidr']),
+                        'real_destination' => (string) $r['destination_cidr'],
+                    ],
+                    NetworkRoute::servedByDevice($deviceId)
+                ),
             ],
             'network'     => [
                 'uid'           => $network['network_uid'],
@@ -314,18 +391,17 @@ final class DeviceService
             // the customer's normal name resolution is untouched (R1).
             'dns'         => [
                 'servers'       => $network['dns_json'] ?? [],
-                'search_domain' => $network['search_domain'],
+                'search_domain' => DnsZone::forNetwork($network),
+                // The zone the agent is authoritative for, and nothing else.
+                // Its resolver refuses every name outside this — it never
+                // forwards — so it cannot become the customer's resolver even
+                // if something points at it (R1 applied to names).
+                'zone'          => DnsZone::forNetwork($network),
+                'records'       => DnsZone::records($network),
                 'split_only'    => true,
             ],
             'peers'       => $peers,
-            'routes'      => array_map(
-                static fn (array $r): array => [
-                    'destination' => $r['destination_cidr'],
-                    'via'         => $r['via_device_ip'] ?? null,
-                    'metric'      => (int) $r['metric'],
-                ],
-                NetworkRoute::forNetwork($networkId)
-            ),
+            'routes'      => self::routesFor($networkId, $device),
             'relays'      => array_map(
                 static fn (array $r): array => [
                     'name'       => $r['name'],
@@ -335,11 +411,40 @@ final class DeviceService
                     'tcp_port'   => (int) $r['tcp_port'],
                     'public_key' => $r['public_key'],
                 ],
-                Relay::availableFor('')
+                // Region orders the list; it never filters it. A device with
+                // none — the normal case — still measures the whole fleet.
+                Relay::availableFor((string) ($device['region'] ?? ''))
             ),
             'coordinator' => [
-                'host' => Config::get('coordinator.public_host', Config::get('coordinator.host')),
-                'port' => (int) Config::get('coordinator.port', 8443),
+                'host' => CoordinatorSettings::agentHost(),
+                'port' => (int) CoordinatorSettings::current()['port'],
+                // The agent seals its announcements to this key, so only the
+                // coordinator can read the device token inside them. Its
+                // absence is why an agent refuses to announce rather than
+                // falling back to sending one in the clear.
+                'public_key' => (string) CoordinatorSettings::current()['public_key'],
+            ],
+            // Where the agent goes when the network it is on passes nothing
+            // but the port a browser uses.
+            //
+            // Published to every device rather than only to the ones that need
+            // it, because a device cannot know in advance which network it
+            // will be plugged into tomorrow — the laptop that worked on a
+            // phone hotspot all morning is the same laptop that fails on the
+            // office wifi after lunch.
+            'fallback'    => [
+                'url' => (string) CoordinatorSettings::current()['fallback_url'],
+            ],
+            // The controller's ed25519 public half.
+            //
+            // Published so an agent can verify what it is given: the signature
+            // on this configuration, and — the reason it is here now — the
+            // signature on an agent binary before it replaces its own. Pushing
+            // code to every customer PC on the strength of a panel being
+            // reachable is not something to do; a panel compromise must not
+            // also be a code-signing key.
+            'controller'  => [
+                'public_key' => (string) Config::get('security.controller_public_key', ''),
             ],
             'policy'      => [
                 // Stated explicitly in the config the agent consumes so the
@@ -348,10 +453,62 @@ final class DeviceService
                 'allow_default_route' => (bool) Config::get('network.allow_default_route', false),
                 'acl_default_action'  => $network['acl_default_action'],
             ],
+            // An administrator pressed "Update now" on this device's page. The
+            // agent otherwise asks every six hours, which is right for a
+            // rollout and useless for somebody standing in front of a machine
+            // trying to fix it.
+            //
+            // It is a request, not an instruction: the agent still asks the
+            // panel what it is offered and still refuses a binary whose
+            // signature does not verify against the controller key above.
+            'update_requested' => Device::updateRequested((int) $device['id']),
             'issued_at'   => gmdate('c'),
         ];
 
         return self::assertSplitTunnel($config);
+    }
+
+    /**
+     * The advertised LANs, as the agent needs to see them.
+     *
+     * Every destination here is a **mapped** prefix. The customer's real range
+     * is carried alongside it for the agent that has to NAT between the two —
+     * the gateway — and for anything that has to show a human which machine a
+     * rule is about. It is never what a client routes on, because two
+     * customers on 192.168.1.0/24 is the normal case and one routing table
+     * cannot hold both.
+     *
+     * @param array<string,mixed> $device
+     * @return list<array<string,mixed>>
+     */
+    private static function routesFor(int $networkId, array $device): array
+    {
+        $out = [];
+
+        foreach (NetworkRoute::forNetwork($networkId) as $route) {
+            $compiled = AclRouteFilters::compile(
+                $networkId,
+                $device,
+                (string) $route['destination_cidr'],
+                isset($route['mapped_cidr']) ? (string) $route['mapped_cidr'] : null
+            );
+
+            foreach ($compiled as $entry) {
+                $out[] = [
+                    'destination'      => $entry['destination'],
+                    'real_destination' => $entry['real_destination'],
+                    'via'              => $route['via_device_ip'] ?? null,
+                    'metric'           => (int) $route['metric'],
+                    // Rules about machines inside this prefix. They name the
+                    // destination by LAN address, because that is how an
+                    // operator thinks about an NVR: the rule is about the
+                    // recorder, not about the PC that routes for it.
+                    'filters'          => $entry['filters'],
+                ];
+            }
+        }
+
+        return $out;
     }
 
     /**

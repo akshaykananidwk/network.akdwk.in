@@ -42,7 +42,7 @@ final class ApiKeyMiddleware
                 return null;
             }
 
-            return Response::apiError('Provide an API key as a Bearer token.', 401, 'unauthenticated');
+            return self::missingCredential($request, 'Provide an API key as a Bearer token.');
         }
 
         return str_starts_with($token, 'ak_')
@@ -56,10 +56,53 @@ final class ApiKeyMiddleware
         $token = $request->bearerToken();
 
         if ($token === null) {
-            return Response::apiError('Provide the device token as a Bearer token.', 401, 'unauthenticated');
+            return self::missingCredential($request, 'Provide the device token as a Bearer token.');
         }
 
         return self::authenticateDevice($request, $token);
+    }
+
+    /**
+     * No credential at all — which is not the same as a rejected one.
+     *
+     * On Apache with PHP-FPM the Authorization header is dropped unless the
+     * server is told to pass it, and then *every* request arrives like this.
+     * A production deployment spent an evening on it: the panel said "provide
+     * the device token", the agent concluded the device had been revoked, and
+     * told the customer to run `reset` — which would have destroyed a working
+     * device's identity to fix a web server setting.
+     *
+     * So the message names the likely cause, and a distinct error code lets
+     * the agent tell "you sent nothing" apart from "what you sent is no
+     * good". The two need different advice and only one of them is the
+     * customer's problem.
+     */
+    private static function missingCredential(Request $request, string $what): Response
+    {
+        $hint = '';
+        if ($request->authorizationHeader() === null && self::looksLikeApacheFastCGI($request)) {
+            $hint = ' This server did not pass the Authorization header to PHP at all, which Apache'
+                . ' does not do by default with PHP-FPM. The .htaccess this software ships sets'
+                . ' CGIPassAuth On; check it is present and that AllowOverride permits it.';
+
+            Logger::warning('security', 'Authorization header absent; the web server is probably stripping it', [
+                'ip'       => $request->ip(),
+                'software' => $request->server('SERVER_SOFTWARE'),
+            ]);
+        }
+
+        return Response::apiError($what . $hint, 401, 'no_credential');
+    }
+
+    /** Apache with a FastCGI PHP is the combination that drops the header. */
+    private static function looksLikeApacheFastCGI(Request $request): bool
+    {
+        $software = strtolower((string) $request->server('SERVER_SOFTWARE'));
+        if (!str_contains($software, 'apache')) {
+            return false;
+        }
+
+        return str_contains(strtolower(PHP_SAPI), 'fpm') || str_contains(strtolower(PHP_SAPI), 'cgi');
     }
 
     private static function authenticateApiKey(Request $request, string $token): ?Response

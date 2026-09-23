@@ -1,0 +1,346 @@
+<#
+  AKConnect evidence collector.
+
+  Run it at each stage of the runbook. It writes one file per stage and never
+  stops early: if the service will not start, if Wintun will not load, if DPAPI
+  fails, every remaining check still runs and the failure is recorded in place.
+  A collector that only works when everything works would be useless.
+
+  It reads. The only thing it writes is its own report.
+
+  .\collect.ps1 -Stage 01-before-install
+  .\collect.ps1 -Stage 07-connected -PeerIP 10.99.0.3
+  .\collect.ps1 -Stage 13-gateway -LanIP 192.168.1.50 -MappedIP 10.128.0.50
+  .\collect.ps1 -Stage 14-names -Name nvr.hotel-abc.acme.internal
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][string]$Stage,
+    [string]$PeerIP = "",
+    [string]$LanIP  = "",
+    [string]$MappedIP = "",
+    [string]$Name     = "",
+    [string]$Agent  = ""
+)
+
+# Never stop on error: a failing check is data, not a reason to abandon the run.
+$ErrorActionPreference = "Continue"
+$ProgressPreference    = "SilentlyContinue"
+
+if (-not $Agent) {
+    $candidate = Join-Path $PSScriptRoot "akconnect-agent.exe"
+    $Agent = if (Test-Path $candidate) { $candidate } else { "akconnect-agent" }
+}
+
+$stamp   = Get-Date -Format "yyyyMMdd-HHmmss"
+$OutFile = Join-Path $PSScriptRoot "evidence-$Stage-$env:COMPUTERNAME-$stamp.txt"
+# Guarded because these environment variables are always set on Windows and
+# never set anywhere else, and a null here would throw at script scope, before
+# a single check had run.
+$ProgramData = if ($env:ProgramData) { $env:ProgramData } else { "C:\ProgramData" }
+$SystemRoot  = if ($env:SystemRoot)  { $env:SystemRoot }  else { "C:\Windows" }
+$DataDir     = Join-Path $ProgramData "AKConnect"
+
+# Written incrementally, so even a hard crash leaves everything collected so far.
+function Emit($text) { $text | Out-File -FilePath $OutFile -Append -Encoding utf8 }
+
+function Section($title) {
+    Emit ""
+    Emit "=============================================================="
+    Emit "  $title"
+    Emit "=============================================================="
+}
+
+# Check runs a block, records its output, and records a failure as a failure
+# rather than letting it end the script.
+function Check($title, $block) {
+    Section $title
+    try {
+        $out = & $block 2>&1 | Out-String
+        if ([string]::IsNullOrWhiteSpace($out)) { Emit "(no output)" } else { Emit $out.TrimEnd() }
+    } catch {
+        Emit "CHECK FAILED: $($_.Exception.Message)"
+        Emit ($_.ScriptStackTrace | Out-String)
+    }
+}
+
+Emit "AKConnect evidence"
+Emit "stage      : $Stage"
+Emit "collected  : $(Get-Date -Format o)"
+Emit "machine    : $env:COMPUTERNAME"
+Emit "user       : $env:USERDOMAIN\$env:USERNAME"
+try {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $elevated = ([Security.Principal.WindowsPrincipal]$id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+} catch { $elevated = "unknown" }
+Emit "elevated   : $elevated"
+Emit "agent      : $Agent"
+Emit "peer       : $(if ($PeerIP) { $PeerIP } else { '(none)' })"
+
+Check "Windows version" {
+    Get-CimInstance Win32_OperatingSystem |
+        Select-Object Caption, Version, BuildNumber, OSArchitecture | Format-List
+}
+
+# ---- the agent's own verdict ------------------------------------------------
+Check "agent version" { & $Agent version }
+Check "agent selftest (the important one)" { & $Agent selftest }
+Check "agent status" { & $Agent status }
+Check "service state" { & $Agent service status }
+
+# Every block in this script goes through Check, without exception. This one
+# was not, and it was the only place an error could escape to the console.
+Check "runtime status file" {
+    $runtime = Join-Path $DataDir "runtime.json"
+    if (Test-Path $runtime) { Get-Content $runtime -Raw }
+    else { "not present - the agent is not running, or has never run" }
+}
+
+# ---- key custody -------------------------------------------------------------
+Check "icacls on the data directory" { icacls $DataDir }
+Check "icacls on the key file" { icacls (Join-Path $DataDir "device.key") }
+Check "key file attributes" {
+    $k = Join-Path $DataDir "device.key"
+    if (Test-Path $k) { Get-Item $k | Format-List Name, Length, CreationTime, LastWriteTime }
+    else { "device.key not present (not enrolled yet)" }
+}
+
+# ---- driver and adapter -------------------------------------------------------
+Check "wintun.dll" {
+    # Split-Path returns null when the agent was found on PATH rather than by
+    # a full path, which would otherwise throw here and lose the check.
+    $agentDir = try { Split-Path $Agent -Parent -ErrorAction Stop } catch { $null }
+    if (-not $agentDir) { $agentDir = $PSScriptRoot }
+
+    foreach ($c in @((Join-Path $agentDir "wintun.dll"), (Join-Path $SystemRoot "System32\wintun.dll"))) {
+        if (Test-Path $c) {
+            $h = (Get-FileHash $c -Algorithm SHA256).Hash
+            "FOUND  $c"
+            "  sha256 $h"
+            "  version $((Get-Item $c).VersionInfo.FileVersion)"
+        } else { "absent $c" }
+    }
+}
+Check "network adapters" { Get-NetAdapter | Format-Table -AutoSize Name, InterfaceDescription, Status, ifIndex }
+Check "AKConnect adapter detail" {
+    Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "*Wintun*" -or $_.Name -like "*AKConnect*" -or $_.Name -like "akc*" } |
+        Format-List Name, InterfaceDescription, Status, MacAddress, ifIndex
+}
+Check "IPv4 addresses" {
+    Get-NetIPAddress -AddressFamily IPv4 | Format-Table -AutoSize InterfaceAlias, IPAddress, PrefixLength
+}
+
+# ---- routing: the split-tunnel guarantee ---------------------------------------
+Check "route print -4" { route print -4 }
+Check "default routes only" {
+    Get-NetRoute -DestinationPrefix "0.0.0.0/0" | Format-Table -AutoSize InterfaceAlias, NextHop, RouteMetric, InterfaceMetric
+}
+Check "interface chosen for a public address" {
+    Find-NetRoute -RemoteIPAddress 1.1.1.1 | Format-Table -AutoSize InterfaceAlias, IPAddress, NextHop
+}
+if ($PeerIP) {
+    Check "interface chosen for the peer" {
+        Find-NetRoute -RemoteIPAddress $PeerIP | Format-Table -AutoSize InterfaceAlias, IPAddress, NextHop
+    }
+}
+
+# ---- reachability ---------------------------------------------------------------
+if ($PeerIP) {
+    Check "ping the peer (10 packets)" { ping -n 10 $PeerIP }
+    Check "traceroute to the peer" { tracert -d -h 8 -w 2000 $PeerIP }
+}
+Check "traceroute to a public address (must not enter the overlay)" { tracert -d -h 8 -w 2000 1.1.1.1 }
+
+# ---- gateway / subnet-router mode ---------------------------------------------------
+#
+# Only meaningful on the PC that acts as the site's gateway, but every check is
+# safe to run anywhere: on a machine that is not a gateway they simply report
+# nothing, and "nothing" is itself the answer to "did the agent turn this
+# machine into a router behind my back?".
+Check "IP forwarding on each interface" {
+    Get-NetIPInterface -AddressFamily IPv4 |
+        Format-Table -AutoSize InterfaceAlias, Forwarding, ConnectionState, InterfaceMetric
+}
+Check "NAT instances (New-NetNat)" {
+    Get-NetNat -ErrorAction SilentlyContinue |
+        Format-List Name, InternalIPInterfaceAddressPrefix, ExternalIPInterfaceAddressPrefix, Active
+}
+Check "NAT session mappings" {
+    Get-NetNatSession -ErrorAction SilentlyContinue | Select-Object -First 20 |
+        Format-Table -AutoSize NatName, Protocol, InternalSourceAddress, InternalSourcePort, ExternalSourceAddress
+}
+Check "routes that are not the overlay and not the default route" {
+    Get-NetRoute -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.DestinationPrefix -ne "0.0.0.0/0" -and $_.DestinationPrefix -notlike "127.*" } |
+        Sort-Object InterfaceAlias |
+        Format-Table -AutoSize DestinationPrefix, InterfaceAlias, NextHop, RouteMetric
+}
+Check "RRAS, in case something else on this machine already routes" {
+    Get-Service RemoteAccess -ErrorAction SilentlyContinue | Format-List Name, Status, StartType
+}
+Check "Internet Connection Sharing, which conflicts with New-NetNat" {
+    Get-Service SharedAccess -ErrorAction SilentlyContinue | Format-List Name, Status, StartType
+}
+if ($LanIP) {
+    # The point of the whole feature: a machine with no agent on it, reached
+    # across the tunnel. Run this one from the SUPPORT laptop, not the gateway.
+    Check "interface chosen for the LAN device behind the gateway" {
+        Find-NetRoute -RemoteIPAddress $LanIP -ErrorAction SilentlyContinue |
+            Format-Table -AutoSize InterfaceAlias, IPAddress, NextHop
+    }
+    Check "ping the LAN device behind the gateway" { ping -n 6 $LanIP }
+    Check "traceroute to the LAN device (should be gateway then device)" {
+        tracert -d -h 6 -w 2000 $LanIP
+    }
+    Check "TCP 554 to the LAN device — the port the rule allows" {
+        Test-NetConnection -ComputerName $LanIP -Port 554 -WarningAction SilentlyContinue |
+            Format-List ComputerName, RemotePort, TcpTestSucceeded, PingSucceeded
+    }
+    Check "TCP 80 to the LAN device — the port the rule does not allow" {
+        Test-NetConnection -ComputerName $LanIP -Port 80 -WarningAction SilentlyContinue |
+            Format-List ComputerName, RemotePort, TcpTestSucceeded, PingSucceeded
+    }
+}
+
+# ---- subnet mapping -----------------------------------------------------------------
+#
+# The overlay does not carry the customer's real LAN range: the panel gives each
+# site a range of its own, and the agent rewrites between the two. That
+# rewriting is done in the agent, not by Windows, because Windows has no
+# one-to-one prefix NAT — New-NetNat masquerades many-to-one and
+# Add-NetNatStaticMapping forwards single ports. So there is nothing here for
+# netsh to show, and these checks look at the routing table and the agent's own
+# log instead.
+Check "the agent's view of its routes and mappings" {
+    & $Agent status 2>&1
+}
+if ($MappedIP) {
+    Check "interface chosen for the mapped address" {
+        Find-NetRoute -RemoteIPAddress $MappedIP -ErrorAction SilentlyContinue |
+            Format-Table -AutoSize InterfaceAlias, IPAddress, NextHop
+    }
+    Check "ping the LAN device at its overlay address" { ping -n 6 $MappedIP }
+    Check "TCP 554 at the overlay address — the port the rule allows" {
+        Test-NetConnection -ComputerName $MappedIP -Port 554 -WarningAction SilentlyContinue |
+            Format-List ComputerName, RemotePort, TcpTestSucceeded, PingSucceeded
+    }
+    Check "TCP 80 at the overlay address — the port the rule does not allow" {
+        Test-NetConnection -ComputerName $MappedIP -Port 80 -WarningAction SilentlyContinue |
+            Format-List ComputerName, RemotePort, TcpTestSucceeded, PingSucceeded
+    }
+}
+if ($LanIP) {
+    # The question that decides whether the feature works on a real technician's
+    # laptop: does the machine's own LAN still belong to the machine?
+    Check "what this machine reaches at the customer's real address" {
+        Find-NetRoute -RemoteIPAddress $LanIP -ErrorAction SilentlyContinue |
+            Format-Table -AutoSize InterfaceAlias, IPAddress, NextHop
+    }
+}
+
+# ---- names, and what they must not have touched --------------------------------------
+#
+# The claim is narrow: names under the network's own domain resolve through the
+# agent, and every other name this machine looks up goes exactly where it went
+# before. The second half is what these checks are mostly about.
+Check "the agent's view of its zone" { & $Agent status 2>&1 }
+Check "NRPT rules — ours should name only our domain" {
+    Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
+        Format-Table -AutoSize Name, Namespace, NameServers, Comment
+}
+Check "NRPT policy as it is actually applied" {
+    Get-DnsClientNrptPolicy -ErrorAction SilentlyContinue |
+        Format-Table -AutoSize Namespace, NameServers
+}
+Check "the adapters' own DNS servers — ours must not appear here" {
+    Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Format-Table -AutoSize InterfaceAlias, ServerAddresses
+}
+Check "the hosts file, managed block and all" {
+    $hosts = Join-Path $SystemRoot "System32\drivers\etc\hosts"
+    if (Test-Path $hosts) { Get-Content $hosts } else { "no hosts file at $hosts" }
+}
+if ($Name) {
+    Check "resolving the name, the way any program would" {
+        Resolve-DnsName -Name $Name -ErrorAction SilentlyContinue |
+            Format-Table -AutoSize Name, Type, IPAddress
+    }
+    Check "and through the OS resolver rather than a named server" {
+        [System.Net.Dns]::GetHostAddresses($Name) | ForEach-Object { $_.IPAddressToString }
+    }
+}
+Check "a public name still resolves the way it always did" {
+    Resolve-DnsName -Name www.microsoft.com -ErrorAction SilentlyContinue |
+        Select-Object -First 3 | Format-Table -AutoSize Name, Type, IPAddress
+}
+
+# ---- firewall and sockets ---------------------------------------------------------
+Check "firewall rule" { netsh advfirewall firewall show rule name="AKConnect Agent (WireGuard UDP)" }
+Check "firewall profiles" { netsh advfirewall show allprofiles state }
+Check "UDP 51820 listener" {
+    Get-NetUDPEndpoint -LocalPort 51820 -ErrorAction SilentlyContinue | Format-Table -AutoSize LocalAddress, LocalPort, OwningProcess
+}
+
+# ---- what Windows thought of our unsigned binary -------------------------------------
+Check "Authenticode signature on the agent" { Get-AuthenticodeSignature $Agent | Format-List Status, StatusMessage, SignerCertificate }
+Check "Defender threat history" {
+    Get-MpThreatDetection -ErrorAction SilentlyContinue | Select-Object -First 10 |
+        Format-List InitialDetectionTime, ThreatID, Resources, ActionSuccess
+}
+Check "Defender exclusions in force" { (Get-MpPreference).ExclusionPath }
+Check "SmartScreen policy" {
+    Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -ErrorAction SilentlyContinue |
+        Select-Object EnableSmartScreen | Format-List
+}
+
+# ---- what the installer put here, and what an uninstall must take away -------------
+#
+# Stage 15 is the one that decides whether this can be sold: one file, one join
+# code, and an uninstall that leaves nothing. The leftovers people notice
+# months later are not files — a service registration, a firewall rule, a DNS
+# policy rule, and a network adapter a driver created.
+Check "the program folder" {
+    $dir = Join-Path $env:ProgramFiles "AKConnect"
+    if (Test-Path $dir) { Get-ChildItem $dir -Recurse | Format-Table -AutoSize Name, Length, LastWriteTime }
+    else { "not present: $dir" }
+}
+Check "the data folder, which holds this device's key and token" {
+    if (Test-Path $DataDir) { Get-ChildItem $DataDir -Recurse -Force | Format-Table -AutoSize Name, Length }
+    else { "not present: $DataDir" }
+}
+Check "the service registration" {
+    Get-Service AKConnectAgent -ErrorAction SilentlyContinue | Format-List Name, Status, StartType
+}
+Check "the service's binary path, which must point inside Program Files" {
+    Get-CimInstance Win32_Service -Filter "Name='AKConnectAgent'" -ErrorAction SilentlyContinue |
+        Format-List Name, PathName, StartMode, State
+}
+Check "network devices Windows knows about, Wintun included" {
+    Get-PnpDevice -Class Net -ErrorAction SilentlyContinue |
+        Where-Object { $_.FriendlyName -like "*Wintun*" -or $_.FriendlyName -like "*AKConnect*" } |
+        Format-Table -AutoSize FriendlyName, Status, InstanceId
+}
+Check "SmartScreen and Defender on the installer itself" {
+    $setup = Join-Path $PSScriptRoot "akconnect-setup.exe"
+    if (Test-Path $setup) {
+        Get-AuthenticodeSignature $setup | Format-List Status, StatusMessage
+        Get-Item $setup | Select-Object -ExpandProperty Length
+    } else { "akconnect-setup.exe is not beside this script" }
+}
+
+# ---- logs ---------------------------------------------------------------------------
+Check "agent event log (last 40)" {
+    Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'AKConnectAgent' } -MaxEvents 40 -ErrorAction SilentlyContinue |
+        Format-Table -AutoSize TimeCreated, LevelDisplayName, Message
+}
+Check "service control manager events for our service" {
+    Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager' } -MaxEvents 60 -ErrorAction SilentlyContinue |
+        Where-Object { $_.Message -like "*AKConnect*" } | Format-Table -AutoSize TimeCreated, LevelDisplayName, Message
+}
+
+Section "end of report"
+
+Write-Host ""
+Write-Host "  Written: $OutFile"
+Write-Host "  It contains no private key and no device token."
+Write-Host ""

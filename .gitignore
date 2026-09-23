@@ -12,12 +12,17 @@
 /storage/updates/*
 /storage/tmp/*
 /storage/keys/*
+# Installers built on the edge and published here. Binaries, not source.
+/storage/downloads/*
 /storage/maintenance.flag
 !/storage/*/.gitkeep
 
 # User content
 /uploads/*
 !/uploads/.gitkeep
+# The rule that stops an uploaded .php from executing. It belongs in the
+# repository and in the update manifest, not on each operator's server.
+!/uploads/.htaccess
 
 # Installer lock
 /install/install.lock
@@ -26,6 +31,14 @@
 /services/*/bin/
 /services/*/dist/
 *.exe
+
+# …except the installer's payload placeholders. Go embeds at compile time, so
+# these two files must exist for the package to build at all, and a fresh clone
+# that cannot build is worse than two lines of exception here. The pack script
+# swaps in the real binaries, builds, and puts the placeholders back — see
+# services/agent/cmd/akconnect-setup/payload/README.md.
+!services/agent/cmd/akconnect-setup/payload/akconnect-agent.exe
+!services/agent/cmd/akconnect-setup/payload/wintun.dll
 *.test
 
 # OS / editor noise
@@ -34,3 +47,24 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# Field kit build output — binaries are built on demand, never committed.
+/services/kit/dist/
+/services/kit/pack/
+
+# The Windows test pack is NOT committed, and was until 1.9.4.
+#
+# The reason it was is gone: a tester needed one URL, and there is one now —
+# the panel serves the installer at /download/setup.exe, published by
+# deploy/upgrade-edge.sh from the release the panel is actually running. That
+# is a better URL than a file in git, because it is stamped for their panel.
+#
+# The reason to stop is that tracking a build output made the edge upgrader
+# dirty its own checkout: a successful run left "M
+# services/kit/akconnect-windows-test-pack.zip" behind, and the next run
+# refused with "has local changes". The tool that maintains the edge could be
+# run exactly once per clone.
+/services/kit/akconnect-windows-test-pack.zip
+
+# Lab harness scratch: binaries, logs and agent state, rebuilt each run.
+/services/lab/.run/

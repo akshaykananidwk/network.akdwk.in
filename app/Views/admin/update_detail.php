@@ -21,9 +21,11 @@ $failed = in_array($update['status'], ['failed', 'rolled_back'], true);
         </div>
         <div class="card-header-actions">
             <a class="btn btn-sm" href="<?= e(url('admin/updates/' . $update['id'] . '/log')) ?>">Download log</a>
-            <?php if ($update['status'] === 'success' && !empty($update['journal_path'])): ?>
+            <?php if (!empty($update['rollback_available'])): ?>
                 <button type="button" class="btn btn-sm btn-danger" data-action="rollback"
                         data-update-id="<?= e($update['id']) ?>">Roll back to previous version</button>
+            <?php elseif ($update['status'] === 'success'): ?>
+                <p class="text-muted">The per-file undo list for this update has been pruned, so a rollback could no longer restore its files. Recover from a backup instead.</p>
             <?php endif; ?>
         </div>
     </header>

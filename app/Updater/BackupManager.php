@@ -81,6 +81,7 @@ final class BackupManager
                 'db_path'                => $this->relative($database['path']),
                 'files_sha256'           => $files['sha256'],
                 'db_sha256'              => $database['sha256'],
+                'db_method'              => $database['method'],
                 'size_bytes'             => $files['bytes'] + $database['bytes'],
                 'uploads_included'       => $files['uploads_included'] ? 1 : 0,
                 'uploads_skipped_reason' => $files['uploads_skipped_reason'],
@@ -149,10 +150,11 @@ final class BackupManager
             $exclude[] = 'uploads';
         }
 
-        $files = $this->collectFiles($this->appRoot, $exclude);
+        $archives = $this->archives();
+        $files = $archives->collectFiles($this->appRoot, $exclude);
 
         $target = $directory . '/files.tar.gz';
-        $count = $this->writeTarGz($target, $files);
+        $count = $archives->writeTarGz($target, $files);
 
         return [
             'path'                   => $target,
@@ -162,113 +164,6 @@ final class BackupManager
             'uploads_included'       => $includeUploads,
             'uploads_skipped_reason' => $skipReason,
         ];
-    }
-
-    /**
-     * @param list<string> $relativeFiles
-     * @return int files written
-     */
-    private function writeTarGz(string $target, array $relativeFiles): int
-    {
-        $tarPath = substr($target, 0, -3); // strip .gz
-
-        if (is_file($tarPath)) {
-            @unlink($tarPath);
-        }
-        if (is_file($target)) {
-            @unlink($target);
-        }
-
-        try {
-            $phar = new \PharData($tarPath);
-            $written = 0;
-
-            foreach ($relativeFiles as $relative) {
-                $absolute = $this->appRoot . '/' . $relative;
-                if (!is_file($absolute) || is_link($absolute)) {
-                    continue;
-                }
-                $phar->addFile($absolute, $relative);
-                $written++;
-            }
-
-            $phar->compress(\Phar::GZ);
-            unset($phar);
-            @unlink($tarPath);
-
-            if (!is_file($target)) {
-                throw new UpdateException('Compressed archive was not produced.', 'BACKUP_FILES');
-            }
-
-            return $written;
-        } catch (\PharException | \BadMethodCallException | \UnexpectedValueException $e) {
-            // phar.readonly=1 is common on hardened hosts; fall back to zip.
-            @unlink($tarPath);
-            Logger::warning('backup', 'tar.gz unavailable, using zip', ['error' => $e->getMessage()]);
-
-            return $this->writeZip(substr($target, 0, -7) . '.zip', $relativeFiles, $target);
-        }
-    }
-
-    /** @param list<string> $relativeFiles */
-    private function writeZip(string $zipPath, array $relativeFiles, string $renameTo): int
-    {
-        $zip = new \ZipArchive();
-        if ($zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
-            throw new UpdateException('Cannot create the backup archive: ' . $zipPath, 'BACKUP_FILES');
-        }
-
-        $written = 0;
-        foreach ($relativeFiles as $relative) {
-            $absolute = $this->appRoot . '/' . $relative;
-            if (is_file($absolute) && !is_link($absolute) && $zip->addFile($absolute, $relative)) {
-                $written++;
-            }
-        }
-        $zip->close();
-
-        // Keep the recorded path stable whichever format was used; the
-        // extension inside the name still says what it is.
-        rename($zipPath, $renameTo);
-
-        return $written;
-    }
-
-    /**
-     * @param list<string> $excludeRelative
-     * @return list<string> paths relative to the app root
-     */
-    private function collectFiles(string $root, array $excludeRelative): array
-    {
-        $out = [];
-        $rootLength = strlen(rtrim($root, '/')) + 1;
-
-        $iterator = new \RecursiveIteratorIterator(
-            new \RecursiveCallbackFilterIterator(
-                new \RecursiveDirectoryIterator($root, \FilesystemIterator::SKIP_DOTS | \FilesystemIterator::FOLLOW_SYMLINKS),
-                static function (\SplFileInfo $current) use ($rootLength, $excludeRelative): bool {
-                    $relative = substr($current->getPathname(), $rootLength);
-                    foreach ($excludeRelative as $exclude) {
-                        if ($relative === $exclude || str_starts_with($relative, $exclude . '/')) {
-                            return false;
-                        }
-                    }
-
-                    return true;
-                }
-            ),
-            \RecursiveIteratorIterator::LEAVES_ONLY
-        );
-
-        foreach ($iterator as $file) {
-            if ($file instanceof \SplFileInfo && $file->isFile() && !$file->isLink()) {
-                $out[] = substr($file->getPathname(), $rootLength);
-            }
-        }
-
-        sort($out);
-
-        return $out;
     }
 
     /**
@@ -301,14 +196,42 @@ final class BackupManager
             $expected = (string) ($backup[$hashKey] ?? '');
             $actual = (string) hash_file('sha256', $absolute);
 
-            $checks[] = $expected !== '' && hash_equals($expected, $actual)
-                ? ['name' => $label, 'ok' => true, 'detail' => sprintf('%s, sha256 matches', $this->humanBytes((int) filesize($absolute)))]
-                : ['name' => $label, 'ok' => false, 'detail' => 'Checksum mismatch — the archive has changed since it was written.'];
+            if ($expected === '' || !hash_equals($expected, $actual)) {
+                $checks[] = ['name' => $label, 'ok' => false, 'detail' => 'Checksum mismatch — the archive has changed since it was written.'];
+                continue;
+            }
+
+            // The checksum only proves the file has not changed since it was
+            // written. It says nothing about whether what was written is
+            // usable: a backup truncated by a full disk hashes perfectly
+            // consistently with itself. So each artefact is read back.
+            $readable = $label === 'files'
+                ? $this->archives()->describe($absolute)
+                : $this->describeDump($absolute);
+
+            $checks[] = [
+                'name'   => $label,
+                'ok'     => $readable['ok'],
+                'detail' => sprintf('%s, %s', $this->humanBytes((int) filesize($absolute)), $readable['detail']),
+            ];
         }
 
         $ok = array_reduce($checks, static fn (bool $carry, array $c): bool => $carry && $c['ok'], true);
 
         return ['ok' => $ok, 'checks' => $checks];
+    }
+
+    /** @return array{ok:bool,detail:string} */
+    private function describeDump(string $path): array
+    {
+        return DatabaseDumper::isComplete($path)
+            ? ['ok' => true, 'detail' => 'dump ends with its completion marker']
+            : ['ok' => false, 'detail' => 'but the dump has no completion marker — it was truncated as it was written'];
+    }
+
+    private function archives(): ArchiveStore
+    {
+        return new ArchiveStore($this->appRoot);
     }
 
     /**
@@ -339,7 +262,7 @@ final class BackupManager
         }
 
         try {
-            $this->extractArchive($archive, $workspace);
+            $this->archives()->extract($archive, $workspace);
 
             $restored = 0;
             $skipped = 0;
@@ -357,7 +280,7 @@ final class BackupManager
 
                 $relative = substr($file->getPathname(), $workspaceLength);
 
-                if ($guard->isProtected($relative) || !$guard->isSafe($relative)) {
+                if ($guard->isWriteBlocked($relative) || !$guard->isSafe($relative)) {
                     $skipped++;
                     continue;
                 }
@@ -435,28 +358,6 @@ final class BackupManager
         }
 
         return ['removed' => $removed, 'freed_bytes' => $freed];
-    }
-
-    private function extractArchive(string $archive, string $destination): void
-    {
-        if (str_ends_with($archive, '.tar.gz') || str_ends_with($archive, '.tgz')) {
-            try {
-                $phar = new \PharData($archive);
-                $phar->extractTo($destination, null, true);
-
-                return;
-            } catch (\Throwable $e) {
-                // A .tar.gz name produced by the zip fallback still opens below.
-                Logger::debug('backup', 'PharData extraction failed, trying zip', ['error' => $e->getMessage()]);
-            }
-        }
-
-        $zip = new \ZipArchive();
-        if ($zip->open($archive) !== true) {
-            throw new UpdateException('Cannot open the backup archive: ' . basename($archive));
-        }
-        $zip->extractTo($destination);
-        $zip->close();
     }
 
     private function directorySize(string $directory): int

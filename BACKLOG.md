@@ -1,0 +1,361 @@
+# Backlog
+
+Known, measured, and deliberately not being worked on yet. Each entry says how
+to reproduce it and what "done" would look like, so picking it up does not mean
+rediscovering it.
+
+Nothing here blocks Phase 2. Nothing here is a correctness bug — those get
+fixed when found, not filed.
+
+---
+
+## B1 — Address allocation costs a fixed toll set by CIDR width
+
+**Found:** verification of 1.0.8, §F of `VERIFICATION_REPORT.md`.
+**Severity:** performance only. Every address allocated was unique; nothing was
+handed out twice.
+
+Approving a device costs about 4 ms into a `/24` and an order of magnitude more
+into a `/16`. Filling a `/16` while timing a single claim gives a flat line:
+
+```
+      1 already allocated -> next claim took  190.4 ms
+    250 already allocated -> next claim took  236.0 ms
+   1000 already allocated -> next claim took  226.9 ms
+   4000 already allocated -> next claim took  228.5 ms
+```
+
+So it is not a degradation that creeps up on a growing customer. It is a fixed
+toll, paid on every approval, set by how wide the network's CIDR is.
+
+**Cause:** `IpAllocation::claimNext()` runs
+`UPDATE ... WHERE device_id IS NULL AND reserved = 0 ORDER BY ip_numeric LIMIT 1`.
+MariaDB reports `Extra: Using where; Using buffer` — it materialises the ordered
+free set before taking one row from it, and that set is the whole pool.
+
+**Why it is parked:** approval is a once-per-device action taken by a human at
+human speed. It is not on any hot path. A thousand-device fleet enrolling from
+scratch takes about two and a half minutes, which is tolerable, and no customer
+is enrolling a thousand devices a second.
+
+**Done looks like:** the `ORDER BY` no longer forces a buffer — a per-network
+"next free" cursor, or an index the optimiser can walk in order without sorting.
+
+**Measure it:** fill a `/16` and time a claim at 1, 1,000 and 4,000 allocations.
+Require the result to be flat *and* close to the `/24` figure, not merely flat —
+flat is what it already is.
+
+---
+
+## B2 — Ten files exceed the ~400-line guideline
+
+**Found:** verification of 1.0.8, known limitation 7.
+**Severity:** maintainability only.
+
+| File | Lines |
+|---|---|
+| `app/Updater/UpdateSteps.php` | 738 |
+| `tests/DatabaseTests.php` | 716 |
+| `tests/HttpTests.php` | 683 |
+| `install/Installer.php` | 667 |
+| `tests/UnitTests.php` | 587 |
+| `tests/StaticAnalysisTests.php` | 516 |
+| `install/index.php` | 471 |
+| `app/Updater/UpdateManager.php` | 434 |
+| `app/Updater/BackupManager.php` | 417 |
+| `app/Updater/GithubClient.php` | 409 |
+
+`UpdateSteps.php` is the clear offender: it holds a step machine *and* eleven
+steps. `BackupManager` was split this way during 1.0.7 (517 → 417 plus a
+240-line `ArchiveStore`) and that is the pattern to follow.
+
+**Why it is parked:** refactoring working, verified code before the product
+exists is churn. These files are covered by the suite; splitting them buys
+readability, not correctness, and every edit risks a regression in the one
+subsystem that has already proved it can fail silently.
+
+**Done looks like:** no file over ~400 lines, with the suite still at zero
+failures and the update/rollback drills still passing.
+
+---
+
+---
+
+## B3 — Enrolment throttling blocks a bulk rollout — **DONE in 1.6.0**
+
+**Found:** 21 September 2026, by the lab gate running out of enrolments.
+**Fixed:** 21 September 2026. Pulled forward out of the backlog as a launch
+blocker. Failures are limited strictly (15 per 15 minutes per address, recorded
+after the attempt); volume is limited generously (1,200 an hour, a flood
+ceiling rather than an abuse control); join codes carry their own use limit.
+
+Drilled in `enrol-throttle`: 50 devices from one address all enrol, and 20 bad
+join codes from that same address get throttled. Both in the same run, so
+neither result can be an artefact of the other.
+
+The original entry follows, because the reasoning is what made the fix right.
+
+Enrolment and claim share a limit of 60 requests per hour per IP address
+(`security.enroll_rate_per_hour`). A customer installing the agent on forty
+machines in one office comes from one public address: forty enrolments plus
+their claim polls is well past sixty, and the installer sees "Too many
+requests" partway through the afternoon.
+
+**Do not just raise the number.** The thing worth limiting tightly is a
+*failed* enrolment — that is the join-code brute-force vector. A successful
+enrolment, and a claim poll from a device the panel has already issued a uid
+to, are not. Counting the two separately is the fix: strict on failures,
+generous on successes.
+
+**Cost of leaving it:** the first multi-seat installation fails partway, in
+front of the customer, with a message that sounds like our fault because it is.
+
+---
+
+## B4 — Relay recovery takes 15–20 seconds
+
+**Measured**, repeatedly, in `services/lab/run-all.sh`:
+
+| Event | Loss over a 40-second window | Outage |
+|---|---|---|
+| Relay killed and restarted, 20-second rebind | 37% | ~15s |
+| Relay killed and restarted, 5-second rebind | 36.5%, 37% | ~15s |
+| Relay killed for good, traffic moves to another | 49%, 49.5%, 50% | ~20s |
+
+Shortening the rebind interval from twenty seconds to five did **not** make a
+restart cheaper — the two figures are the same — so something else dominates
+that recovery, most likely the WireGuard handshake backoff already in progress
+by the time the relay returns. The shorter interval earns its place by making
+*failover* possible in about fifteen seconds instead of a minute.
+
+Fifteen seconds is a floor for the current design: nothing tells an agent a
+relay has died except the absence of a reply, and three missed five-second
+rebinds is how long that takes to establish.
+
+**Two ways to beat it, neither built:**
+
+1. Watch the data path rather than the rebind acknowledgement. Traffic stopping
+   is a faster signal than a keepalive going unanswered, but it needs care not
+   to mistake an idle conversation for a dead relay.
+2. Have the coordinator health-check its own fleet and push a new offer the
+   moment a relay stops answering it, rather than waiting for agents to
+   notice independently.
+
+**Cost of leaving it:** twenty seconds of silence when a relay dies. Tolerable
+for a shop's CCTV, visibly worse than what Tailscale and ZeroTier manage, and
+the kind of thing a customer notices once and remembers.
+
+Deferred deliberately, 21 September 2026.
+
+---
+
+## B5 — One agent install belongs to exactly one customer
+
+**Found:** 21 September 2026, while building subnet-router mode.
+**Severity:** architectural. Nothing is broken; a thing AK Support needs does
+not exist.
+
+`devices.network_id` is a single column, so a support laptop that services
+twenty customers needs twenty enrolments, and one agent install holds one. The
+overlay works perfectly for each customer in turn and cannot hold two at once.
+
+**Subnet mapping removed the hard half of this.** The original entry said
+twenty hotels on 192.168.1.0/24 would collide in one routing table however good
+the membership model was, and that reaching two at once needed per-network
+routing tables — policy routing on Linux, and on Windows a mechanism that does
+not obviously exist. That is no longer true: every advertised LAN already has a
+prefix of its own, so twenty customers are twenty distinct prefixes in one
+ordinary routing table.
+
+What is left is membership: a device belonging to many networks — a join table,
+a peer set per network, and an identity per network or one shared across them.
+That choice has consequences for revocation, because revoking a laptop from one
+customer must not touch the others. It also needs the mapped-prefix pool to be
+allocated per *device* rather than per network, since one device would then see
+several networks' mappings at once.
+
+**Cost of leaving it:** a technician disconnects from one customer to reach
+another. Annoying, not blocking, and every competitor has the same problem with
+duplicate private ranges.
+
+## B6 — A zero-file update does not exercise the paths that broke before — **DONE in 1.6.1**
+
+**Found:** 21 September 2026, dogfooding 1.6.0.
+**Fixed:** 21 September 2026. `services/lab/dogfood.sh` installs the previous
+release into a scratch app root with a database and database user of its own,
+updates it forward through our own updater, and rolls it back. It fails unless
+files were genuinely written, the new ones genuinely removed again, and every
+file byte-identical afterwards. The scratch database, its user and the scratch
+root are destroyed on the way out, including on failure.
+
+First real run, 1.4.0 → 1.6.0 → 1.4.0: 60 files written (20 new), 4 migrations
+applied and 4 reversed, 40 restored and 20 removed, 315 files byte-identical,
+schema and table contents back to their fingerprints. 14 checks, all passed.
+
+`services/lab/release.sh` now runs the four gates together, and this is one of
+them.
+
+The original entry follows.
+
+The release is built on the machine it is installed on, so APPLY had no files
+to write and the file-writing and file-removing paths were skipped. Those are
+the paths the 1.3.x P1 lived in — FINALISE pruning its own rollback journal,
+leaving new files on an old schema and reporting success.
+
+**What done looks like:** a second installation, checked out at the previous
+release with a database of its own, updated forward to the release being
+shipped, and then rolled back — with a checksum manifest either side proving
+the files genuinely changed and genuinely came back. Attempted for 1.6.0 and
+not completed: the drill needs a scratch database, which this environment does
+not let a script create.
+
+**Cost of leaving it:** a regression in APPLY or in the rollback journal would
+not be caught by the release gate, only by a customer.
+
+---
+
+## Rules for this file
+
+An entry belongs here only if it is **measured**, **not a correctness bug**, and
+**not blocking**. Anything that fails, corrupts, or misreports gets fixed when
+it is found — that is what the eight defects in `VERIFICATION_REPORT.md` were,
+and none of them was ever a candidate for this list.
+
+## Deferred from 1.9.5 (2026-09-22)
+
+Not cut for time. Each of these is a thing I cannot do from here, or a thing I
+decided not to do, and each says which.
+
+- **Code signing.** The pack builder signs every executable when
+  `AKCONNECT_SIGN_CMD` is set, and prints "UNSIGNED" in capitals when it is
+  not. There is no certificate. An OV or EV code-signing certificate is bought
+  from a certificate authority, with identity documents, and until there is one
+  every customer meets SmartScreen's "Windows protected your PC" naming an
+  unknown publisher. This is the single biggest remaining gap between this and
+  looking like a normal product, and no amount of code closes it.
+
+- **A branded tray icon.** The tray loads `akconnect.ico` and
+  `akconnect-warning.ico` from the program folder when they are there and falls
+  back to a stock Windows icon when they are not. Nobody has drawn them.
+
+- **The tray shows no per-peer detail.** It says how many computers are
+  reachable, not which. That is the right amount for a shopkeeper; a technician
+  wants the list, and the panel has it.
+
+- **Alerts are WhatsApp-shaped only in configuration.** The transport is a
+  configured HTTP request, so it will drive any API — but nothing has been
+  sent through bulk.akdwk.in, because the account's field names and token are
+  AK's to fill in. Test it with the button on the Alerts page before relying
+  on it.
+
+- **B12 from 1.9.4 is only half fixed.** Unanswered announcements now move the
+  agent to a different port. The one-off `address family not supported by
+  protocol` remains undiagnosed, and it is not the same fault.
+
+## Deferred from 1.9.4 (2026-09-22)
+
+Cut to get 1.9.4 out quickly. None of these block a release; all of them are
+things I would otherwise have done in the same session.
+
+- **B12 — `address family not supported by protocol`.** Seen once, in the run
+  that proved the reconnect drill red against 1.9.3's relay, and in none of the
+  passing runs. The agent's sends failed with EAFNOSUPPORT and a rebind did not
+  clear it. Not diagnosed, not claimed fixed. The socket-recovery code reports
+  it and keeps trying rather than pretending.
+
+- **B13 — relay offers are logged on one side only.** `offerToPeer()` sends the
+  matching offer to the other end and says nothing, so a coordinator log shows
+  one "offered" line for a pair and reads as though only one side was told.
+  That cost real time during defect 24. One log line.
+
+- **B14 — the coordinator re-verifies on a one-minute TTL, per device.** A
+  deliberate load choice that has never been measured at a thousand devices.
+  Single-flight and "only push when the set changed" should keep it well under
+  the worst case; should is not a measurement.
+
+- **B15 — `upgrade-edge.sh` is past 700 lines.** Over the ~400-line guideline
+  and now carrying the hand-over, the skew fallback and the summary logic. Worth
+  splitting once it stops changing every day.
+
+## Defect 23 — two devices behind one router (first in 1.9.5)
+
+Confirmed from the field: both PCs on one office router, one public IP. The
+laptop's hellos reach the coordinator from 150.129.167.50:51820 every twenty
+seconds, and the replies never come back — the laptop reports "Coordinator: not
+reachable" while its own log says it is announcing. The pair sat at
+"connecting" until one machine was moved to a different ISP.
+
+Root cause, confirmed in the code rather than guessed: `DefaultListenPort =
+51820` is fixed for every device and is not persisted anywhere, so behind a
+shared router exactly one agent can hold the public 51820 mapping. The agent
+requests no UPnP or NAT-PMP mapping itself — there is no such code — so the
+collision is the router's, and the agent has no way to notice or recover from
+it. The comment on that constant says a stable port "makes a router's port
+forwarding possible", which is the assumption that breaks the moment a site has
+two PCs.
+
+The lab could not have found this: every NAT topology put exactly one device
+behind each gateway.
+
+Done so far: `topology.sh shared [forward]` builds two agents on one LAN behind
+one public IP, with port-preserving masquerade (what a home router does, so the
+first device to send keeps 51820 and the second does not) and an optional stale
+forward of public :51820 to the first machine, which reproduces replies being
+delivered to the wrong PC.
+
+Still to do, in order:
+ 1. The scenario on that topology, plus a third device behind a second NAT;
+    all pairs connect within 30s. Must fail on 1.9.4.
+ 2. (b) A per-device listen port, chosen once and remembered in the agent's
+    state, replacing the fixed 51820. This is the root fix.
+ 3. (c) Hellos unacked for N intervals — sends succeeding, no reply — treated
+    like the dead-socket case, but rebinding on a NEW local port.
+ 4. (a) Prefer a same-subnet candidate when one exists, so two machines on one
+    LAN take the LAN path rather than hairpinning through the router.
+
+## Defect 30 — the service is not running after a Windows restart (1.9.5)
+
+Reported: StartType is Automatic, the service is not running after a reboot,
+and there is **no SCM event** about it. Part of the acceptance test —
+"survives a reboot" — so it ranks with defect 23.
+
+The configuration is not the fault. `winsvc_windows.go` sets
+`StartType: mgr.StartAutomatic` on both create and re-install, and the field
+report confirms Automatic. What is missing is everything around it, and the
+absence of an SCM event is the clue that says which:
+
+**1. A clean exit is never retried, and is never reported.** `Execute` returns
+`false, 0` whenever the agent's run function returns nil, and SCM reads exit
+code 0 as a graceful stop. `SetRecoveryActions` only applies to *failures*
+unless `SERVICE_CONFIG_FAILURE_ACTIONS_FLAG` is set — and it is set nowhere in
+this tree. So any path where the agent returns nil leaves the service stopped
+for good with nothing logged, which on a reboot is indistinguishable from "it
+never started". `loop()` alone has five `return nil` paths, one of them
+revocation.
+
+**2. Recovery gives up after about ninety-five seconds.** Three restart actions
+at 5s, 30s and 60s, and nothing after. An Automatic service starts very early
+in boot; if the network stack, DNS or the Wintun driver is not ready for longer
+than that, the agent fails three times and stays dead until somebody starts it
+by hand. There is no `Dependencies` on Tcpip or Dnscache and no
+`DelayedAutoStart`.
+
+**3. The agent exits on conditions it should sit through.** A networking agent
+that gives up because the panel was unreachable at boot is the wrong shape.
+This is the same lesson as the dead-socket defect: keep trying, say so, and let
+the panel show the problem.
+
+Fix, in order:
+ 1. `SetRecoveryActionsOnNonCrashFailures(true)`, so a clean stop is retried
+    like any other, and add a final restart action so recovery never runs out.
+ 2. `DelayedAutoStart` plus a dependency on the network, so the first attempt
+    is not made before there is a network to use.
+ 3. Make the run loop sit through transient failures rather than returning nil,
+    and return a non-zero exit code whenever it stops for a reason that is not
+    a requested stop — so SCM has something to log and act on.
+ 4. Log to the Event Log on start AND on every exit path, with the reason. The
+    reported symptom is the absence of any event; a service that cannot say why
+    it stopped is one nobody can support remotely.
+
+Not reproducible in this lab — there is no Windows host. Stage 16 of the field
+runbook now includes the reboot, so the acceptance test covers it.

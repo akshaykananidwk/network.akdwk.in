@@ -112,6 +112,10 @@ code, pre { font-family: var(--font-mono); font-size: .85em; }
 code { background: var(--bg-sunken); padding: .12em .38em; border-radius: var(--radius-sm); }
 code.block { display: block; margin: .2rem 0; }
 code.break { word-break: break-all; }
+/* The command that clears a "behind" badge, printed beside it. Allowed to wrap
+   rather than widen the table, because a path is long and a horizontal
+   scrollbar inside a table cell is where a command goes to be misread. */
+code.inline-command { margin-left: .4rem; white-space: normal; word-break: break-word; }
 
 .text-muted { color: var(--text-muted); }
 .text-sm { font-size: .82rem; }
@@ -217,6 +221,8 @@ code.break { word-break: break-all; }
 .nav-icon[data-icon="relay"]::before { content: "⇄"; }
 .nav-icon[data-icon="download"]::before { content: "⇩"; }
 .nav-icon[data-icon="archive"]::before { content: "⬓"; }
+.nav-icon[data-icon="globe"]::before { content: "◍"; }
+.nav-icon[data-icon="bell"]::before { content: "◔"; }
 
 .sidebar-foot { padding: var(--space-3); border-top: 1px solid var(--border); }
 .nav-avatar {
@@ -433,6 +439,13 @@ textarea { resize: vertical; font-family: var(--font-mono); font-size: .82rem; }
 .conn-direct { color: var(--success); }
 .conn-relay { color: var(--warning); }
 .conn-offline { color: var(--text-muted); }
+/* Online, heartbeating, no path to a peer yet. Not a fault and not offline. */
+.conn-connecting { color: var(--info, #3b82f6); }
+/* Heartbeating, and nothing answers its announcements. Deliberately not the
+   same colour as "connecting": one of them resolves itself and the other one
+   never will until somebody changes a firewall. */
+.conn-blocked { color: var(--warning); font-weight: 500; }
+.conn-path { font-size: 0.85em; text-transform: lowercase; }
 
 .badge-dot {
     position: absolute; top: 2px; right: 2px;

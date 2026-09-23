@@ -1,5 +1,14 @@
 # ---------------------------------------------------------------------------
 # Front controller + hardening. Apache 2.4 + mod_rewrite required.
+#
+# The repository root IS the webroot. There is no public/ directory: this file
+# is what keeps the application directories, the configuration and the
+# repository's own contents out of the browser, and every rule below earns its
+# place.
+#
+# Tested against Apache 2.4 with PHP-FPM (mod_proxy_fcgi), which is what
+# aaPanel installs and what a production deployment found three separate faults
+# in. The gate now builds that combination — see services/lab/webtarget/.
 # ---------------------------------------------------------------------------
 Options -Indexes -MultiViews
 DirectoryIndex index.php
@@ -12,7 +21,12 @@ DirectoryIndex index.php
 
     # Block direct web access to non-public application directories. Defence in
     # depth: each of these also ships its own "Deny from all" .htaccess.
-    RewriteRule ^(app|config|database|storage|cli|services|tests|vendor)(/|$) - [F,L]
+    #
+    # deploy/ and docs/ were added after a production install found them
+    # readable. deploy/ holds systemd units and an install script that names
+    # file paths and service accounts; docs/ is design documentation. Neither
+    # is a secret and neither is anybody else's business.
+    RewriteRule ^(app|config|database|storage|cli|services|tests|vendor|deploy|docs)(/|$) - [F,L]
 
     # Never rewrite real files or directories (assets, installer, health check).
     RewriteCond %{REQUEST_FILENAME} -f [OR]
@@ -22,6 +36,40 @@ DirectoryIndex index.php
     RewriteRule ^ index.php [L]
 </IfModule>
 
+# The repository's own files. A .git directory served over the web hands over
+# the entire source history, including anything ever committed by mistake.
+RedirectMatch 404 (?i)/\.git(/|$)
+RedirectMatch 404 (?i)/\.github(/|$)
+
+<FilesMatch "^(\.env|\.env\..*|composer\.(json|lock)|update\.json|VERSION|.*\.sql|.*\.log|.*\.md|.*\.sh|.*\.yml|.*\.yaml|\.gitignore|\.gitattributes)$">
+    Require all denied
+</FilesMatch>
+
+# ---------------------------------------------------------------------------
+# The Authorization header.
+#
+# Apache does not pass it to FastCGI unless it is told to, so every agent call
+# arrived with no credentials and the panel answered "provide the device token
+# as a Bearer token". Nothing about that is visible from the panel's side — the
+# request simply looks unauthenticated — and the agent read it as a revoked
+# device and told the customer to reset. A working install looked like a
+# revoked one.
+#
+# CGIPassAuth is the supported way and needs Apache 2.4.13 or newer. The
+# SetEnvIf line does the same thing for older builds, which aaPanel and some
+# distribution packages still ship; between them every Apache in the field is
+# covered, and having both is harmless.
+# ---------------------------------------------------------------------------
+<IfModule mod_cgi.c>
+    CGIPassAuth On
+</IfModule>
+<IfModule mod_proxy_fcgi.c>
+    CGIPassAuth On
+</IfModule>
+<IfModule mod_setenvif.c>
+    SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1
+</IfModule>
+
 <IfModule mod_headers.c>
     Header always set X-Content-Type-Options "nosniff"
     Header always set X-Frame-Options "DENY"
@@ -29,10 +77,30 @@ DirectoryIndex index.php
     Header always unset X-Powered-By
 </IfModule>
 
-<FilesMatch "^(\.env|\.env\..*|composer\.(json|lock)|update\.json|VERSION|.*\.sql|.*\.log)$">
-    Require all denied
-</FilesMatch>
-
-php_flag display_errors Off
-php_value upload_max_filesize 16M
-php_value post_max_size 20M
+# ---------------------------------------------------------------------------
+# PHP settings.
+#
+# php_flag and php_value are mod_php directives. Under PHP-FPM — which is what
+# aaPanel installs, and what most modern deployments use — Apache does not know
+# them and returns 500 for every request on the site. Guarded, they are applied
+# where they work and ignored where they do not.
+#
+# The same values are set in php.ini terms by the installer's requirement
+# check, which tells an operator what to put in their pool configuration when
+# mod_php is not in use.
+# ---------------------------------------------------------------------------
+<IfModule mod_php.c>
+    php_flag display_errors Off
+    php_value upload_max_filesize 16M
+    php_value post_max_size 20M
+</IfModule>
+<IfModule mod_php7.c>
+    php_flag display_errors Off
+    php_value upload_max_filesize 16M
+    php_value post_max_size 20M
+</IfModule>
+<IfModule mod_php8.c>
+    php_flag display_errors Off
+    php_value upload_max_filesize 16M
+    php_value post_max_size 20M
+</IfModule>

@@ -96,7 +96,10 @@ final class UpdateSteps
         }
 
         // 4. Writability of everything we will touch.
-        foreach (['app', 'assets', 'database', 'cli', 'storage', 'storage/updates', 'storage/backups'] as $directory) {
+        foreach ([
+            'app', 'assets', 'database', 'cli', 'storage',
+            'storage/updates', 'storage/backups', 'storage/downloads',
+        ] as $directory) {
             $path = $this->appRoot . '/' . $directory;
             if (is_dir($path) && !is_writable($path)) {
                 $problems[] = 'Directory is not writable: ' . $directory;
@@ -236,7 +239,11 @@ final class UpdateSteps
             throw new UpdateException('The pre-update backup failed verification; refusing to continue.', 'BACKUP_DB');
         }
 
-        $message = 'Backup verified — files and database both match their checksums.';
+        // Not "both match their checksums": since 1.0.7 the archive is opened
+        // and the dump re-read, and saying only what a checksum proves is how
+        // a zero-byte archive came to be reported as verified in the first
+        // place. The per-check details above carry the specifics.
+        $message = 'Backup verified — both artefacts were read back, not just checksummed.';
         $log->info($message);
 
         return $message;
@@ -355,7 +362,11 @@ final class UpdateSteps
             @mkdir($liveMigrations, 0755, true);
         }
 
-        $copied = 0;
+        // Remembered, not just counted: a rollback has to delete the files it
+        // introduced, or migrate.php reports them as pending and invites an
+        // operator to re-apply a migration from the version they rolled back
+        // from.
+        $copied = [];
         foreach (scandir($stagedMigrations) ?: [] as $entry) {
             if ($entry === '.' || $entry === '..') {
                 continue;
@@ -363,12 +374,22 @@ final class UpdateSteps
             $source = $stagedMigrations . '/' . $entry;
             $target = $liveMigrations . '/' . basename($entry);
             if (is_file($source) && !is_file($target) && copy($source, $target)) {
-                $copied++;
+                $copied[] = basename($entry);
             }
         }
 
         $runner = new MigrationRunner($liveMigrations, DB::prefix());
-        $result = $runner->run($named === [] ? null : $named);
+
+        try {
+            $result = $runner->run($named === [] ? null : $named);
+        } finally {
+            // After the runner, not before: the column this list goes into was
+            // itself added by a migration, so writing to it first would fail on
+            // the very update that introduces it. In a finally block because a
+            // failed migration still needs rolling back, and the rollback needs
+            // to know which files to remove.
+            $this->recordCopied($update, $copied, $log);
+        }
 
         if ($result['applied'] === []) {
             $message = 'No pending migrations.';
@@ -388,11 +409,31 @@ final class UpdateSteps
             count($result['applied']),
             $result['batch'],
             $result['elapsed_ms'],
-            $copied
+            count($copied)
         );
         $log->info($message);
 
         return $message;
+    }
+
+    /**
+     * @param array<string,mixed> $update
+     * @param list<string>        $copied
+     */
+    private function recordCopied(array $update, array $copied, UpdateLog $log): void
+    {
+        if ($copied === []) {
+            return;
+        }
+
+        try {
+            AppUpdate::recordCopiedMigrations((int) $update['id'], $copied);
+        } catch (\Throwable $e) {
+            // Worth saying, never worth failing an otherwise-good update over:
+            // the cost is a rollback that leaves these files behind, which is
+            // untidy rather than dangerous.
+            $log->info('Could not record the copied migration files: ' . $e->getMessage());
+        }
     }
 
     /** @param array<string,mixed> $update */
@@ -434,7 +475,9 @@ final class UpdateSteps
 
                 // §9.5: protected paths are never written, whatever the release
                 // contains. config.php, .env, uploads/ and storage/ survive.
-                if ($this->guard->isProtected($relative)) {
+                // The one exception is a shipped control — see
+                // PathGuard::SHIPPED_CONTROLS — which the product owns.
+                if ($this->guard->isWriteBlocked($relative)) {
                     $skippedProtected++;
                     continue;
                 }
@@ -580,17 +623,32 @@ final class UpdateSteps
         $updateId = (int) $update['id'];
         AppUpdate::succeed($updateId);
 
-        // The journal's job is done; keeping it would just consume disk and
-        // invite a stale rollback.
-        $journalPath = sprintf('%s/storage/updates/journal-%d.jsonl', $this->appRoot, $updateId);
-        (new RollbackJournal($journalPath, sprintf('%s/storage/updates/journal-%d-files', $this->appRoot, $updateId)))->discard();
-
         $this->cleanStaging((string) $update['to_commit']);
 
+        // The journal is deliberately kept. It is the per-file undo list that
+        // "roll back to this point" in History replays; discarding it here
+        // would leave that button able to reverse migrations but restore no
+        // files at all. It is pruned on the same retention count as the
+        // backups it pairs with.
         $retention = (int) UpdateSetting::current()['backup_retention'];
         $pruned = BackupManager::make()->prune($retention);
         if ($pruned['removed'] > 0) {
             $log->info(sprintf('Pruned %d old backup(s), freeing %s.', $pruned['removed'], UpdateEnv::humanBytes($pruned['freed_bytes'])));
+        }
+
+        // This update's own journal is protected: it is the undo list for the
+        // version that has just gone live, and it is the one a rollback needs.
+        $prunedJournals = RollbackJournal::pruneDirectory(
+            $this->appRoot . '/storage/updates',
+            $retention,
+            $updateId
+        );
+        if ($prunedJournals['removed'] > 0) {
+            $log->info(sprintf(
+                'Pruned %d old rollback journal(s), freeing %s.',
+                $prunedJournals['removed'],
+                UpdateEnv::humanBytes($prunedJournals['freed_bytes'])
+            ));
         }
 
         Config::set('app.version', (string) $update['to_version']);

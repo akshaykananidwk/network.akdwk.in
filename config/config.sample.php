@@ -19,8 +19,8 @@ return [
         'version'         => '1.0.0',
         'env'             => 'production',   // production | staging | local
         'debug'           => false,          // NEVER true in production
-        'url'             => 'https://net.akdwk.in',
-        'domain'          => 'net.akdwk.in',
+        'url'             => 'https://network.akdwk.in',
+        'domain'          => 'network.akdwk.in',
         'base_path'       => '',             // '' at the domain root, '/panel' in a subfolder
         'timezone'        => 'Asia/Kolkata',
         'locale'          => 'en',
@@ -32,7 +32,7 @@ return [
     'brand' => [
         'name'          => 'AK Connect',
         'org'           => 'AK Computer',
-        'support_email' => 'support@net.akdwk.in',
+        'support_email' => 'support@network.akdwk.in',
         'logo'          => '',               // path under uploads/, empty = wordmark
         'primary_color' => '#2563eb',
         'accent_color'  => '#0ea5e9',
@@ -86,7 +86,7 @@ return [
         'user'        => '',
         'pass'        => '',
         'security'    => 'tls',              // tls | ssl | none
-        'from'        => 'no-reply@net.akdwk.in',
+        'from'        => 'no-reply@network.akdwk.in',
         'from_name'   => 'AK Connect',
         'verify_peer' => true,
         'timeout'     => 15,
@@ -97,12 +97,13 @@ return [
         'port'          => 8443,
         'internal_url'  => 'http://127.0.0.1:8080',
         'shared_secret' => '',               // HMAC secret for panel <-> coordinator
-        'public_host'   => 'coord.net.akdwk.in',
+        'public_key'    => '',               // coordinator's X25519 public key, from 'akconnect-coordinator keygen'
+        'public_host'   => 'coord.network.akdwk.in',
     ],
 
     'relays' => [
         // Bootstrap list handed to agents before they learn the live set.
-        // ['name' => 'in-bom-1', 'host' => 'relay1.net.akdwk.in', 'port' => 51820, 'public_key' => '...']
+        // ['name' => 'in-bom-1', 'host' => 'relay1.network.akdwk.in', 'port' => 51820, 'public_key' => '...']
     ],
 
     'network' => [

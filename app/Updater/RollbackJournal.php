@@ -198,6 +198,96 @@ final class RollbackJournal
         return ['restored' => $restored, 'deleted' => $deleted, 'failed' => $failed];
     }
 
+    /**
+     * Keep only the newest journals in a directory, discarding the rest.
+     *
+     * A journal outlives the update that wrote it: without it, "roll back to
+     * this point" in History has no per-file undo list and restores nothing.
+     * It is still disk, so it is pruned on the same retention count as the
+     * backups it pairs with. $protectUpdateId names one journal that must
+     * survive whatever the ordering says — see below.
+     *
+     * @return array{removed:int,freed_bytes:int}
+     */
+    public static function pruneDirectory(string $directory, int $keep, int $protectUpdateId = 0): array
+    {
+        $keep = max(1, $keep);
+
+        $journals = glob($directory . '/journal-*.jsonl') ?: [];
+
+        // Never prune the update that is asking. Retention is ordered by
+        // update id, and ids are not monotonic across a database restore: a
+        // restore rewinds app_updates, so the next update gets a low id while
+        // journals with high ids are still on disk. Ordering alone then makes
+        // the newest journal look like the oldest, and FINALISE deletes the
+        // undo list for the update it has just finished — leaving a rollback
+        // that can restore the database and not the files.
+        //
+        // That is not hypothetical. It happened on a deployment rebuilt from a
+        // backup, and the rollback afterwards reported success while leaving
+        // new files in place against an old schema.
+        if ($protectUpdateId > 0) {
+            $journals = array_values(array_filter(
+                $journals,
+                static fn (string $path): bool => self::updateIdOf($path) !== $protectUpdateId
+            ));
+        }
+
+        if (count($journals) <= $keep) {
+            return ['removed' => 0, 'freed_bytes' => 0];
+        }
+
+        // Newest update id first, so the most recent runs keep their undo list.
+        usort($journals, static function (string $a, string $b): int {
+            return self::updateIdOf($b) <=> self::updateIdOf($a);
+        });
+
+        $removed = 0;
+        $freed = 0;
+
+        foreach (array_slice($journals, $keep) as $path) {
+            $updateId = self::updateIdOf($path);
+            if ($updateId === 0) {
+                continue;
+            }
+
+            $files = sprintf('%s/journal-%d-files', $directory, $updateId);
+            $freed += self::sizeOf($path) + self::sizeOf($files);
+
+            (new self($path, $files))->discard();
+            $removed++;
+        }
+
+        if ($removed > 0) {
+            Logger::info('update', 'Old rollback journals pruned', ['removed' => $removed, 'freed_bytes' => $freed]);
+        }
+
+        return ['removed' => $removed, 'freed_bytes' => $freed];
+    }
+
+    private static function updateIdOf(string $journalPath): int
+    {
+        return preg_match('/journal-(\\d+)\\.jsonl$/', $journalPath, $m) === 1 ? (int) $m[1] : 0;
+    }
+
+    /** Bytes used by a file, or by a directory tree. */
+    private static function sizeOf(string $path): int
+    {
+        if (is_file($path)) {
+            return (int) filesize($path);
+        }
+        if (!is_dir($path)) {
+            return 0;
+        }
+
+        $bytes = 0;
+        foreach (glob($path . '/*') ?: [] as $child) {
+            $bytes += self::sizeOf($child);
+        }
+
+        return $bytes;
+    }
+
     /** Discard the journal and its preserved copies after a successful update. */
     public function discard(): void
     {

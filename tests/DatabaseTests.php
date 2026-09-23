@@ -11,6 +11,7 @@ use App\Core\ForbiddenException;
 use App\Core\LimitExceededException;
 use App\Core\NotFoundException;
 use App\Core\Rbac;
+use App\Core\ValidationException;
 use App\Middleware\TenantScope;
 use App\Models\Device;
 use App\Models\IpAllocation;
@@ -18,6 +19,7 @@ use App\Models\JoinCode;
 use App\Models\MigrationRecord;
 use App\Models\Network;
 use App\Models\Plan;
+use App\Models\Relay;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Services\AclService;
@@ -44,11 +46,19 @@ final class DatabaseTests
 
     public static function run(): void
     {
+        // Outside the transaction, deliberately: the runner applies real
+        // migrations, and MySQL commits implicitly on DDL. Run inside, a
+        // single pending migration would end the transaction and silently
+        // commit every fixture created up to that point — the suite would
+        // still pass while leaving rows behind in the database.
+        self::migrationLedger();
+
+        $before = self::rowCensus();
+
         DB::begin();
 
         try {
             self::seedFixtures();
-            self::migrationLedger();
             self::tenantIsolation();
             self::ipamAllocation();
             self::deviceLifecycle();
@@ -56,12 +66,60 @@ final class DatabaseTests
             self::planLimits();
             self::rbacMatrix();
             self::sqlInjectionResistance();
+            // The two production defects that need a database to reproduce.
+            self::superAdminCreatesNetwork();
+            self::relayWithoutAPublicKey();
+            // 1.9.2: the one-click install path.
+            self::reinstallKeepsItsIdentity();
+            self::preApprovedJoinCode();
         } finally {
             // Nothing this suite created survives.
             DB::rollback();
             Auth::reset();
             TenantScope::reset();
         }
+
+        self::isolationHeld($before);
+    }
+
+    /**
+     * Row counts for the tables the suite writes to.
+     *
+     * @return array<string,int>
+     */
+    private static function rowCensus(): array
+    {
+        $census = [];
+        foreach (['tenants', 'users', 'networks', 'devices', 'ip_allocations', 'join_codes', 'api_keys'] as $table) {
+            $census[$table] = (int) DB::scalar('SELECT COUNT(*) FROM ' . DB::table($table));
+        }
+
+        return $census;
+    }
+
+    /**
+     * The suite's own guarantee, checked rather than asserted in a comment.
+     *
+     * A rolled-back transaction that quietly committed is worse than a failing
+     * test: every later run starts from data it did not create and cannot
+     * account for.
+     *
+     * @param array<string,int> $before
+     */
+    private static function isolationHeld(array $before): void
+    {
+        TestCase::group('Isolation — the suite leaves no trace');
+
+        $after = self::rowCensus();
+        $leaked = [];
+        foreach ($before as $table => $count) {
+            if (($after[$table] ?? $count) !== $count) {
+                $leaked[] = sprintf('%s %+d', $table, ($after[$table] ?? $count) - $count);
+            }
+        }
+
+        TestCase::assert($leaked === [], 'every row the suite created was rolled back',
+            $leaked === [] ? count($before) . ' tables unchanged' : implode(', ', $leaked));
     }
 
     // ------------------------------------------------------------ fixtures
@@ -152,6 +210,41 @@ final class DatabaseTests
 
         Auth::reset();
         Auth::setApiActor($user, self::$fixtures[$key . '_tenant'], ['*']);
+    }
+
+    /**
+     * A platform super admin: no tenant of their own, and the wildcard.
+     *
+     * Created with raw SQL because the User model refuses to insert into a
+     * tenant-scoped table without a tenant_id — which is the right rule, and
+     * exactly why a super admin is not an ordinary row.
+     */
+    private static function asSuperAdmin(): void
+    {
+        Auth::reset();
+        TenantScope::reset();
+
+        if (!isset(self::$fixtures['super_admin'])) {
+            DB::execute(
+                'INSERT INTO ' . DB::table('users')
+                . ' (tenant_id, name, email, password_hash, role, status, timezone, created_at, updated_at)'
+                . ' VALUES (NULL, :name, :email, :hash, :role, \'active\', \'Asia/Kolkata\','
+                . ' UTC_TIMESTAMP(), UTC_TIMESTAMP())',
+                [
+                    'name'  => 'Platform Admin',
+                    'email' => 'platform-' . bin2hex(random_bytes(4)) . '@example.test',
+                    'hash'  => Crypto::hashPassword('Fixture!Pass2026'),
+                    'role'  => Rbac::SUPER_ADMIN,
+                ]
+            );
+            self::$fixtures['super_admin'] = (int) DB::lastInsertId();
+        }
+
+        $_SESSION['user_id'] = self::$fixtures['super_admin'];
+        unset($_SESSION['tenant_id'], $_SESSION['impersonating']);
+        $_SESSION['role'] = Rbac::SUPER_ADMIN;
+
+        Auth::reset();
     }
 
     // ------------------------------------------------------------ migrations
@@ -606,6 +699,287 @@ final class DatabaseTests
     }
 
     // ------------------------------------------------- injection resistance
+
+    // ---------------------------------------- production defect 6 (1.9.1)
+
+    /**
+     * A super admin creating a network.
+     *
+     * On 1.9.0 this produced "Please correct the highlighted fields" with
+     * nothing highlighted: NetworkService demanded a tenant_id, the actor had
+     * none because that is what makes them a super admin, the form had no
+     * field to supply one, and ValidationException's user-facing message threw
+     * away the only sentence that said what was wrong.
+     */
+    private static function superAdminCreatesNetwork(): void
+    {
+        TestCase::group('Defect 6 — a super admin can create a network for a customer');
+
+        self::asSuperAdmin();
+
+        // 1. The message. A validation error on a field that is not on the
+        //    form must still say what the problem is.
+        try {
+            NetworkService::create(['name' => 'Orphan', 'cidr' => '10.91.0.0/24']);
+            TestCase::assert(false, 'creating a network with no customer is refused');
+        } catch (ValidationException $e) {
+            TestCase::assert(
+                array_key_exists('tenant_id', $e->errors()),
+                'the error names the tenant_id field'
+            );
+            TestCase::assert(
+                !str_starts_with($e->userMessage(), 'Please correct the highlighted fields.')
+                    || count($e->errors()) > 1,
+                'a single error is shown as itself, not as "correct the highlighted fields"',
+                $e->userMessage()
+            );
+            TestCase::assertContains('customer', strtolower($e->userMessage()),
+                'and the message says a customer is needed');
+        }
+
+        // 2. An id that is not a customer is refused rather than silently
+        //    creating a network nobody owns.
+        TestCase::assertThrows(
+            ValidationException::class,
+            static fn () => NetworkService::create([
+                'name'      => 'Ghost',
+                'cidr'      => '10.92.0.0/24',
+                'tenant_id' => 2147483600,
+            ]),
+            'a tenant_id that does not exist is refused'
+        );
+
+        // 3. The working path.
+        self::asSuperAdmin();
+        $network = NetworkService::create([
+            'name'      => 'Platform-created HQ',
+            'cidr'      => '10.93.0.0/24',
+            'tenant_id' => self::$fixtures['beta_tenant'],
+        ]);
+
+        TestCase::assertSame(
+            self::$fixtures['beta_tenant'],
+            (int) $network['tenant_id'],
+            'the network belongs to the customer that was chosen'
+        );
+        TestCase::assert((int) $network['id'] > 0, 'and it was actually written');
+
+        // 4. And the customer sees it as theirs — the scope was not merely
+        //    bypassed for the insert.
+        self::asTenantAdmin('beta');
+        TestCase::assert(
+            Network::find((int) $network['id']) !== null,
+            'Beta reads the network the platform admin created for it'
+        );
+        self::asTenantAdmin('alpha');
+        TestCase::assertSame(
+            null,
+            Network::find((int) $network['id']),
+            'and Alpha still cannot'
+        );
+    }
+
+    // ---------------------------------------- one-click install (1.9.2)
+
+    /**
+     * Running the installer again over an existing install.
+     *
+     * The second PC's install was attempted several times, and each attempt
+     * re-presented the same join code. A single-use code would have refused
+     * the machine it had itself admitted ten seconds earlier, and a
+     * pre-approved code is single-use by default — so this is the difference
+     * between "upgrades in place" and "works exactly once".
+     */
+    private static function reinstallKeepsItsIdentity(): void
+    {
+        TestCase::group('Upgrade — the installer run again keeps the identity and the code');
+
+        self::asTenantAdmin('alpha');
+
+        $networkId = self::$fixtures['alpha_network'];
+        $code = JoinCode::issue(self::$fixtures['alpha_tenant'], $networkId, null, 1, 30);
+
+        $key = base64_encode(random_bytes(32));
+
+        $first = DeviceService::enroll([
+            'join_code'     => $code['code'],
+            'public_key'    => $key,
+            'hostname'      => 'upgrade-pc',
+            'os'            => 'windows',
+            'agent_version' => '1.9.1',
+        ]);
+
+        TestCase::assert($first['device_uid'] !== '', 'the first install enrols');
+
+        $used = JoinCode::find((int) $code['id']);
+        TestCase::assertSame(1, (int) $used['uses'], 'and consumes the code\'s single use');
+
+        // The installer, run again on the same machine: same key, same code.
+        $second = DeviceService::enroll([
+            'join_code'     => $code['code'],
+            'public_key'    => $key,
+            'hostname'      => 'upgrade-pc',
+            'os'            => 'windows',
+            'agent_version' => '1.9.2',
+        ]);
+
+        TestCase::assertSame(
+            $first['device_uid'],
+            $second['device_uid'],
+            'the second install is the same device, not a new one'
+        );
+
+        $after = JoinCode::find((int) $code['id']);
+        TestCase::assertSame(
+            1,
+            (int) $after['uses'],
+            'and it did not spend a second use on a machine already on the network'
+        );
+
+        $device = Device::findByUid($second['device_uid']);
+        TestCase::assertSame('1.9.2', (string) $device['agent_version'],
+            'the upgrade is recorded on the existing row');
+
+        // A different machine still cannot use a spent single-use code.
+        TestCase::assertThrows(
+            ValidationException::class,
+            static fn () => DeviceService::enroll([
+                'join_code'  => $code['code'],
+                'public_key' => base64_encode(random_bytes(32)),
+                'hostname'   => 'someone-else',
+                'os'         => 'windows',
+            ]),
+            'a spent single-use code still refuses a new device'
+        );
+    }
+
+    /**
+     * A pre-approved join code (R4, moved earlier rather than removed).
+     *
+     * The acceptance test for a customer install is one double-click and
+     * nothing else, which cannot include an approval click. So an
+     * administrator may decide in advance: this code, this many devices, for
+     * this long, revocable. The decision is theirs, it is audited, and it is
+     * not a default.
+     */
+    private static function preApprovedJoinCode(): void
+    {
+        TestCase::group('Pre-approved join code — admitted at once, and still bounded');
+
+        self::asTenantAdmin('beta');
+
+        $networkId = self::$fixtures['beta_network'];
+
+        // The ordinary code first, to show what it does not do.
+        $plain = JoinCode::issue(self::$fixtures['beta_tenant'], $networkId, null, 1, 30);
+        $pending = DeviceService::enroll([
+            'join_code'  => $plain['code'],
+            'public_key' => base64_encode(random_bytes(32)),
+            'hostname'   => 'waits-for-approval',
+            'os'         => 'windows',
+        ]);
+        TestCase::assertSame('pending', $pending['status'],
+            'an ordinary code still leaves a device waiting (R4)');
+
+        $pendingDevice = Device::findByUid($pending['device_uid']);
+        TestCase::assertSame(null, $pendingDevice['virtual_ip'],
+            'with no address, so it can reach nothing');
+
+        // And the pre-approved one.
+        $code = JoinCode::issue(self::$fixtures['beta_tenant'], $networkId, null, 1, 30, true);
+
+        $row = JoinCode::find((int) $code['id']);
+        TestCase::assertSame(1, (int) $row['pre_approved'], 'the code records the decision');
+
+        $joined = DeviceService::enroll([
+            'join_code'  => $code['code'],
+            'public_key' => base64_encode(random_bytes(32)),
+            'hostname'   => 'one-click-pc',
+            'os'         => 'windows',
+        ]);
+
+        TestCase::assertSame('authorized', $joined['status'],
+            'a pre-approved code admits the device immediately');
+
+        $device = Device::findByUid($joined['device_uid']);
+        TestCase::assert(
+            $device['virtual_ip'] !== null && $device['virtual_ip'] !== '',
+            'and it has an overlay address without anybody clicking',
+            (string) $device['virtual_ip']
+        );
+
+        // Bounded: single use by default, so a second machine is refused
+        // outright rather than inheriting the decision.
+        TestCase::assertThrows(
+            ValidationException::class,
+            static fn () => DeviceService::enroll([
+                'join_code'  => $code['code'],
+                'public_key' => base64_encode(random_bytes(32)),
+                'hostname'   => 'second-machine',
+                'os'         => 'windows',
+            ]),
+            'a second machine cannot inherit the pre-approval'
+        );
+
+        // And revoking it locks out even the machine that used it, which is
+        // what makes the decision reversible.
+        JoinCode::revokeAllForNetwork($networkId);
+
+        TestCase::assertThrows(
+            ValidationException::class,
+            static fn () => DeviceService::enroll([
+                'join_code'  => $code['code'],
+                'public_key' => (string) Device::findByUid($joined['device_uid'])['public_key'],
+                'hostname'   => 'one-click-pc',
+                'os'         => 'windows',
+            ]),
+            'a revoked code admits nobody, not even the device that used it'
+        );
+    }
+
+    // ---------------------------------------- production defect 5 (1.9.1)
+
+    /**
+     * Registering a relay.
+     *
+     * The form demanded a Curve25519 public key that a relay does not have —
+     * it authenticates with AKCONNECT_RELAY_SECRET — so no relay could be
+     * registered without inventing one.
+     */
+    private static function relayWithoutAPublicKey(): void
+    {
+        TestCase::group('Defect 5 — a relay registers without a key it does not have');
+
+        self::asSuperAdmin();
+
+        $id = TenantScope::acrossAllTenants('test relay', static fn (): int => Relay::create([
+            'name'       => 'test-' . bin2hex(random_bytes(3)),
+            'region'     => 'in',
+            'host'       => 'relay-test.example.test',
+            'port'       => 9000,
+            'tcp_port'   => 0,
+            'public_key' => null,
+            'status'     => 'active',
+        ]));
+
+        $relay = TenantScope::acrossAllTenants('test relay', static fn (): ?array => Relay::find($id));
+
+        TestCase::assert($relay !== null, 'the relay row was written');
+        // Indexed, not coalesced: `?? 'missing'` cannot tell a NULL column
+        // from an absent one, and NULL is precisely what is being asserted.
+        TestCase::assert(array_key_exists('public_key', $relay), 'the row has a public_key column');
+        TestCase::assertSame(null, $relay['public_key'],
+            'which is NULL, because a relay has no Curve25519 key to give');
+        TestCase::assertSame(9000, (int) ($relay['port'] ?? 0),
+            'and the control port is the one the relay actually listens on');
+
+        // The form must not ask for either of the two fields that caused this.
+        $view = (string) @file_get_contents(APP_ROOT . '/app/Views/admin/relays.php');
+        TestCase::assertNotContains('name="public_key"', $view,
+            'the registration form does not ask for a public key');
+        TestCase::assertNotContains('name="tcp_port"', $view,
+            'nor for a TCP fallback port, which does not exist');
+    }
 
     private static function sqlInjectionResistance(): void
     {

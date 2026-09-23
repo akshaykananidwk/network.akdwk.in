@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests;
 
+use App\Core\Config;
 use App\Core\Crypto;
 use App\Core\DB;
 use App\Core\Rbac;
@@ -13,9 +14,11 @@ use App\Models\ApiKey;
 use App\Models\Device;
 use App\Models\JoinCode;
 use App\Models\Network;
+use App\Models\Setting;
 use App\Models\Plan;
 use App\Models\Tenant;
 use App\Models\User;
+use App\Services\CoordinatorSettings;
 use App\Services\DeviceService;
 use App\Services\NetworkService;
 
@@ -39,6 +42,12 @@ final class HttpTests
     {
         self::$baseUrl = $baseUrl;
 
+        // The suite deliberately trips the login limiter, and enrolment has a
+        // limiter of its own. Left behind, that state makes the next run fail
+        // with 429s that look like broken endpoints — so each run starts from
+        // a clean slate rather than inheriting the last one's.
+        DB::execute('DELETE FROM ' . DB::table('rate_limits'));
+
         try {
             self::createFixtures();
             self::publicSurface();
@@ -48,8 +57,16 @@ final class HttpTests
             self::authorisation();
             self::crossTenantOverHttp();
             self::apiAuthentication();
+            self::joinCodeForms();
             self::agentEndpoints();
             self::rateLimiting();
+            // 1.9.2: the edge's own upgrade path, end to end over HTTP.
+            self::edgeUpgrade();
+            self::installLink();
+            self::deviceUpdateNow();
+            self::deviceUpdateState();
+            self::coordinatorSaysUnanswered();
+            self::selfUpdate();
         } finally {
             self::removeFixtures();
         }
@@ -105,6 +122,7 @@ final class HttpTests
 
                 $network = NetworkService::create(['name' => ucfirst($key) . ' Net', 'cidr' => $cidr]);
                 self::$fixtures[$key]['network_id'] = (int) $network['id'];
+                self::$fixtures[$key]['network_name'] = (string) $network['name'];
 
                 $code = JoinCode::issue($tenantId, (int) $network['id'], null, 0, 120);
                 self::$fixtures[$key]['join_code'] = $code['code'];
@@ -534,6 +552,815 @@ final class HttpTests
 
         $client->get('/api/v1/networks', ['Authorization' => 'Bearer ' . $apiKey, 'Accept' => 'application/json']);
         TestCase::assertSame(401, $client->status(), 'a revoked key is rejected at once');
+    }
+
+    /**
+     * The edge upgrade path: ask, upload, serve.
+     *
+     * Exercised over real HTTP with a real HMAC, because that signature is the
+     * only thing standing between an unauthenticated caller and publishing an
+     * executable this panel hands to customers. A unit test of the service
+     * would not have caught a middleware that forgot to read the raw body.
+     */
+    private static function edgeUpgrade(): void
+    {
+        TestCase::group('HTTP — the edge asks, uploads and is served (1.9.2)');
+
+        $secret = (string) CoordinatorSettings::current()['shared_secret'];
+        if ($secret === '') {
+            TestCase::skip('edge upgrade', 'no coordinator shared secret is configured');
+
+            return;
+        }
+
+        $client = self::client();
+
+        // Whatever this panel had published is put back at the end. A test
+        // that leaves a 9.9.9-test installer as the live download would be a
+        // test that broke the thing it was checking.
+        $before = [];
+        foreach (['file', 'version', 'sha256', 'size', 'published_at'] as $key) {
+            $before[$key] = Setting::get('edge.windows-setup.' . $key, null);
+        }
+
+        try {
+            self::edgeUpgradeChecks($client, $secret);
+        } finally {
+            foreach ($before as $key => $value) {
+                Setting::set('edge.windows-setup.' . $key, $value === null ? null : (string) $value);
+            }
+            Setting::flushCache();
+
+            foreach (glob(APP_ROOT . '/storage/downloads/akconnect-setup-9.9.9-test.exe') ?: [] as $leftover) {
+                @unlink($leftover);
+            }
+        }
+    }
+
+    /** @see self::edgeUpgrade() — the body, so the restore above is a finally. */
+    private static function edgeUpgradeChecks(HttpClient $client, string $secret): void
+    {
+        // 1. What should the edge build?
+        self::signedRequest($client, 'GET', '/api/v1/edge/release', '', $secret);
+        TestCase::assertSame(200, $client->status(), 'a signed caller is told the release');
+
+        $release = json_decode($client->body(), true);
+        $target = is_array($release) ? ($release['data'] ?? []) : [];
+        TestCase::assert(
+            is_array($target) && ($target['version'] ?? '') !== '',
+            'and the answer names a version',
+            is_array($target) ? (string) ($target['version'] ?? '') : ''
+        );
+
+        // 2. An unsigned caller is told nothing.
+        $client->get('/api/v1/edge/release', ['Accept' => 'application/json']);
+        TestCase::assertSame(401, $client->status(), 'an unsigned caller is refused');
+
+        // 3. Publish something, in two chunks, so the chunking is exercised
+        //    rather than assumed.
+        $payload = random_bytes(200000);
+        $digest = hash('sha256', $payload);
+        $half = (int) (strlen($payload) / 2);
+
+        foreach ([[0, substr($payload, 0, $half)], [$half, substr($payload, $half)]] as [$offset, $chunk]) {
+            $body = (string) json_encode([
+                'kind'    => 'windows-setup',
+                'version' => '9.9.9-test',
+                'sha256'  => $digest,
+                'offset'  => $offset,
+                'total'   => strlen($payload),
+                'data'    => base64_encode($chunk),
+            ]);
+
+            self::signedRequest($client, 'POST', '/api/v1/edge/artifact', $body, $secret);
+            TestCase::assertSame(200, $client->status(), 'chunk at offset ' . $offset . ' accepted');
+        }
+
+        $result = json_decode($client->body(), true);
+        $data = is_array($result) ? ($result['data'] ?? []) : [];
+        TestCase::assert(
+            is_array($data) && ($data['complete'] ?? false) === true,
+            'the last chunk completes the artefact'
+        );
+
+        // 4. And a customer, with no credential at all, can fetch it.
+        $client->get('/download/setup.exe');
+        TestCase::assertSame(200, $client->status(), 'the installer downloads without signing in');
+        TestCase::assertSame(
+            $digest,
+            hash('sha256', $client->body()),
+            'and arrives byte-identical to what was published'
+        );
+        TestCase::assertContains(
+            'attachment',
+            (string) $client->header('Content-Disposition'),
+            'served as a download rather than rendered'
+        );
+
+        // 5. Bytes that do not match the digest are refused, not published.
+        $body = (string) json_encode([
+            'kind'    => 'windows-setup',
+            'version' => '9.9.9-test',
+            'sha256'  => str_repeat('0', 64),
+            'offset'  => 0,
+            'total'   => 8,
+            'data'    => base64_encode('12345678'),
+        ]);
+        self::signedRequest($client, 'POST', '/api/v1/edge/artifact', $body, $secret);
+        TestCase::assertSame(422, $client->status(), 'an artefact that fails its checksum is discarded');
+
+        // The published artefact is still the good one.
+        $client->get('/download/setup.exe');
+        TestCase::assertSame(
+            $digest,
+            hash('sha256', $client->body()),
+            'and the refusal did not replace what was already published'
+        );
+    }
+
+    /**
+     * §14 over HTTP: a published agent binary is offered to a device, signed.
+     *
+     * This is the half of self-update the panel is responsible for. The other
+     * half — verifying the signature and swapping the binary — is in Go, in
+     * services/agent/internal/selfupdate. They meet at exactly two things: the
+     * signature is ed25519 over the lowercase hex digest, and the download is
+     * device-authenticated. Both are asserted here.
+     */
+    private static function selfUpdate(): void
+    {
+        TestCase::group('HTTP — a device is offered a signed agent (§14)');
+
+        $secret = (string) CoordinatorSettings::current()['shared_secret'];
+        $controllerKey = (string) Config::get('security.controller_public_key', '');
+
+        if ($secret === '' || $controllerKey === '') {
+            TestCase::skip('self-update', 'this panel has no coordinator secret or controller key');
+
+            return;
+        }
+
+        $before = [];
+        foreach (['file', 'version', 'sha256', 'size', 'published_at'] as $key) {
+            $before[$key] = Setting::get('edge.windows-agent.' . $key, null);
+        }
+
+        try {
+            self::selfUpdateChecks($secret, $controllerKey);
+        } finally {
+            foreach ($before as $key => $value) {
+                Setting::set('edge.windows-agent.' . $key, $value === null ? null : (string) $value);
+            }
+            Setting::flushCache();
+
+            DB::execute(
+                'DELETE FROM ' . DB::table('agent_releases') . ' WHERE version = :v',
+                ['v' => '9.9.9-test']
+            );
+
+            foreach (glob(APP_ROOT . '/storage/downloads/akconnect-agent-9.9.9-test.exe') ?: [] as $leftover) {
+                @unlink($leftover);
+            }
+        }
+    }
+
+    /** @see self::selfUpdate() — the body, so the restore above is a finally. */
+    private static function selfUpdateChecks(string $secret, string $controllerKey): void
+    {
+        $client = self::client();
+        $token = self::$fixtures['alpha']['device_token'];
+
+        $payload = random_bytes(4096);
+        $digest = hash('sha256', $payload);
+
+        self::signedRequest($client, 'POST', '/api/v1/edge/artifact', (string) json_encode([
+            'kind'    => 'windows-agent',
+            'version' => '9.9.9-test',
+            'sha256'  => $digest,
+            'offset'  => 0,
+            'total'   => strlen($payload),
+            'data'    => base64_encode($payload),
+        ]), $secret);
+        TestCase::assertSame(200, $client->status(), 'an agent binary is accepted from the edge');
+
+        // The device asks what it should be running.
+        $client->get('/api/v1/agent/version?platform=windows&arch=amd64', [
+            'Authorization' => 'Bearer ' . $token,
+            'Accept'        => 'application/json',
+        ]);
+        TestCase::assertSame(200, $client->status(), 'a device may ask for its release');
+
+        $offer = $client->json()['data'] ?? [];
+        TestCase::assert(($offer['update_available'] ?? false) === true, 'and is offered the new one');
+        TestCase::assertSame('9.9.9-test', (string) ($offer['version'] ?? ''), 'by version');
+        TestCase::assertSame($digest, (string) ($offer['sha256'] ?? ''), 'with the digest it was published under');
+
+        // The signature is the security boundary: an agent installs nothing
+        // without it, so a release published unsigned is a silent dead end.
+        $signature = (string) ($offer['signature'] ?? '');
+        TestCase::assert($signature !== '', 'and a signature');
+
+        $raw = @hex2bin(substr($signature, strlen('ed25519:')));
+        TestCase::assert(
+            str_starts_with($signature, 'ed25519:')
+                && $raw !== false
+                && sodium_crypto_sign_verify_detached($raw, $digest, (string) hex2bin($controllerKey)),
+            'that verifies against the controller public key the agent is given'
+        );
+
+        // The agent refuses a download that is not on the panel it enrolled
+        // with, so the panel must publish an address on itself.
+        $url = (string) ($offer['url'] ?? '');
+        TestCase::assertContains(
+            (string) parse_url((string) Config::get('app.url', ''), PHP_URL_HOST),
+            $url,
+            'and a download address on this panel'
+        );
+
+        // The test client speaks to the dev server, not to the public host
+        // name in the configuration, so only the path travels.
+        $path = (string) parse_url($url, PHP_URL_PATH);
+
+        // Serving code is the one thing that must never be anonymous.
+        $client->get($path, ['Accept' => 'application/octet-stream']);
+        TestCase::assertSame(401, $client->status(), 'the binary is not served without a device token');
+
+        $client->get($path, [
+            'Authorization' => 'Bearer ' . $token,
+            'Accept'        => 'application/octet-stream',
+        ]);
+        TestCase::assertSame(200, $client->status(), 'and is served to the device it is offered to');
+        TestCase::assertSame($digest, hash('sha256', $client->body()), 'byte-identical to what was published');
+    }
+
+    /**
+     * Sign a request the way the coordinator does, and send it.
+     *
+     * The scheme is sha256 HMAC over "<timestamp>\n<body>" — the same three
+     * lines deploy/upgrade-edge.sh reproduces in openssl and
+     * deploy/publish-artifact.py reproduces in Python. Three implementations
+     * of one scheme is two too many to leave untested.
+     */
+    private static function signedRequest(
+        HttpClient $client,
+        string $method,
+        string $path,
+        string $body,
+        string $secret
+    ): void {
+        $timestamp = (string) time();
+        $headers = [
+            'Accept'                  => 'application/json',
+            'Content-Type'            => 'application/json',
+            'X-Coordinator-Timestamp' => $timestamp,
+            'X-Coordinator-Signature' => hash_hmac('sha256', $timestamp . "\n" . $body, $secret),
+        ];
+
+        if ($method === 'GET') {
+            $client->get($path, $headers);
+
+            return;
+        }
+
+        $client->post($path, $body, $headers);
+    }
+
+    /**
+     * Both join-code buttons, driven exactly as the page drives them.
+     *
+     * Production defect (1.9.2): `$request->input('pre_approved', false)`
+     * passed a bool where the signature takes ?string. Under
+     * declare(strict_types=1) that is checked at the call, so it threw on
+     * every request reaching the line and both buttons on the page returned
+     * 500 — the ordinary "New code" one included, which is the one every
+     * customer uses.
+     *
+     * It shipped because nothing had ever posted this form. Pre-approved codes
+     * were new in 1.9.2 and were tested through the model and the enrolment
+     * path; the controller that issues them was reached by no test at all. So
+     * both buttons are driven here exactly as the page drives them — the page
+     * posts two separate forms rather than a checkbox — and the drill would
+     * have caught it with either one.
+     */
+    /**
+     * 1.9.5: one link a supplier can send, with the code already in it.
+     *
+     * The page has to work for somebody who is not signed in and never will
+     * be — that is the entire point of it — and it must not become a way to
+     * ask the panel which codes are real.
+     */
+    private static function installLink(): void
+    {
+        TestCase::group('HTTP — the install link a customer is sent (1.9.5)');
+
+        // The page offers the installer this panel publishes, so there has to
+        // be one. Published here and put back afterwards, the same way
+        // edgeUpgrade does it: a test that left a fake installer as the live
+        // download would break the thing it was checking.
+        $before = [];
+        foreach (['file', 'version', 'sha256', 'size', 'published_at'] as $key) {
+            $before[$key] = Setting::get('edge.windows-setup.' . $key, null);
+        }
+
+        try {
+            self::installLinkChecks();
+        } finally {
+            foreach ($before as $key => $value) {
+                Setting::set('edge.windows-setup.' . $key, $value === null ? null : (string) $value);
+            }
+            Setting::flushCache();
+
+            @unlink(APP_ROOT . '/storage/downloads/akconnect-setup-1.9.5-installlink.exe');
+        }
+    }
+
+    /**
+     * 1.9.5: the coordinator reporting that a device cannot hear it.
+     *
+     * The fault a device cannot report about itself: its announcements arrive
+     * at the coordinator, the coordinator answers every one, and not one
+     * answer arrives back. From the device's side that is indistinguishable
+     * from "still connecting", which is what it said for an afternoon on a
+     * real office Wi-Fi. Only the coordinator sees both halves.
+     */
+    private static function coordinatorSaysUnanswered(): void
+    {
+        TestCase::group('HTTP — the coordinator reports a device that cannot hear it (1.9.5)');
+
+        $secret = (string) CoordinatorSettings::current()['shared_secret'];
+        if ($secret === '') {
+            TestCase::skip('coordinator report', 'no coordinator shared secret is configured');
+
+            return;
+        }
+
+        $deviceId = (int) self::$fixtures['alpha']['device_id'];
+        $tenantId = (int) self::$fixtures['alpha']['tenant_id'];
+        $uid = TenantScope::asTenant($tenantId, static fn (): string => (string) Device::find($deviceId)['device_uid']);
+
+        // Heartbeat first, so the device is online and has no peer path — the
+        // exact state the office laptop was in, and the state in which the
+        // panel used to say "connecting" indefinitely.
+        $agent = [
+            'Authorization' => 'Bearer ' . (string) self::$fixtures['alpha']['device_token'],
+            'Content-Type'  => 'application/json',
+            'Accept'        => 'application/json',
+        ];
+        $client = self::client();
+        $client->post('/api/v1/agent/heartbeat',
+            (string) json_encode(['connection_type' => 'connecting']), $agent);
+
+        $body = (string) json_encode(['devices' => [[
+            'device_uid'       => $uid,
+            'endpoint'         => '150.129.167.50:53722',
+            'unanswered'       => true,
+            'unanswered_known' => true,
+        ]]]);
+        self::signedRequest($client, 'POST', '/api/v1/coordinator/endpoints', $body, $secret);
+        TestCase::assertSame(200, $client->status(), 'the coordinator can report it');
+
+        $device = TenantScope::asTenant($tenantId, static fn (): ?array => Device::find($deviceId));
+        TestCase::assert(
+            ($device['coordinator_unanswered_at'] ?? null) !== null,
+            'the panel records that the replies are not arriving'
+        );
+        TestCase::assertContains(
+            'not arriving',
+            (string) ($device['last_error'] ?? ''),
+            'and says so in words on the device page'
+        );
+        TestCase::assertSame(
+            '150.129.167.50:53722',
+            (string) ($device['last_endpoint'] ?? ''),
+            'and the endpoint in the same report still landed'
+        );
+
+        // The device page shows it as blocked, not as connecting.
+        $panel = self::signIn('alpha');
+        $panel->get('/devices/' . $deviceId);
+        TestCase::assertContains('conn-blocked', $panel->body(),
+            'the device page shows it blocked rather than still connecting');
+
+        // And when it starts hearing again, that clears — without a heartbeat
+        // from the device, because the device was never the one reporting it.
+        $body = (string) json_encode(['devices' => [[
+            'device_uid'       => $uid,
+            'unanswered'       => false,
+            'unanswered_known' => true,
+        ]]]);
+        self::signedRequest($client, 'POST', '/api/v1/coordinator/endpoints', $body, $secret);
+
+        $device = TenantScope::asTenant($tenantId, static fn (): ?array => Device::find($deviceId));
+        TestCase::assert(
+            ($device['coordinator_unanswered_at'] ?? null) === null,
+            'and it clears when the coordinator says the replies are getting through'
+        );
+
+        // A report that says nothing about it must not clear it either way.
+        TenantScope::asTenant($tenantId, static fn (): mixed => Device::recordUnanswered($deviceId, true));
+        $body = (string) json_encode(['devices' => [[
+            'device_uid' => $uid,
+            'endpoint'   => '150.129.167.50:53999',
+        ]]]);
+        self::signedRequest($client, 'POST', '/api/v1/coordinator/endpoints', $body, $secret);
+
+        $device = TenantScope::asTenant($tenantId, static fn (): ?array => Device::find($deviceId));
+        TestCase::assert(
+            ($device['coordinator_unanswered_at'] ?? null) !== null,
+            'an ordinary endpoint report does not silently clear it'
+        );
+
+        TenantScope::asTenant($tenantId, static fn (): mixed => Device::recordUnanswered($deviceId, false));
+    }
+
+    /**
+     * 1.9.6: what a device did about the last release, visible in the panel.
+     *
+     * An all-in-one at a customer site stayed on 1.9.3 for days after 1.9.4
+     * was published and nobody found out. Everything the agent does about an
+     * update it does silently — the check, the offer, the download, the
+     * signature, the swap — and every failure path is a line in a log file on
+     * the customer's machine. From the panel a device that never checked and
+     * a device that refused a badly signed release looked identical: a
+     * version number that had not moved.
+     *
+     * So the agent reports where it got to, on the heartbeat it already
+     * sends, and the device page says it in a sentence.
+     */
+    private static function deviceUpdateState(): void
+    {
+        TestCase::group('HTTP — what a device did about the last release (1.9.6)');
+
+        $client = self::signIn('alpha');
+        $deviceId = (int) self::$fixtures['alpha']['device_id'];
+        $tenantId = (int) self::$fixtures['alpha']['tenant_id'];
+
+        $agent = [
+            'Authorization' => 'Bearer ' . (string) self::$fixtures['alpha']['device_token'],
+            'Content-Type'  => 'application/json',
+            'Accept'        => 'application/json',
+        ];
+        $api = self::client();
+
+        $read = static fn (): array => (array) TenantScope::asTenant(
+            $tenantId,
+            static fn (): ?array => Device::find($deviceId)
+        );
+
+        // A device that checked and had nothing to do. Worth recording: it is
+        // what tells "up to date" apart from "has never asked".
+        $api->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'direct',
+            'update'          => ['state' => 'idle'],
+        ]), $agent);
+        TestCase::assertSame(200, $api->status(), 'a heartbeat carrying an update report is accepted');
+
+        $device = $read();
+        TestCase::assertSame('idle', (string) ($device['update_state'] ?? ''), 'the state is recorded');
+        TestCase::assert(
+            ($device['update_checked_at'] ?? null) !== null,
+            'and when it was checked, which is what separates up to date from never asked'
+        );
+
+        // A refusal. This is the one that has to reach a person: the device is
+        // healthy, heartbeating, and running software it should have replaced.
+        $api->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'direct',
+            'update'          => [
+                'state'   => 'failed',
+                'version' => '1.9.6',
+                'error'   => 'refused: the signature does not verify against this panel\'s key',
+            ],
+        ]), $agent);
+
+        $device = $read();
+        TestCase::assertSame('failed', (string) ($device['update_state'] ?? ''), 'a refusal is recorded');
+        TestCase::assertSame('1.9.6', (string) ($device['update_version'] ?? ''), 'with the version it refused');
+        TestCase::assertContains(
+            'does not verify',
+            (string) ($device['update_error'] ?? ''),
+            'and why, in the agent\'s own words'
+        );
+
+        $client->get('/devices/' . $deviceId);
+        TestCase::assertContains(
+            'Update to 1.9.6 failed',
+            $client->body(),
+            'and the device page says so rather than showing a version that has not moved'
+        );
+
+        // A state the column does not hold is filed as idle rather than
+        // refused: a newer agent inventing one must not cost its heartbeat.
+        $api->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'direct',
+            'update'          => ['state' => 'rolling-back', 'version' => '1.9.7'],
+        ]), $agent);
+        TestCase::assertSame(200, $api->status(), 'an unknown state does not cost the heartbeat');
+        TestCase::assertSame('idle', (string) ($read()['update_state'] ?? ''), 'and is filed as idle');
+
+        // An error longer than the column is truncated, not refused, for the
+        // same reason.
+        $api->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'direct',
+            'update'          => [
+                'state'   => 'failed',
+                'version' => '1.9.6',
+                'error'   => str_repeat('x', 400),
+            ],
+        ]), $agent);
+        TestCase::assertSame(200, $api->status(), 'an over-long error does not cost the heartbeat either');
+        TestCase::assert(
+            mb_strlen((string) ($read()['update_error'] ?? '')) <= 255,
+            'and is stored truncated'
+        );
+
+        // Installed, which is the ordinary outcome and must read as one.
+        $api->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'direct',
+            'update'          => ['state' => 'installed', 'version' => '1.9.6'],
+        ]), $agent);
+
+        $client->get('/devices/' . $deviceId);
+        TestCase::assertContains(
+            'Installed 1.9.6',
+            $client->body(),
+            'a successful update is shown as one'
+        );
+    }
+
+    /**
+     * 1.9.5: "Update now", and the two things the device page must answer.
+     *
+     * The button does not push anything — there is no channel from the panel
+     * into a PC behind a shop router. It records a request, the agent collects
+     * it on its next configuration poll, and the panel clears it. What is
+     * tested here is that round trip, including the part that is easy to get
+     * wrong: the request must be consumed, or one click makes the agent check
+     * for an update on every poll for ever.
+     */
+    private static function deviceUpdateNow(): void
+    {
+        TestCase::group('HTTP — Update now, and what the device page answers (1.9.5)');
+
+        $client = self::signIn('alpha');
+        $deviceId = (int) self::$fixtures['alpha']['device_id'];
+
+        // A heartbeat carrying an uptime and a problem, as an agent sends it.
+        $agent = [
+            'Authorization' => 'Bearer ' . (string) self::$fixtures['alpha']['device_token'],
+            'Content-Type'  => 'application/json',
+            'Accept'        => 'application/json',
+        ];
+
+        $api = self::client();
+        $api->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'direct',
+            'endpoint'        => '203.0.113.9:51820',
+            'uptime_seconds'  => 7200,
+            'problems'        => [[
+                'code'   => 'dns_nrpt_refused',
+                'detail' => 'Windows refused the DNS policy rule.',
+            ]],
+        ]), $agent);
+        TestCase::assertSame(200, $api->status(), 'the heartbeat is accepted');
+
+        $device = TenantScope::asTenant(
+            (int) self::$fixtures['alpha']['tenant_id'],
+            static fn (): ?array => Device::find($deviceId)
+        );
+
+        TestCase::assert(
+            ($device['agent_started_at'] ?? null) !== null,
+            'the panel knows when the agent started, so "has it restarted?" has an answer'
+        );
+        TestCase::assertContains(
+            'Windows refused',
+            (string) ($device['last_error'] ?? ''),
+            'and keeps the last problem after it clears'
+        );
+
+        // A heartbeat with nothing wrong clears the current problems and must
+        // NOT erase the record of the last one — that is the whole point.
+        $api->post('/api/v1/agent/heartbeat',
+            (string) json_encode(['connection_type' => 'direct']), $agent);
+        $device = TenantScope::asTenant(
+            (int) self::$fixtures['alpha']['tenant_id'],
+            static fn (): ?array => Device::find($deviceId)
+        );
+        TestCase::assert(
+            ($device['problems_json'] ?? null) === null,
+            'a clean heartbeat clears what is wrong now'
+        );
+        TestCase::assertContains(
+            'Windows refused',
+            (string) ($device['last_error'] ?? ''),
+            'and the last problem survives it, which is why the column exists'
+        );
+
+        // The button.
+        $client->get('/devices/' . $deviceId);
+        TestCase::assertContains('/update-now', $client->body(), 'the device page offers Update now');
+
+        $client->post('/devices/' . $deviceId . '/update-now', ['_token' => (string) $client->csrfToken()]);
+        TestCase::assertSame(302, $client->status(), 'pressing it is accepted');
+
+        // The agent collects it on its next configuration poll — and a real
+        // agent sends the revision it already has, which is the case this got
+        // wrong. The endpoint answers "nothing has changed" whenever that
+        // matches the network's, and an Update now request is not a change to
+        // the network: without asking about it separately, the click was
+        // never delivered to any agent that had ever polled before.
+        $api->get('/api/v1/agent/config', $agent);
+        TestCase::assertSame(200, $api->status(), 'the agent fetches its configuration');
+        $config = json_decode($api->body(), true);
+        $data = is_array($config) ? ($config['data'] ?? []) : [];
+        $revision = (int) ($data['revision'] ?? 0);
+        TestCase::assert(
+            is_array($data) && ($data['update_requested'] ?? false) === true,
+            'and is asked to check for an update'
+        );
+
+        // Again, as a settled agent asks: with its revision, which matches.
+        // The page is re-fetched first for a fresh CSRF token — the one from
+        // before was spent on the POST above.
+        $client->get('/devices/' . $deviceId);
+        $client->post('/devices/' . $deviceId . '/update-now', ['_token' => (string) $client->csrfToken()]);
+        TestCase::assertSame(302, $client->status(), 'a second Update now is accepted');
+
+        $api->get('/api/v1/agent/config?revision=' . $revision, $agent);
+        $config = json_decode($api->body(), true);
+        $data = is_array($config) ? ($config['data'] ?? []) : [];
+        TestCase::assert(
+            is_array($data) && ($data['update_requested'] ?? false) === true,
+            'a settled agent, sending the revision it holds, is asked too'
+        );
+
+        // And that path still answers "nothing has changed" when there is no
+        // request, or every settled agent would rebuild its configuration on
+        // every poll for ever.
+        $api->get('/api/v1/agent/config?revision=' . $revision, $agent);
+        $config = json_decode($api->body(), true);
+        $data = is_array($config) ? ($config['data'] ?? []) : [];
+        TestCase::assert(
+            is_array($data) && ($data['changed'] ?? true) === false,
+            'and with nothing outstanding it is still told nothing has changed'
+        );
+
+        // And once only. Without this, one click makes every poll for ever
+        // after ask for an update.
+        $api->get('/api/v1/agent/config', $agent);
+        $config = json_decode($api->body(), true);
+        $data = is_array($config) ? ($config['data'] ?? []) : [];
+        TestCase::assert(
+            is_array($data) && ($data['update_requested'] ?? false) !== true,
+            'the request is consumed, not repeated on every poll'
+        );
+    }
+
+    /** @see self::installLink() — the body, so the restore above is a finally. */
+    private static function installLinkChecks(): void
+    {
+        $name = 'akconnect-setup-1.9.5-installlink.exe';
+        $body = str_repeat('MZ', 64);
+        file_put_contents(APP_ROOT . '/storage/downloads/' . $name, $body);
+
+        Setting::set('edge.windows-setup.file', $name);
+        Setting::set('edge.windows-setup.version', '1.9.5-installlink');
+        Setting::set('edge.windows-setup.sha256', hash('sha256', $body));
+        Setting::set('edge.windows-setup.size', (string) strlen($body));
+        Setting::set('edge.windows-setup.published_at', gmdate('Y-m-d H:i:s'));
+        Setting::flushCache();
+
+        $client = self::signIn('alpha');
+        $networkId = (int) self::$fixtures['alpha']['network_id'];
+
+        $client->get('/networks/' . $networkId);
+        $client->post('/networks/' . $networkId . '/join-code', [
+            '_token' => (string) $client->csrfToken(),
+        ]);
+
+        $code = self::latestJoinCode($networkId);
+        TestCase::assert($code !== null, 'a join code was issued to link to');
+
+        $plain = (string) ($code['code'] ?? '');
+
+        // The supplier's page offers the link, with the code in it.
+        $client->get('/networks/' . $networkId);
+        TestCase::assertContains('/join/' . $plain, $client->body(),
+            'the network page offers a link with the code already in it');
+
+        // And a customer, signed in to nothing, gets a page with the code on
+        // it and a download button.
+        $anonymous = new HttpClient(self::$baseUrl);
+        $anonymous->get('/join/' . $plain);
+        TestCase::assertSame(200, $anonymous->status(), 'the install page opens without signing in');
+        TestCase::assertContains($plain, $anonymous->body(), 'and shows the code the customer has to type');
+        TestCase::assertContains('/download/setup.exe', $anonymous->body(), 'and a download button');
+
+        // Typed in lower case, or pasted with a space, is the same code. That
+        // is not the customer's mistake to pay for.
+        $anonymous->get('/join/' . strtolower($plain) . '%20');
+        TestCase::assertSame(200, $anonymous->status(), 'a code typed in lower case still opens the page');
+        TestCase::assertContains($plain, $anonymous->body(), 'and is shown back in the form the installer wants');
+
+        // A code that is not real gets the same page, not an answer. A page
+        // that said "that one is not valid" would say it for anyone asking,
+        // which is a way to hunt for codes.
+        $anonymous->get('/join/NOT-A-REAL-CODE');
+        TestCase::assertSame(200, $anonymous->status(),
+            'an unknown code is not treated as a question the panel answers');
+
+        // Nothing about the network reaches the page: not its name, not its
+        // customer. The link is sent over WhatsApp and gets forwarded.
+        $networkName = (string) self::$fixtures['alpha']['network_name'];
+        TestCase::assert(
+            !str_contains($anonymous->body(), $networkName),
+            'the install page does not name the network the code belongs to'
+        );
+    }
+
+    private static function joinCodeForms(): void
+    {
+        TestCase::group('HTTP — issuing a join code, both buttons (1.9.2)');
+
+        $client = self::signIn('alpha');
+        $networkId = (int) self::$fixtures['alpha']['network_id'];
+        $path = '/networks/' . $networkId . '/join-code';
+
+        // 1. "New code": no pre_approved field at all. This is the one that
+        //    500'd in production.
+        $client->get('/networks/' . $networkId);
+        TestCase::assertSame(200, $client->status(), 'the network page renders');
+
+        $client->post($path, ['_token' => (string) $client->csrfToken()]);
+        TestCase::assertSame(302, $client->status(),
+            'issuing an ordinary code does not fail', 'HTTP ' . $client->status());
+
+        $ordinary = self::latestJoinCode($networkId);
+        TestCase::assert($ordinary !== null, 'and a code was created');
+        TestCase::assertSame(0, (int) ($ordinary['pre_approved'] ?? 1),
+            'and it is not pre-approved');
+
+        // 2. "New pre-approved code": the hidden fields the page sends.
+        $client->get('/networks/' . $networkId);
+        $client->post($path, [
+            '_token'       => (string) $client->csrfToken(),
+            'pre_approved' => '1',
+            'max_uses'     => '1',
+            'ttl_minutes'  => '30',
+        ]);
+        TestCase::assertSame(302, $client->status(),
+            'issuing a pre-approved code does not fail', 'HTTP ' . $client->status());
+
+        $preApproved = self::latestJoinCode($networkId);
+        TestCase::assert($preApproved !== null && $preApproved['code'] !== ($ordinary['code'] ?? ''),
+            'and a second, different code was created');
+        TestCase::assertSame(1, (int) ($preApproved['pre_approved'] ?? 0),
+            'and this one is pre-approved (R4: the admin decided, in advance)');
+        TestCase::assertSame(1, (int) ($preApproved['max_uses'] ?? 0),
+            'single-use, so it is not a standing invitation');
+
+        // 3. A pre-approved code may not be issued unlimited or long-lived,
+        //    whatever the form asks for. The clamp is the whole reason
+        //    pre-approval does not break R4.
+        $client->get('/networks/' . $networkId);
+        $client->post($path, [
+            '_token'       => (string) $client->csrfToken(),
+            'pre_approved' => 'on',
+            'max_uses'     => '0',
+            'ttl_minutes'  => '10080',
+        ]);
+        TestCase::assertSame(302, $client->status(), 'a wide-open pre-approved request is accepted');
+
+        $clamped = self::latestJoinCode($networkId);
+        TestCase::assertSame(1, (int) ($clamped['pre_approved'] ?? 0),
+            'checkbox "on" is read as pre-approved, not ignored');
+        TestCase::assert((int) ($clamped['max_uses'] ?? 0) > 0,
+            'an unlimited pre-approved code is refused', 'max_uses=' . ($clamped['max_uses'] ?? '?'));
+        TestCase::assert(
+            strtotime((string) $clamped['expires_at']) - time() <= 121 * 60,
+            'and it cannot outlive two hours',
+            (string) $clamped['expires_at']
+        );
+    }
+
+    /** @return array<string,mixed>|null */
+    private static function latestJoinCode(int $networkId): ?array
+    {
+        $row = null;
+
+        TenantScope::asTenant(self::$fixtures['alpha']['tenant_id'], static function () use ($networkId, &$row): void {
+            \App\Core\Auth::setApiActor(null, self::$fixtures['alpha']['tenant_id'], ['*']);
+            $row = DB::selectOne(
+                'SELECT * FROM ' . DB::table('join_codes') . '
+                 WHERE network_id = :n ORDER BY id DESC LIMIT 1',
+                ['n' => $networkId]
+            );
+        });
+        \App\Core\Auth::reset();
+        TenantScope::reset();
+
+        return $row;
     }
 
     private static function agentEndpoints(): void

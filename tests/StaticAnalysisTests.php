@@ -29,7 +29,107 @@ final class StaticAnalysisTests
         self::noRepeatedPlaceholders();
         self::noInterpolatedSql();
         self::viewsEscapeOutput();
+        self::stringAccessorDefaults();
+        self::oneChannelAwareResolver();
         self::phpSyntax();
+    }
+
+    /**
+     * Defect 29, kept fixed: exactly one place decides what an update is.
+     *
+     * The channel setting existed, was shown, was validated and was then not
+     * consulted — the updater installed the head of the branch whatever it
+     * said. Every push reached every panel the moment it landed, and an
+     * operator who had chosen "Stable" was running whatever was committed
+     * most recently. Unfinished work reached a live panel that way.
+     *
+     * The fix was to put the decision in one function. This is what stops it
+     * coming apart again: the two calls that can answer "what should we
+     * install" may appear only inside that function, so a second caller —
+     * an auto-check, a notification, a new Update Now button — cannot quietly
+     * grow its own idea of the channel.
+     */
+    private static function oneChannelAwareResolver(): void
+    {
+        TestCase::group('Static — one function decides what an update is (defect 29)');
+
+        $resolver = 'resolveTarget';
+        $offenders = [];
+
+        foreach (self::phpFiles() as $file) {
+            $source = self::withoutComments((string) file_get_contents($file));
+
+            // The client's own definitions are where these live.
+            if (str_ends_with($file, 'GithubClient.php')) {
+                continue;
+            }
+
+            foreach (['latestCommit', 'latestTag'] as $call) {
+                $offset = 0;
+                while (($at = strpos($source, '->' . $call . '(', $offset)) !== false) {
+                    $offset = $at + 1;
+
+                    if (self::enclosingFunction($source, $at) !== $resolver) {
+                        $offenders[] = sprintf(
+                            '%s:%d — %s() is called outside %s()',
+                            basename($file),
+                            substr_count(substr($source, 0, $at), "\n") + 1,
+                            $call,
+                            $resolver
+                        );
+                    }
+                }
+            }
+        }
+
+        TestCase::assert(
+            $offenders === [],
+            'nothing decides what to install except ' . $resolver . '()',
+            implode('; ', $offenders)
+        );
+    }
+
+    /**
+     * The name of the function a byte offset is inside, or '' at file scope.
+     *
+     * Braces are counted rather than parsed. It is enough for what it is
+     * asked: whether one call sits inside one named function in a file this
+     * project wrote.
+     */
+    private static function enclosingFunction(string $source, int $offset): string
+    {
+        $name = '';
+        $depth = 0;
+        $functionDepth = -1;
+
+        $length = min($offset, strlen($source));
+        for ($i = 0; $i < $length; $i++) {
+            $char = $source[$i];
+
+            if ($char === '{') {
+                $depth++;
+
+                continue;
+            }
+
+            if ($char === '}') {
+                $depth--;
+                if ($functionDepth >= 0 && $depth < $functionDepth) {
+                    $name = '';
+                    $functionDepth = -1;
+                }
+
+                continue;
+            }
+
+            if ($char === 'f' && preg_match('/\Gfunction\s+([A-Za-z_]\w*)/', $source, $m, 0, $i) === 1) {
+                $name = $m[1];
+                $functionDepth = $depth + 1;
+                $i += strlen($m[0]) - 1;
+            }
+        }
+
+        return $name;
     }
 
     private static function tenantScopeDeclarations(): void
@@ -54,6 +154,200 @@ final class StaticAnalysisTests
             TestCase::assert(class_exists($class) && !$class::isTenantScoped(),
                 $model . ' is platform-level, not tenant-scoped');
         }
+    }
+
+    /**
+     * Request::input(), query() and cookie() take a ?string default.
+     *
+     * Production defect (1.9.2): `$request->input('pre_approved', false)` is
+     * the obvious way to read a checkbox and is a TypeError. Under
+     * declare(strict_types=1) the argument is checked at the call, so it threw
+     * on every request that reached the line — both buttons on the join-code
+     * page returned 500, not just the one that omitted the field.
+     *
+     * PHP will not catch this until the line runs, so it is caught here:
+     * anything but a quoted string or null is refused. Booleans have
+     * Request::boolean(), which has no string default to get wrong.
+     */
+    private static function stringAccessorDefaults(): void
+    {
+        TestCase::group('Static — no non-string default reaches a ?string accessor');
+
+        // input/query/cookie take a ?string default second. Setting::get
+        // takes a ?int TENANT ID second and its default third — a difference
+        // that is invisible at the call site and cost a 500 on every device
+        // verification the day this check was extended to cover it. Both
+        // shapes are refused the same way: a non-string literal in position
+        // two is a mistake in either.
+        // What position two must look like, per accessor — they differ, and
+        // that is the point. input()/query()/cookie() take a ?string default
+        // there; Setting::get() takes a ?int TENANT ID and puts its default
+        // third. A string is correct for the first three and is the defect for
+        // the fourth: it threw a TypeError on every device verification, so
+        // the coordinator could not confirm a single device.
+        $accessors = [
+            'input'        => 'string',
+            'query'        => 'string',
+            'cookie'       => 'string',
+            'Setting::get' => 'int',
+        ];
+        $offenders = [];
+
+        foreach (self::phpFiles(true) as $file) {
+            // Comments stripped first. The first version of this check
+            // reported its own docblock — which quotes the bad call on
+            // purpose — and Request::boolean()'s, which does the same. A
+            // static check that flags the explanation of the defect is one
+            // people turn off.
+            $source = self::withoutComments((string) file_get_contents($file));
+
+            foreach ($accessors as $accessor => $expected) {
+                // Setting::get is static and is named in full, because
+                // Config::get's second argument legitimately IS a mixed
+                // default and scanning every ::get( flagged forty of them.
+                $needle = str_contains($accessor, '::') ? $accessor . '(' : '->' . $accessor . '(';
+                self::scanAccessorCalls($source, $file, $accessor, $needle, $expected, $offenders);
+            }
+        }
+
+        TestCase::assert(
+            $offenders === [],
+            'every accessor\'s second argument suits the parameter in that position',
+            implode('; ', array_slice($offenders, 0, 5))
+        );
+    }
+
+    /**
+     * @param list<string> $offenders
+     */
+    private static function scanAccessorCalls(
+        string $source,
+        string $file,
+        string $accessor,
+        string $needle,
+        string $expected,
+        array &$offenders
+    ): void {
+        $offset = 0;
+
+        while (($position = strpos($source, $needle, $offset)) !== false) {
+            $offset = $position + 1;
+
+            $arguments = self::balancedParens($source, $position + strlen($needle) - 1);
+            $default = self::secondArgument($arguments);
+
+            if ($default === null || self::argumentFits($default, $expected)) {
+                continue;
+            }
+
+            $line = substr_count(substr($source, 0, $position), "\n") + 1;
+            $offenders[] = self::relative($file) . ':' . $line . ' — ' . $accessor . '(…, ' . $default . ')';
+        }
+    }
+
+    /**
+     * The second argument of a call, or null when there is not one.
+     *
+     * Deliberately conservative: an argument list containing a nested call or
+     * an array is left alone rather than split wrongly, because a static check
+     * that reports the wrong line is one people learn to ignore.
+     */
+    private static function secondArgument(string $arguments): ?string
+    {
+        $inner = trim($arguments);
+        if (str_starts_with($inner, '(')) {
+            $inner = substr($inner, 1, -1);
+        }
+
+        $depth = 0;
+        $quote = '';
+
+        for ($i = 0, $length = strlen($inner); $i < $length; $i++) {
+            $char = $inner[$i];
+
+            if ($quote !== '') {
+                if ($char === '\\') {
+                    $i++;
+                } elseif ($char === $quote) {
+                    $quote = '';
+                }
+                continue;
+            }
+
+            if ($char === "'" || $char === '"') {
+                $quote = $char;
+            } elseif ($char === '(' || $char === '[') {
+                $depth++;
+            } elseif ($char === ')' || $char === ']') {
+                $depth--;
+            } elseif ($char === ',' && $depth === 0) {
+                return trim(substr($inner, $i + 1));
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Refuse a literal that is not a string.
+     *
+     * Only literals. A variable or a call is left alone — `query('period',
+     * UsageCounter::currentPeriod())` is correct and PHP enforces its type at
+     * the call — and the defect this exists for was always a literal: `false`
+     * written where the signature wanted `null`.
+     */
+    /**
+     * Does this argument suit the parameter in that position?
+     *
+     * Variables, constants and calls always pass: their type is the caller's
+     * business and PHP enforces it. Only literals are judged, because the
+     * defects this exists for were always literals — a `false` where a ?string
+     * was wanted, and a `''` where a ?int was.
+     */
+    private static function argumentFits(string $argument, string $expected): bool
+    {
+        $argument = trim($argument);
+
+        if (strcasecmp($argument, 'null') === 0) {
+            return true;
+        }
+
+        if (str_starts_with($argument, "'") || str_starts_with($argument, '"')) {
+            return $expected === 'string';
+        }
+
+        if (preg_match('/^-?\\d+$/', $argument) === 1) {
+            return $expected === 'int';
+        }
+
+        // true, false, an array literal: wrong in either position.
+        if (preg_match('/^(true|false|\\[|array\\s*\\()/i', $argument) === 1) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /** Source with comments removed, so a docblock cannot be a finding. */
+    private static function withoutComments(string $source): string
+    {
+        $out = '';
+
+        foreach (token_get_all($source) as $token) {
+            if (is_array($token)) {
+                // Replaced by their own newlines, so reported line numbers
+                // still point at the real line.
+                $out .= in_array($token[0], [T_COMMENT, T_DOC_COMMENT], true)
+                    ? str_repeat("\n", substr_count($token[1], "\n"))
+                    : $token[1];
+
+                continue;
+            }
+
+            $out .= $token;
+        }
+
+        return $out;
     }
 
     private static function noRepeatedPlaceholders(): void

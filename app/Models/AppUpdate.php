@@ -15,12 +15,12 @@ final class AppUpdate extends Model
     protected static string $table = 'app_updates';
     protected static bool $tenantScoped = false;
     protected static bool $softDeletes = false;
-    protected static array $jsonColumns = ['manifest_json', 'applied_migrations_json'];
+    protected static array $jsonColumns = ['manifest_json', 'applied_migrations_json', 'copied_migrations_json'];
     protected static array $sortable = ['id', 'created_at', 'status'];
     protected static array $fillable = [
         'from_version', 'to_version', 'from_commit', 'to_commit', 'status', 'step',
         'progress_pct', 'backup_id', 'log_path', 'journal_path', 'stage_path',
-        'manifest_json', 'applied_migrations_json', 'error_text',
+        'manifest_json', 'applied_migrations_json', 'copied_migrations_json', 'error_text',
         'started_by', 'trigger_source', 'started_at', 'finished_at',
     ];
 
@@ -127,13 +127,20 @@ final class AppUpdate extends Model
         );
     }
 
-    public static function markRolledBack(int $id, string $error): void
+    /**
+     * @param string $step the step the run had reached, restated because a
+     *                     database restore rewinds this row to its
+     *                     pre-update contents and would otherwise leave the
+     *                     history showing whichever step the backup caught
+     */
+    public static function markRolledBack(int $id, string $error, string $step = 'ROLLBACK'): void
     {
         DB::execute(
             'UPDATE ' . self::tableName() . '
-             SET status = \'rolled_back\', error_text = :e, finished_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP()
+             SET status = \'rolled_back\', step = :step, error_text = :e,
+                 finished_at = UTC_TIMESTAMP(), updated_at = UTC_TIMESTAMP()
              WHERE id = :id',
-            ['id' => $id, 'e' => \App\Core\Logger::redactString($error)]
+            ['id' => $id, 'step' => $step, 'e' => \App\Core\Logger::redactString($error)]
         );
     }
 
@@ -142,6 +149,23 @@ final class AppUpdate extends Model
     {
         DB::execute(
             'UPDATE ' . self::tableName() . ' SET applied_migrations_json = :m, updated_at = UTC_TIMESTAMP() WHERE id = :id',
+            ['id' => $id, 'm' => json_encode(array_values($filenames))]
+        );
+    }
+
+    /**
+     * The migration files this update copied into database/migrations.
+     *
+     * Recorded separately from the applied list: a rollback needs to remove
+     * the files it introduced, which is not the same set as the migrations
+     * that ran — a file already on disk is applied but not copied.
+     *
+     * @param list<string> $filenames
+     */
+    public static function recordCopiedMigrations(int $id, array $filenames): void
+    {
+        DB::execute(
+            'UPDATE ' . self::tableName() . ' SET copied_migrations_json = :m, updated_at = UTC_TIMESTAMP() WHERE id = :id',
             ['id' => $id, 'm' => json_encode(array_values($filenames))]
         );
     }
@@ -178,13 +202,41 @@ final class AppUpdate extends Model
     /** @param array<string,mixed> $row @return array<string,mixed> */
     private static function decode(array $row): array
     {
-        foreach (['manifest_json', 'applied_migrations_json'] as $column) {
+        foreach (['manifest_json', 'applied_migrations_json', 'copied_migrations_json'] as $column) {
             if (isset($row[$column]) && is_string($row[$column])) {
                 $decoded = json_decode($row[$column], true);
                 $row[$column] = is_array($decoded) ? $decoded : null;
             }
         }
 
+        $row['rollback_available'] = self::journalExists($row);
+
         return $row;
+    }
+
+    /**
+     * Is the per-file undo list still on disk?
+     *
+     * journal_path stays set for the life of the row, but the journal itself
+     * is pruned with the backups and discarded once a rollback has consumed
+     * it. Offering "roll back to this point" on the strength of the column
+     * alone would present a button that reverses migrations and restores the
+     * database while putting no files back — the exact failure this column was
+     * meant to prevent.
+     *
+     * @param array<string,mixed> $row
+     */
+    private static function journalExists(array $row): bool
+    {
+        if (($row['status'] ?? '') !== 'success') {
+            return false;
+        }
+
+        $relative = (string) ($row['journal_path'] ?? '');
+        if ($relative === '' || !defined('APP_ROOT')) {
+            return false;
+        }
+
+        return is_file(APP_ROOT . '/' . ltrim($relative, '/'));
     }
 }

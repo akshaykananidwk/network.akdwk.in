@@ -150,11 +150,19 @@ final class UpdateSetting extends Model
         return $plain;
     }
 
+    /**
+     * Is the updater pointed at a repository?
+     *
+     * A token is deliberately not required: a public repository needs none,
+     * and demanding one would force an operator to mint a credential the
+     * system will never use. A private repository without a token simply
+     * reads as "not found", and testConnection() says so explicitly.
+     */
     public static function isConfigured(): bool
     {
         $row = self::current();
 
-        return !empty($row['repo_owner']) && !empty($row['repo_name']) && self::token() !== null;
+        return !empty($row['repo_owner']) && !empty($row['repo_name']);
     }
 
     /** @return list<string> */

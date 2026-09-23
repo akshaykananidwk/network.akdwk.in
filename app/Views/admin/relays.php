@@ -79,21 +79,14 @@ declare(strict_types=1);
                 <input type="text" id="host" name="host" required placeholder="relay1.example.com">
             </div>
             <div class="field">
-                <label for="port">UDP port</label>
-                <input type="number" id="port" name="port" min="1" max="65535" value="51820" required>
+                <label for="port">Control port (UDP)</label>
+                <input type="number" id="port" name="port" min="1" max="65535" value="9000" required>
+                <p class="field-hint">
+                    What <code>akconnect-relay --control</code> listens on. 9000 unless you changed
+                    it. Its data sockets use a separate range and are not configured here.
+                </p>
+                <?php if (field_error('port') !== ''): ?><p class="field-error"><?= e(field_error('port')) ?></p><?php endif; ?>
             </div>
-            <div class="field">
-                <label for="tcp_port">TCP fallback port</label>
-                <input type="number" id="tcp_port" name="tcp_port" min="1" max="65535" value="443">
-                <p class="field-hint">Used where UDP is blocked outright.</p>
-            </div>
-        </div>
-
-        <div class="field">
-            <label for="public_key">Relay public key</label>
-            <input type="text" id="public_key" name="public_key" required maxlength="64"
-                   placeholder="base64-encoded 32-byte Curve25519 key">
-            <p class="field-hint">Printed by the relay service on first start.</p>
         </div>
 
         <div class="field">

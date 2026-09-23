@@ -68,15 +68,28 @@ $base = url('networks/' . $network['id']);
                         ? '· ' . e((int) $join_code['max_uses'] - (int) $join_code['uses']) . ' use(s) left'
                         : '· unlimited uses until it expires' ?>
                 </p>
+                <?php if ((int) ($join_code['pre_approved'] ?? 0) === 1): ?>
+                    <p class="text-sm">
+                        <strong>Pre-approved.</strong> A device using this code joins immediately,
+                        with no approval click. That is your decision, recorded in the audit log —
+                        revoke the code below if you did not mean it.
+                    </p>
+                <?php endif; ?>
             </div>
 
             <div class="install-commands">
                 <div class="install-block">
-                    <span class="text-muted text-sm">Windows (PowerShell as administrator)</span>
+                    <span class="text-muted text-sm">Windows — send this one link</span>
                     <div class="code-row">
-                        <code id="cmd-win"><?= e($install_windows) ?></code>
-                        <button type="button" class="btn btn-sm" data-action="copy" data-copy-target="cmd-win">Copy</button>
+                        <code id="install-link"><?= e((string) ($install_link ?? '')) ?></code>
+                        <button type="button" class="btn btn-sm"
+                                data-action="copy" data-copy-target="install-link">Copy link</button>
                     </div>
+                    <p class="text-sm">
+                        Paste it into WhatsApp or an email. It opens a page with the download
+                        button and this code already on it — the customer double-clicks, clicks
+                        OK, and is done. No PowerShell, no restart, nothing else to send.
+                    </p>
                 </div>
                 <div class="install-block">
                     <span class="text-muted text-sm">Linux / macOS</span>
@@ -91,6 +104,15 @@ $base = url('networks/' . $network['id']);
                 <form method="post" action="<?= e($base . '/join-code') ?>" class="inline">
                     <?= csrf_field() ?>
                     <button type="submit" class="btn btn-sm">New code</button>
+                </form>
+                <form method="post" action="<?= e($base . '/join-code') ?>" class="inline">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="pre_approved" value="1">
+                    <input type="hidden" name="max_uses" value="1">
+                    <input type="hidden" name="ttl_minutes" value="30">
+                    <button type="submit" class="btn btn-sm">
+                        New pre-approved code (1 device, 30 min)
+                    </button>
                 </form>
                 <form method="post" action="<?= e($base . '/join-code/revoke') ?>" class="inline">
                     <?= csrf_field() ?>
@@ -219,17 +241,40 @@ $base = url('networks/' . $network['id']);
                 subnet-router. <strong>0.0.0.0/0 is rejected:</strong> the tunnel never carries a
                 default route, so normal internet traffic always leaves via the customer's own ISP.
             </p>
+            <p class="text-muted px-4 pb-4">
+                <strong>Two addresses per LAN, on purpose.</strong> Almost every router hands out
+                192.168.1.0/24, so if the overlay carried the customer's real range your own laptop
+                could not tell theirs from its own. Each site gets a range of its own here instead —
+                an NVR at <code>192.168.1.50</code> on the site is reached at the overlay address
+                shown beside it. Write access rules about the real address, the one on the label on
+                the device; the gateway translates.
+            </p>
+
+            <form method="post" action="<?= e(url('networks/' . $network['id'] . '/routes')) ?>" class="px-4 pb-4 form-inline">
+                <?= csrf_field() ?>
+                <label for="destination_cidr">Advertise a LAN</label>
+                <input type="text" id="destination_cidr" name="destination_cidr" placeholder="192.168.1.0/24" required>
+                <label for="via_device_id">through</label>
+                <select id="via_device_id" name="via_device_id" required>
+                    <option value="">choose a device at that site…</option>
+                    <?php foreach ($gateways as $gateway): ?>
+                        <option value="<?= e($gateway['id']) ?>"><?= e($gateway['name']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+                <button type="submit" class="btn btn-primary">Advertise</button>
+            </form>
 
             <?php if ($routes === []): ?>
                 <?= \App\Core\View::partial('partials.empty', [
-                    'icon' => '↳', 'title' => 'No routes', 'message' => 'Mark a device as a gateway to advertise its LAN.',
+                    'icon' => '↳', 'title' => 'No routes', 'message' => 'Advertise a LAN above to reach machines that cannot run the agent.',
                 ]) ?>
             <?php else: ?>
                 <div class="table-wrap">
                     <table class="table">
                         <thead>
                         <tr>
-                            <th scope="col">Destination</th>
+                            <th scope="col">On the site</th>
+                            <th scope="col">On the overlay</th>
                             <th scope="col">Via</th>
                             <th scope="col">Metric</th>
                             <th scope="col">State</th>
@@ -238,17 +283,73 @@ $base = url('networks/' . $network['id']);
                         <tbody>
                         <?php foreach ($routes as $route): ?>
                             <tr>
-                                <td><code><?= e($route['destination_cidr']) ?></code></td>
+                                <td>
+                                    <code><?= e($route['destination_cidr']) ?></code>
+                                    <span class="text-muted d-block small">the customer&rsquo;s own range</span>
+                                </td>
+                                <td>
+                                    <?php if (!empty($route['mapped_cidr'])): ?>
+                                        <code><?= e($route['mapped_cidr']) ?></code>
+                                        <span class="text-muted d-block small">what you connect to</span>
+                                    <?php else: ?>
+                                        <code class="text-muted"><?= e($route['destination_cidr']) ?></code>
+                                        <span class="text-muted d-block small">unmapped &mdash; re-advertise to fix</span>
+                                    <?php endif; ?>
+                                </td>
                                 <td><?= e($route['via_device_name'] ?? '—') ?> <code class="text-muted"><?= e($route['via_device_ip'] ?? '') ?></code></td>
                                 <td><?= e($route['metric']) ?></td>
                                 <td>
                                     <?php if ((int) $route['approved'] !== 1): ?>
                                         <span class="chip chip-warning">awaiting approval</span>
+                                        <form method="post" action="<?= e(url('networks/' . $network['id'] . '/routes/' . $route['id'] . '/approve')) ?>" class="inline">
+                                            <?= csrf_field() ?>
+                                            <button type="submit" class="btn btn-sm btn-primary">Approve</button>
+                                        </form>
                                     <?php elseif ((int) $route['enabled'] === 1): ?>
                                         <span class="chip chip-online">active</span>
                                     <?php else: ?>
                                         <span class="chip">disabled</span>
                                     <?php endif; ?>
+                                    <form method="post" action="<?= e(url('networks/' . $network['id'] . '/routes/' . $route['id'] . '/withdraw')) ?>" class="inline">
+                                        <?= csrf_field() ?>
+                                        <button type="submit" class="btn btn-sm btn-danger">Withdraw</button>
+                                    </form>
+                                </td>
+                            </tr>
+                            <tr class="row-detail">
+                                <td colspan="5">
+                                    <p class="text-muted small mb-2">
+                                        Machines at this site. Give each one the address printed on it — the
+                                        overlay address and the name are worked out from that.
+                                    </p>
+                                    <?php foreach ($hosts[(int) $route['id']] ?? [] as $host): ?>
+                                        <?php
+                                            $mapped = \App\Services\SubnetMapper::mapAddress(
+                                                (string) $host['address'],
+                                                (string) $route['destination_cidr'],
+                                                (string) ($route['mapped_cidr'] ?: $route['destination_cidr'])
+                                            );
+                                            $site = \App\Services\DnsZone::slug((string) ($route['via_device_name'] ?? ''));
+                                        ?>
+                                        <div class="host-row">
+                                            <code><?= e($host['address']) ?></code>
+                                            <span class="text-muted">→</span>
+                                            <code><?= e($mapped === null ? '—' : explode('/', $mapped)[0]) ?></code>
+                                            <?php if ($site !== ''): ?>
+                                                <code class="chip"><?= e(\App\Services\DnsZone::slug((string) $host['label']) . '.' . $site . '.' . $zone) ?></code>
+                                            <?php endif; ?>
+                                            <form method="post" action="<?= e(url('networks/' . $network['id'] . '/hosts/' . $host['id'] . '/delete')) ?>" class="inline">
+                                                <?= csrf_field() ?>
+                                                <button type="submit" class="btn btn-sm">Remove</button>
+                                            </form>
+                                        </div>
+                                    <?php endforeach; ?>
+                                    <form method="post" action="<?= e(url('networks/' . $network['id'] . '/routes/' . $route['id'] . '/hosts')) ?>" class="form-inline">
+                                        <?= csrf_field() ?>
+                                        <input type="text" name="label" placeholder="nvr" maxlength="63" required>
+                                        <input type="text" name="address" placeholder="192.168.1.50" required>
+                                        <button type="submit" class="btn btn-sm">Name it</button>
+                                    </form>
                                 </td>
                             </tr>
                         <?php endforeach; ?>

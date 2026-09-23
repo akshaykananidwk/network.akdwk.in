@@ -13,7 +13,7 @@ final class AppBackup extends Model
     protected static bool $softDeletes = true;
     protected static array $sortable = ['id', 'created_at', 'size_bytes'];
     protected static array $fillable = [
-        'type', 'files_path', 'db_path', 'files_sha256', 'db_sha256', 'size_bytes',
+        'type', 'files_path', 'db_path', 'files_sha256', 'db_sha256', 'db_method', 'size_bytes',
         'app_version', 'app_commit', 'uploads_included', 'uploads_skipped_reason',
         'status', 'error_text', 'retained_until', 'created_by',
     ];

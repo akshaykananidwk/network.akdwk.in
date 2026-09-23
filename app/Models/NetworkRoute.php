@@ -19,7 +19,7 @@ final class NetworkRoute extends Model
     protected static bool $softDeletes = true;
     protected static array $sortable = ['metric', 'destination_cidr', 'id'];
     protected static array $fillable = [
-        'tenant_id', 'network_id', 'destination_cidr', 'via_device_id',
+        'tenant_id', 'network_id', 'destination_cidr', 'mapped_cidr', 'via_device_id',
         'metric', 'description', 'approved', 'enabled',
     ];
 
@@ -42,16 +42,64 @@ final class NetworkRoute extends Model
      * Routes advertised by one gateway device, used when building its peers'
      * allowed_ips.
      *
+     * The **mapped** prefix, because that is the address space the overlay
+     * uses. The customer's real range never appears on the wire between two
+     * devices: it exists on the gateway's own LAN and nowhere else.
+     *
      * @return list<string>
      */
     public static function cidrsViaDevice(int $deviceId): array
     {
         $rows = DB::select(
-            'SELECT destination_cidr FROM ' . self::tableName() . '
+            'SELECT destination_cidr, mapped_cidr FROM ' . self::tableName() . '
              WHERE via_device_id = :d AND enabled = 1 AND approved = 1 AND deleted_at IS NULL',
             ['d' => $deviceId]
         );
 
-        return array_map(static fn (array $r): string => (string) $r['destination_cidr'], $rows);
+        return array_map(
+            static fn (array $r): string => (string) ($r['mapped_cidr'] ?: $r['destination_cidr']),
+            $rows
+        );
+    }
+
+    /**
+     * The routes one gateway device carries, real prefix and mapped prefix
+     * together.
+     *
+     * Both, because the gateway is the one place that needs each: the real
+     * range to forward into and NAT for, the mapped range to recognise on the
+     * tunnel and to compile rules against.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public static function servedByDevice(int $deviceId): array
+    {
+        return DB::select(
+            'SELECT destination_cidr, mapped_cidr FROM ' . self::tableName() . '
+             WHERE via_device_id = :d AND enabled = 1 AND approved = 1 AND deleted_at IS NULL
+             ORDER BY id ASC',
+            ['d' => $deviceId]
+        );
+    }
+
+    /**
+     * Mapped prefixes already in use in one network.
+     *
+     * Deleted and unapproved routes count: a prefix handed to a route that is
+     * waiting for approval must not be handed to a second one, and a prefix
+     * freed by a deletion is better left alone than reissued to a different
+     * LAN while agents may still hold the old configuration.
+     *
+     * @return list<string>
+     */
+    public static function mappedInNetwork(int $networkId): array
+    {
+        $rows = DB::select(
+            'SELECT mapped_cidr FROM ' . self::tableName() . '
+             WHERE network_id = :n AND mapped_cidr IS NOT NULL',
+            ['n' => $networkId]
+        );
+
+        return array_map(static fn (array $r): string => (string) $r['mapped_cidr'], $rows);
     }
 }

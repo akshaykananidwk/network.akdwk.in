@@ -124,6 +124,45 @@ final class Request
         return is_scalar($value) ? (string) $value : $default;
     }
 
+    /**
+     * A checkbox, a toggle, a "1" in a hidden field.
+     *
+     * This exists because reading one through input() crashed production.
+     * `$request->input('pre_approved', false)` is the obvious thing to write
+     * and is a TypeError: the default is typed ?string, and under
+     * declare(strict_types=1) the check happens at the call, so it throws on
+     * every request whether the field was posted or not. Issuing a join code
+     * returned 500 from both buttons on the page.
+     *
+     * A boolean accessor has no string default to get wrong. It also reads
+     * what a browser actually sends: an unchecked checkbox sends nothing, a
+     * checked one sends "on" unless it is given a value, and the hidden-field
+     * idiom sends a literal "0" that (bool) would otherwise read as false by
+     * luck rather than by intent — while reading the string "false" as true.
+     */
+    public function boolean(string $key, bool $default = false): bool
+    {
+        $value = $this->post[$key] ?? $this->json()[$key] ?? $this->query[$key] ?? null;
+
+        if ($value === null) {
+            return $default;
+        }
+
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        if (!is_scalar($value)) {
+            return $default;
+        }
+
+        return match (strtolower(trim((string) $value))) {
+            '1', 'true', 'on', 'yes' => true,
+            '0', 'false', 'off', 'no', '' => false,
+            default => $default,
+        };
+    }
+
     /** @return array<string,mixed> */
     public function all(): array
     {
@@ -154,6 +193,21 @@ final class Request
         return is_array($file) ? $file : null;
     }
 
+    /**
+     * One value out of the server environment.
+     *
+     * Exposed because the auth middleware needs SERVER_SOFTWARE to tell an
+     * Apache-with-FastCGI deployment — the one that drops the Authorization
+     * header — apart from everything else, and reaching into $_SERVER from a
+     * middleware would put a second source of request state in the codebase.
+     */
+    public function server(string $key): ?string
+    {
+        $value = $this->server[$key] ?? null;
+
+        return is_scalar($value) ? (string) $value : null;
+    }
+
     public function header(string $name): ?string
     {
         $key = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
@@ -165,9 +219,51 @@ final class Request
         return is_scalar($value) ? (string) $value : null;
     }
 
+    /**
+     * The Authorization header, wherever this web server left it.
+     *
+     * Apache does not pass it to FastCGI unless it is told to. Told to with
+     * `CGIPassAuth`, it arrives as HTTP_AUTHORIZATION. Told to with the older
+     * `SetEnvIf` trick, or moved by a rewrite, it arrives as
+     * REDIRECT_HTTP_AUTHORIZATION — sometimes with a REDIRECT_ prefix for
+     * every internal redirect the request went through, which is why this
+     * walks a list rather than checking one alternative.
+     *
+     * A production deployment on Apache + PHP-FPM had every agent call arrive
+     * with no credentials because of this. From the panel's side the requests
+     * simply looked unauthenticated, and the agent read that as a revoked
+     * device and told the customer to run `reset` — which would have destroyed
+     * a working device's identity to fix a web server setting.
+     */
+    public function authorizationHeader(): ?string
+    {
+        foreach ([
+            'HTTP_AUTHORIZATION',
+            'REDIRECT_HTTP_AUTHORIZATION',
+            'REDIRECT_REDIRECT_HTTP_AUTHORIZATION',
+        ] as $key) {
+            $value = $this->server[$key] ?? null;
+            if (is_scalar($value) && (string) $value !== '') {
+                return (string) $value;
+            }
+        }
+
+        // Last resort, and only where the server offers it: some SAPIs expose
+        // the original headers when the environment does not.
+        if (function_exists('apache_request_headers')) {
+            foreach (apache_request_headers() as $name => $value) {
+                if (strcasecmp($name, 'Authorization') === 0 && is_scalar($value) && (string) $value !== '') {
+                    return (string) $value;
+                }
+            }
+        }
+
+        return null;
+    }
+
     public function bearerToken(): ?string
     {
-        $header = $this->header('Authorization');
+        $header = $this->authorizationHeader();
         if ($header !== null && preg_match('/^Bearer\s+(\S+)$/i', $header, $m) === 1) {
             return $m[1];
         }

@@ -7,13 +7,17 @@ namespace App\Services;
 use App\Core\Auth;
 use App\Core\Config;
 use App\Core\DB;
+use App\Core\Logger;
 use App\Core\ValidationException;
+use App\Middleware\TenantScope;
 use App\Models\AclRule;
 use App\Models\Device;
 use App\Models\IpAllocation;
 use App\Models\JoinCode;
 use App\Models\Network;
+use App\Models\Tenant;
 use App\Models\NetworkRoute;
+use App\Models\RouteHost;
 
 /**
  * Network lifecycle. Everything that changes what an agent should do ends with
@@ -27,9 +31,29 @@ final class NetworkService
      */
     public static function create(array $input): array
     {
+        // A super administrator has no tenant of their own — that is what makes
+        // them one — so they have to say which customer a network belongs to.
+        // Until 1.9.1 they could not: the form had no such field, and the
+        // failure arrived as "please correct the highlighted fields" with
+        // nothing highlighted.
         $tenantId = Auth::tenantId();
         if ($tenantId === null) {
-            throw new ValidationException(['tenant_id' => 'A network must belong to a customer.']);
+            $chosen = (int) ($input['tenant_id'] ?? 0);
+            if ($chosen <= 0) {
+                throw new ValidationException([
+                    'tenant_id' => 'Choose which customer this network belongs to.',
+                ]);
+            }
+
+            // The tenants table is platform-level and not tenant-scoped, so
+            // this needs no cross-tenant block; reaching this code at all
+            // already required a platform super admin.
+            $tenant = Tenant::find($chosen);
+            if ($tenant === null) {
+                throw new ValidationException(['tenant_id' => 'That customer no longer exists.']);
+            }
+
+            $tenantId = (int) $tenant['id'];
         }
 
         BillingService::assertCanAddNetwork($tenantId);
@@ -39,31 +63,45 @@ final class NetworkService
 
         self::assertCidrNotOverlapping($tenantId, $range, null);
 
-        $networkId = DB::transaction(static function () use ($tenantId, $input, $range): int {
-            $id = Network::create([
-                'tenant_id'            => $tenantId,
-                'name'                 => (string) $input['name'],
-                'network_uid'          => Network::generateUid(),
-                'description'          => $input['description'] ?? null,
-                'cidr'                 => $range['cidr'],
-                'dns_json'             => $input['dns'] ?? Config::get('network.default_dns', []),
-                'search_domain'        => $input['search_domain'] ?? null,
-                'mtu'                  => (int) ($input['mtu'] ?? Config::get('network.default_mtu', 1280)),
-                'keepalive_seconds'    => (int) ($input['keepalive_seconds'] ?? Config::get('network.default_keepalive', 25)),
-                'auto_assign_ip'       => (int) (bool) ($input['auto_assign_ip'] ?? true),
-                'auto_approve_devices' => (int) (bool) ($input['auto_approve_devices'] ?? false),
-                'private'              => (int) (bool) ($input['private'] ?? true),
-                'acl_default_action'   => ($input['acl_default_action'] ?? 'allow') === 'deny' ? 'deny' : 'allow',
-                'status'               => 'active',
-                'created_by'           => Auth::id(),
-            ]);
+        // The write happens in the chosen customer's scope. A super admin has
+        // no scope of their own, so without this the inserts below would run
+        // unfiltered.
+        $networkId = TenantScope::asTenant($tenantId, static fn (): int => DB::transaction(
+            static function () use ($tenantId, $input, $range): int {
+                $id = Network::create([
+                    'tenant_id'            => $tenantId,
+                    'name'                 => (string) $input['name'],
+                    'network_uid'          => Network::generateUid(),
+                    'description'          => $input['description'] ?? null,
+                    'cidr'                 => $range['cidr'],
+                    'dns_json'             => $input['dns'] ?? Config::get('network.default_dns', []),
+                    // Always a zone, because §18's names need one and a network
+                    // created without a search domain would silently have no
+                    // way to be addressed by name.
+                    'search_domain'        => self::zoneFor($input),
+                    'mapped_pool'          => isset($input['mapped_pool']) && trim((string) $input['mapped_pool']) !== ''
+                        ? SubnetMapper::validatePool((string) $input['mapped_pool'], $range['cidr'])
+                        : null,
+                    'mtu'                  => (int) ($input['mtu'] ?? Config::get('network.default_mtu', 1280)),
+                    'keepalive_seconds'    => (int) ($input['keepalive_seconds'] ?? Config::get('network.default_keepalive', 25)),
+                    'auto_assign_ip'       => (int) (bool) ($input['auto_assign_ip'] ?? true),
+                    'auto_approve_devices' => (int) (bool) ($input['auto_approve_devices'] ?? false),
+                    'private'              => (int) (bool) ($input['private'] ?? true),
+                    'acl_default_action'   => ($input['acl_default_action'] ?? 'allow') === 'deny' ? 'deny' : 'allow',
+                    'status'               => 'active',
+                    'created_by'           => Auth::id(),
+                ]);
 
-            IpamService::createPool($tenantId, $id, $range['cidr']);
+                IpamService::createPool($tenantId, $id, $range['cidr']);
 
-            return $id;
-        });
+                return $id;
+            }
+        ));
 
-        $network = Network::findOrFail($networkId);
+        $network = TenantScope::asTenant(
+            $tenantId,
+            static fn (): array => Network::findOrFail($networkId)
+        );
         AuditService::log('network.create', 'network', $networkId, null, [
             'name' => $network['name'],
             'cidr' => $network['cidr'],
@@ -86,6 +124,36 @@ final class NetworkService
             if (array_key_exists($field, $input)) {
                 $changes[$field] = $input[$field];
             }
+        }
+
+        if (array_key_exists('mapped_pool', $input)) {
+            $pool = trim((string) $input['mapped_pool']);
+            // Empty clears it back to the configured default rather than
+            // storing an empty string, so "leave the box blank" means what an
+            // operator expects.
+            $changes['mapped_pool'] = $pool === ''
+                ? null
+                : SubnetMapper::validatePool($pool, (string) ($input['cidr'] ?? $before['cidr']));
+
+            // Routes already allocated keep the prefixes they have. Changing
+            // the pool decides where the *next* one comes from; re-allocating
+            // the existing ones would move addresses out from under every
+            // agent that has them, which is a bigger surprise than the problem
+            // being fixed.
+            if ($changes['mapped_pool'] !== $before['mapped_pool']) {
+                Logger::notice('network', 'Mapping pool changed; existing routes keep their prefixes', [
+                    'network_id' => $networkId,
+                    'from'       => $before['mapped_pool'],
+                    'to'         => $changes['mapped_pool'],
+                ]);
+            }
+        }
+
+        // Validated on the way in, not only on create. A network edited to a
+        // zone outside .internal would make every one of its agents
+        // authoritative for a domain somebody else owns.
+        if (array_key_exists('search_domain', $changes)) {
+            $changes['search_domain'] = DnsZone::validate((string) $changes['search_domain']);
         }
         foreach (['auto_assign_ip', 'auto_approve_devices', 'private'] as $field) {
             if (array_key_exists($field, $input)) {
@@ -158,10 +226,33 @@ final class NetworkService
             'devices'   => Device::where(['network_id' => $networkId], 'name', 'ASC'),
             'pool'      => IpAllocation::poolStats($networkId),
             'routes'    => NetworkRoute::forNetwork($networkId, false),
+            // Keyed by route, so the view can list a route's machines under it
+            // without a query per row.
+            'hosts'     => self::hostsByRoute($networkId),
+            'zone'      => DnsZone::forNetwork($network),
+            'gateways'  => array_values(array_filter(
+                Device::where(['network_id' => $networkId], 'name', 'ASC'),
+                static fn (array $d): bool => $d['status'] === 'authorized'
+            )),
             'acl'       => AclRule::forNetwork($networkId, false),
             'join_code' => JoinCode::activeForNetwork($networkId),
             'capacity'  => IpamService::describeCapacity((string) $network['cidr']),
         ];
+    }
+
+    /**
+     * Named machines, grouped by the route they sit behind.
+     *
+     * @return array<int, list<array<string,mixed>>>
+     */
+    private static function hostsByRoute(int $networkId): array
+    {
+        $out = [];
+        foreach (RouteHost::forNetwork($networkId) as $host) {
+            $out[(int) $host['route_id']][] = $host;
+        }
+
+        return $out;
     }
 
     /**
@@ -196,20 +287,74 @@ final class NetworkService
         }
     }
 
-    /** The one-line install command shown on the network page. */
+    /**
+     * What to actually type, per platform.
+     *
+     * This used to print a PowerShell one-liner that fetched `install.ps1` and
+     * ran a verb called `join`. There is no install.ps1 — the URL was a 404 —
+     * the binary is `akconnect-agent`, not the brand slug, and the verb is
+     * `enroll`. Three separate inventions in one line, shown to every
+     * administrator on the network page, and the first person to try it in the
+     * field got a 404.
+     *
+     * Windows is not given a command at all, because on Windows the answer is
+     * not a command: it is akconnect-setup.exe, double-clicked, asking for the
+     * join code and nothing else (§33). Printing a command there would be
+     * offering the hard way as if it were the way.
+     */
+    /**
+     * The one link to send a customer, with their code already in it.
+     *
+     * What a supplier actually does is paste something into WhatsApp. Two
+     * things to paste — a file and a code — is two things to get wrong, and
+     * the telephone call that follows is about a code typed with a lowercase
+     * L in it. This is one thing.
+     */
+    public static function installLink(string $joinCode): string
+    {
+        $url = rtrim((string) Config::get('app.url', ''), '/');
+
+        return $url . '/join/' . rawurlencode($joinCode);
+    }
+
     public static function installCommand(string $joinCode, string $os = 'windows'): string
     {
         $url = rtrim((string) Config::get('app.url', ''), '/');
-        $brandSlug = strtolower((string) preg_replace('/[^a-z0-9]+/i', '-', (string) Config::get('brand.name', 'agent')));
 
         return match ($os) {
-            'linux', 'darwin' => sprintf('curl -fsSL %s/install.sh | sudo sh -s -- --join %s', $url, $joinCode),
-            default => sprintf(
-                'powershell -c "irm %s/install.ps1 | iex; %s-agent join %s"',
+            'linux', 'darwin' => sprintf(
+                'sudo akconnect-agent enroll -panel %s -join-code %s',
                 $url,
-                $brandSlug,
+                $joinCode
+            ),
+            default => sprintf(
+                'akconnect-setup.exe          (double-click; it asks for the code)   %s',
                 $joinCode
             ),
         };
+    }
+
+    /**
+     * The DNS zone for a new network.
+     *
+     * Validated when an operator typed one, derived from the name when they
+     * did not. Always under .internal — see DnsZone for why that is not
+     * negotiable.
+     *
+     * @param array<string,mixed> $input
+     */
+    private static function zoneFor(array $input): string
+    {
+        $typed = trim((string) ($input['search_domain'] ?? ''));
+        if ($typed !== '') {
+            return DnsZone::validate($typed);
+        }
+
+        $slug = DnsZone::slug((string) ($input['name'] ?? ''));
+        if ($slug === '') {
+            $slug = 'net-' . bin2hex(random_bytes(3));
+        }
+
+        return $slug . DnsZone::SUFFIX;
     }
 }

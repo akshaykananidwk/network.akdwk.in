@@ -31,8 +31,25 @@ $installer = new Installer(APP_ROOT);
 
 // ---------------------------------------------------------------- lock gate
 
-if ($installer->isLocked()) {
+$evidence = $installer->installedEvidence();
+
+if ($evidence !== []) {
+    // Put the lock back before answering, so the window closes now rather
+    // than at whatever moment somebody notices it a second time.
+    $relocked = $installer->relock();
+
     http_response_code(403);
+
+    $why = '<ul><li>' . implode('</li><li>', array_map(
+        static fn (string $reason): string => htmlspecialchars($reason, ENT_QUOTES),
+        $evidence
+    )) . '</li></ul>';
+
+    $note = $relocked
+        ? '<p class="hint">install/install.lock has been restored automatically.</p>'
+        : '<p class="hint">install/install.lock could not be written — check that install/ is writable, '
+            . 'or delete the folder\'s contents by hand.</p>';
+
     render_shell('Already installed', <<<HTML
         <div class="alert alert-error">
             <span class="alert-icon">✕</span>
@@ -41,6 +58,9 @@ if ($installer->isLocked()) {
                 <p>Running the installer again could destroy live data, so it is disabled.</p>
             </div>
         </div>
+        <p>What says so:</p>
+        $why
+        $note
         <p>If you genuinely need to reinstall:</p>
         <ol class="steps">
             <li>Take a backup of your database and of <code>config/config.php</code>.</li>
@@ -256,8 +276,13 @@ if ($isPost) {
             $answers['mail_pass'] = (string) ($_POST['mail_pass'] ?? '');
             $answers['mail_security'] = (string) ($_POST['mail_security'] ?? 'tls');
             $answers['mail_from'] = trim((string) ($_POST['mail_from'] ?? ''));
-            $answers['coordinator_host'] = trim((string) ($_POST['coordinator_host'] ?? '127.0.0.1'));
+            // Blank, not 127.0.0.1. A default that is wrong for every
+            // deployment where the coordinator is on another machine produced
+            // a panel that looked configured and handed every agent an
+            // address pointing back at itself.
+            $answers['coordinator_host'] = trim((string) ($_POST['coordinator_host'] ?? ''));
             $answers['coordinator_port'] = (int) ($_POST['coordinator_port'] ?? 8443);
+            $answers['coordinator_public_key'] = trim((string) ($_POST['coordinator_public_key'] ?? ''));
             $answers['gh_owner'] = trim((string) ($_POST['gh_owner'] ?? ''));
             $answers['gh_repo'] = trim((string) ($_POST['gh_repo'] ?? ''));
             $answers['gh_branch'] = trim((string) ($_POST['gh_branch'] ?? 'main')) ?: 'main';
@@ -271,6 +296,17 @@ if ($isPost) {
             }
             if ($answers['support_email'] !== '' && filter_var($answers['support_email'], FILTER_VALIDATE_EMAIL) === false) {
                 $errors[] = 'The support email address is not valid.';
+            }
+            if ($answers['coordinator_public_key'] !== '') {
+                $raw = base64_decode($answers['coordinator_public_key'], true);
+                if ($raw === false || strlen($raw) !== 32) {
+                    $errors[] = 'The coordinator public key is not an X25519 key. It is 44 characters '
+                        . 'of base64 ending in "=", as printed by install-edge.sh.';
+                }
+            }
+            if ($answers['coordinator_host'] === '' && $answers['coordinator_public_key'] !== '') {
+                $errors[] = 'A coordinator public key without a host has nothing to talk to. '
+                    . 'Set both, or leave both blank and use Settings → Coordinator later.';
             }
 
             if ($errors === []) {

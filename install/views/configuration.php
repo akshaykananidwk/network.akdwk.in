@@ -122,18 +122,37 @@ $host = (string) parse_url($appUrl, PHP_URL_HOST);
                 <p class="hint" style="margin-top:0">
                     The Go coordinator handles NAT traversal and peer discovery. The panel works
                     without it; devices will simply not find each other until it is running.
+                    Leave these blank if the coordinator is not up yet — Settings &rarr;
+                    Coordinator takes the same three values later.
                 </p>
                 <div class="grid">
                     <div class="field">
                         <label for="coordinator_host">Host</label>
                         <input type="text" id="coordinator_host" name="coordinator_host"
-                               value="<?= h($answers['coordinator_host'] ?? '127.0.0.1') ?>">
+                               placeholder="coordinator.example.com"
+                               value="<?= h($answers['coordinator_host'] ?? '') ?>">
+                        <p class="hint">
+                            The address of the machine running the coordinator. Only use
+                            <code>127.0.0.1</code> if that machine is this one.
+                        </p>
                     </div>
                     <div class="field">
                         <label for="coordinator_port">Port</label>
                         <input type="number" id="coordinator_port" name="coordinator_port"
                                value="<?= h($answers['coordinator_port'] ?? 8443) ?>">
                     </div>
+                </div>
+                <div class="field">
+                    <label for="coordinator_public_key">Public key</label>
+                    <input type="text" id="coordinator_public_key" name="coordinator_public_key"
+                           placeholder="44 characters of base64, ending in ="
+                           value="<?= h($answers['coordinator_public_key'] ?? '') ?>">
+                    <p class="hint">
+                        Printed by <code>deploy/install-edge.sh</code> and by
+                        <code>akconnect-coordinator keygen</code>. Agents seal their
+                        announcements to it: set a host without this and discovery is configured
+                        but silent.
+                    </p>
                 </div>
             </fieldset>
 

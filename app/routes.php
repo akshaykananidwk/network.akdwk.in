@@ -35,6 +35,19 @@ $router->group('', ['maintenance'], static function (Router $router): void {
     $router->post('/reset-password', 'AuthController@resetPassword', ['guest', 'csrf', 'throttle:reset']);
 
     $router->post('/logout', 'AuthController@logout', ['csrf']);
+
+    // The customer installer, at an address that does not change between
+    // releases so a link in an email keeps working. Unauthenticated on
+    // purpose — see DownloadController for why that is safe and why the
+    // alternative is a customer on the phone.
+    $router->get('/download/setup.exe', 'DownloadController@windowsSetup', ['throttle:download']);
+    $router->get('/download/windows-pack.zip', 'DownloadController@windowsPack', ['throttle:download']);
+
+    // One link to send a customer, with their join code already in it. The
+    // code is the credential and it is short-lived, limited and revocable —
+    // see InstallLinkController for why this is not behind a sign-in.
+    $router->get('/join/{code}', 'InstallLinkController@show', ['throttle:download']);
+    $router->get('/join', 'InstallLinkController@show', ['throttle:download']);
 });
 
 // ------------------------------------------------------------ dashboard
@@ -62,12 +75,26 @@ $router->group('', ['maintenance', 'auth'], static function (Router $router): vo
     $router->post('/networks/{id:int}/acl/{ruleId:int}', 'NetworkController@updateAclRule', ['csrf', 'can:acl.manage']);
     $router->post('/networks/{id:int}/acl/{ruleId:int}/delete', 'NetworkController@deleteAclRule', ['csrf', 'can:acl.manage']);
 
+    // Advertised LANs, and the machines named inside them (§16–18). Advertising
+    // is a network change; approving one is what actually puts a customer's
+    // building in front of agents, so it sits behind the same permission that
+    // approves a device.
+    $router->post('/networks/{id:int}/routes', 'NetworkRouteController@store', ['csrf', 'can:network.update']);
+    $router->post('/networks/{id:int}/routes/{routeId:int}/approve', 'NetworkRouteController@approve', ['csrf', 'can:device.approve']);
+    $router->post('/networks/{id:int}/routes/{routeId:int}/withdraw', 'NetworkRouteController@withdraw', ['csrf', 'can:network.update']);
+    $router->post('/networks/{id:int}/routes/{routeId:int}/hosts', 'NetworkRouteController@storeHost', ['csrf', 'can:network.update']);
+    $router->post('/networks/{id:int}/hosts/{hostId:int}/delete', 'NetworkRouteController@deleteHost', ['csrf', 'can:network.update']);
+
     // ------------------------------------------------------------- devices
     $router->get('/devices', 'DeviceController@index', ['can:device.view'], 'devices');
     $router->get('/devices/{id:int}', 'DeviceController@show', ['can:device.view'], 'device.show');
     $router->post('/devices/{id:int}', 'DeviceController@update', ['csrf', 'can:device.update']);
     $router->post('/devices/{id:int}/approve', 'DeviceController@approve', ['csrf', 'can:device.approve']);
     $router->post('/devices/{id:int}/revoke', 'DeviceController@revoke', ['csrf', 'can:device.revoke']);
+    $router->post('/devices/{id:int}/update-now', 'DeviceController@requestUpdate', ['csrf', 'can:device.update']);
+    // One click for the thing most customers buy this for: let the others
+    // reach the camera recorder on this computer's LAN.
+    $router->post('/devices/{id:int}/share-lan', 'DeviceController@shareLan', ['csrf', 'can:network.update']);
     $router->post('/devices/{id:int}/disable', 'DeviceController@disable', ['csrf', 'can:device.update']);
     $router->post('/devices/{id:int}/delete', 'DeviceController@destroy', ['csrf', 'can:device.delete']);
     $router->post('/devices/bulk-approve', 'DeviceController@bulkApprove', ['csrf', 'can:device.approve']);
@@ -119,6 +146,16 @@ $router->group('/admin', ['maintenance', 'auth'], static function (Router $route
     $router->post('/relays/{id:int}/delete', 'Admin\RelayController@destroy', ['csrf', 'can:relay.manage']);
 
     // ----------------------------------------------------- System → Updates
+    // Settings → Coordinator. DEPLOY.md Stage 3a sends an operator here.
+    // Alerts that reach a telephone, for the failures that cannot wait until
+    // somebody opens their email.
+    $router->get('/alerts', 'Admin\AlertsController@index', ['can:platform.settings'], 'admin.alerts');
+    $router->post('/alerts', 'Admin\AlertsController@update', ['csrf', 'can:platform.settings']);
+    $router->post('/alerts/test', 'Admin\AlertsController@test', ['csrf', 'can:platform.settings']);
+
+    $router->get('/coordinator', 'Admin\CoordinatorController@index', ['can:platform.settings'], 'admin.coordinator');
+    $router->post('/coordinator', 'Admin\CoordinatorController@update', ['csrf', 'can:platform.settings']);
+
     $router->get('/updates', 'Admin\UpdateController@index', ['can:update.manage'], 'admin.updates');
     $router->post('/updates/settings', 'Admin\UpdateController@saveSettings', ['csrf', 'can:update.manage']);
     $router->post('/updates/test-connection', 'Admin\UpdateController@testConnection', ['csrf', 'can:update.manage']);
@@ -148,11 +185,30 @@ $router->group('/api/v1', ['maintenance'], static function (Router $router): voi
     $router->post('/enroll', 'Api\AgentController@enroll', ['throttle:enroll']);
     $router->post('/agent/claim', 'Api\AgentController@claim', ['throttle:enroll']);
 
+    // The coordinator service (§7.3). Not a user and not a device: it
+    // authenticates with the shared secret both halves were installed with,
+    // and it is the only caller allowed to ask about a device it does not own.
+    $router->post('/coordinator/verify', 'Api\CoordinatorController@verifyDevice', ['coordinator']);
+    $router->post('/coordinator/endpoints', 'Api\CoordinatorController@reportEndpoints', ['coordinator']);
+    // Billing. The relay measured it; the coordinator relays it; nothing a
+    // customer controls is on this path.
+    $router->post('/coordinator/relay-usage', 'Api\CoordinatorController@reportRelayUsage', ['coordinator']);
+
+    // The edge servers' upgrade path. Same secret, same reasoning, and the
+    // direction is deliberate: the edge asks and tells, the panel never
+    // reaches in. See EdgeRelease for why Update Now does not do this itself.
+    $router->get('/edge/release', 'Api\EdgeController@release', ['coordinator']);
+    $router->post('/edge/report', 'Api\EdgeController@report', ['coordinator']);
+    $router->post('/edge/artifact', 'Api\EdgeController@artifact', ['coordinator']);
+
     // Everything else an agent calls needs its device token.
     $router->get('/agent/config', 'Api\AgentController@config', ['device']);
     $router->post('/agent/heartbeat', 'Api\AgentController@heartbeat', ['device']);
     $router->post('/agent/endpoint', 'Api\AgentController@endpoint', ['device']);
     $router->get('/agent/version', 'Api\AgentController@version', ['device']);
+    // The binary itself. Device-authenticated, and checked against what this
+    // device is actually offered — see the method for why that matters.
+    $router->get('/agent/download/{id:int}', 'Api\AgentController@download', ['device']);
 
     // Tenant API: bearer API key, or a dashboard session.
     $router->group('', ['api'], static function (Router $router): void {

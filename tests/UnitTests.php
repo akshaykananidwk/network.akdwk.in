@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests;
 
 use App\Core\Crypto;
+use App\Core\Request;
 use App\Core\Logger;
 use App\Core\Totp;
 use App\Core\ValidationException;
@@ -12,7 +13,10 @@ use App\Core\Validator;
 use App\Models\UpdateSetting;
 use App\Services\AclService;
 use App\Services\IpamService;
+use App\Services\RouteService;
+use App\Services\WhatsAppAlerts;
 use App\Updater\ArchiveExtractor;
+use App\Updater\GithubClient;
 use App\Updater\Manifest;
 use App\Updater\MigrationRunner;
 use App\Updater\PathGuard;
@@ -30,6 +34,7 @@ final class UnitTests
     public static function run(): void
     {
         self::crypto();
+        self::requestBooleans();
         self::redaction();
         self::validation();
         self::ipam();
@@ -37,8 +42,12 @@ final class UnitTests
         self::pathGuard();
         self::archiveSafety();
         self::manifest();
+        self::githubClient();
+        self::releaseTags();
         self::sqlSplitter();
         self::totp();
+        self::lanSuggestion();
+        self::whatsAppAlerts();
     }
 
     private static function crypto(): void
@@ -90,6 +99,60 @@ final class UnitTests
         TestCase::assert(!Crypto::isValidCurve25519PublicKey(base64_encode(random_bytes(16))),
             'rejects a short key');
         TestCase::assert(!Crypto::isValidCurve25519PublicKey('not base64 %%%'), 'rejects non-base64');
+    }
+
+    /**
+     * Reading a form checkbox, which is how a 500 reached production.
+     *
+     * The write that crashed was `$request->input('pre_approved', false)`:
+     * a bool passed to a ?string default, which under strict_types throws at
+     * the call. Request::boolean() exists so there is a correct thing to
+     * write, and these are the values a browser actually sends.
+     */
+    private static function requestBooleans(): void
+    {
+        TestCase::group('Request::boolean — what a form actually posts');
+
+        $cases = [
+            // [posted value, expected, why]
+            ['1', true, 'a hidden field set to 1, which is what this panel posts'],
+            ['on', true, 'a checked checkbox with no value of its own'],
+            ['true', true, 'a JSON body that spells it out'],
+            ['yes', true, 'a form written by hand'],
+            ['0', false, 'the hidden-field-then-checkbox idiom, unchecked'],
+            ['off', false, 'an explicit off'],
+            ['false', false, 'the string "false", which (bool) would read as TRUE'],
+            ['', false, 'an empty value is not a yes'],
+        ];
+
+        foreach ($cases as [$posted, $expected, $why]) {
+            $_GET = [];
+            $_POST = ['flag' => $posted];
+            $_SERVER['REQUEST_METHOD'] = 'POST';
+
+            TestCase::assertSame($expected, Request::capture()->boolean('flag'), $why);
+        }
+
+        // The case that crashed: the field is simply not there.
+        $_POST = [];
+        TestCase::assertSame(false, Request::capture()->boolean('flag'),
+            'a field that was never posted is false, not an error');
+        TestCase::assertSame(true, Request::capture()->boolean('flag', true),
+            'and the default is honoured when there is one');
+
+        // An array posted where a scalar was expected — flag[]=1 — must not
+        // become true by being non-empty.
+        $_POST = ['flag' => ['1']];
+        TestCase::assertSame(false, Request::capture()->boolean('flag'),
+            'an array posted under a boolean name falls back to the default');
+
+        // Anything unrecognised falls back rather than guessing.
+        $_POST = ['flag' => 'maybe'];
+        TestCase::assertSame(false, Request::capture()->boolean('flag'),
+            'an unrecognised value is not silently true');
+
+        $_POST = [];
+        $_GET = [];
     }
 
     private static function redaction(): void
@@ -293,6 +356,60 @@ final class UnitTests
         TestCase::assert(AclService::ipInCidr('10.50.0.7', '10.50.0.0/24'), 'ipInCidr: inside');
         TestCase::assert(!AclService::ipInCidr('10.50.1.7', '10.50.0.0/24'), 'ipInCidr: outside');
         TestCase::assert(AclService::ipInCidr('10.50.1.7', '10.50.0.0/16'), 'ipInCidr: wider mask');
+
+        self::aclIsCompiledForBothEnds();
+    }
+
+    /**
+     * §7.5: a rule has to reach both machines.
+     *
+     * A rule reads in one direction — "the office PC may not reach the NVR on
+     * tcp/554" — and evaluating it only from the source's point of view puts
+     * it on exactly one of the two devices. That is the same as trusting that
+     * device's agent, and the agent runs on hardware the customer owns.
+     *
+     * Evaluating the reverse as well is what puts the mirror of the rule on
+     * the NVR, so a modified agent on the office PC still cannot reach a
+     * service the NVR refuses to deliver.
+     */
+    private static function aclIsCompiledForBothEnds(): void
+    {
+        TestCase::group('ACL — a rule is compiled for both ends (§7.5)');
+
+        $office = ['id' => 1, 'device_uid' => 'dev_office', 'virtual_ip' => '10.50.0.2', 'tags_json' => ['office']];
+        $nvr    = ['id' => 2, 'device_uid' => 'dev_nvr', 'virtual_ip' => '10.50.0.3', 'tags_json' => ['nvr']];
+
+        // One directional rule: the office PC may reach the NVR on tcp/554.
+        $rule = [
+            'id' => 5, 'priority' => 10,
+            'src_type' => 'device', 'src_value' => 'dev_office',
+            'dst_type' => 'device', 'dst_value' => 'dev_nvr',
+            'protocol' => 'tcp', 'port_from' => 554, 'port_to' => 554,
+            'action' => 'allow', 'enabled' => 1,
+        ];
+
+        // From the office PC's side it matches as written.
+        $forward = AclService::evaluate([$rule], $office, ['office'], $nvr, false);
+        TestCase::assert($forward['allowed'], 'the source end is allowed');
+        TestCase::assertSame(1, count($forward['filters']), 'and carries the port rule');
+
+        // From the NVR's side, evaluated with the peer as the source, the same
+        // rule has to produce the same filter — otherwise the NVR enforces
+        // nothing and the office PC is the only thing standing in the way.
+        $reverse = AclService::evaluate([$rule], $office, ['office'], $nvr, false);
+        TestCase::assertSame(
+            554,
+            $reverse['filters'][0]['port_from'] ?? 0,
+            'the reverse evaluation yields the same port rule'
+        );
+
+        // And the rule must not match a device it does not name.
+        $till = ['id' => 3, 'device_uid' => 'dev_till', 'virtual_ip' => '10.50.0.4', 'tags_json' => []];
+        $unrelated = AclService::evaluate([$rule], $till, [], $nvr, false);
+        TestCase::assert(
+            !$unrelated['allowed'],
+            'a device the rule does not name gets no access from it'
+        );
     }
 
     private static function pathGuard(): void
@@ -478,6 +595,123 @@ final class UnitTests
         }
     }
 
+    private static function githubClient(): void
+    {
+        TestCase::group('GithubClient — header handling');
+
+        // A caller's Accept must REPLACE the default, not be sent alongside
+        // it. Appending "application/vnd.github.raw" to the default
+        // "application/vnd.github+json" makes GitHub answer with the metadata
+        // envelope instead of the file, and the manifest then parses as
+        // "missing a version" — which is exactly how this was found.
+        $method = new \ReflectionMethod(\App\Updater\GithubClient::class, 'mergeHeaders');
+        $method->setAccessible(true);
+
+        $merged = $method->invoke(null,
+            ['Accept: application/vnd.github+json', 'X-GitHub-Api-Version: 2022-11-28'],
+            ['Accept: application/vnd.github.raw']
+        );
+
+        $accepts = array_values(array_filter($merged, static fn (string $h): bool => stripos($h, 'Accept:') === 0));
+        TestCase::assertSame(1, count($accepts), 'exactly one Accept header survives the merge');
+        TestCase::assertSame('Accept: application/vnd.github.raw', $accepts[0],
+            'and it is the caller\'s, not the default');
+        TestCase::assert(in_array('X-GitHub-Api-Version: 2022-11-28', $merged, true),
+            'unrelated default headers are kept');
+
+        $merged = $method->invoke(null, ['Accept: application/vnd.github+json'], []);
+        TestCase::assertSame(1, count($merged), 'with no overrides the defaults pass through unchanged');
+    }
+
+    /**
+     * Which tags count as a release, and which channel gets them.
+     *
+     * Production defect: the `channel` setting was stored, shown and
+     * validated, and then never consulted — the updater installed the head of
+     * the branch whatever it said. An operator who chose "Stable" was running
+     * the most recent commit, and unfinished work reached a live panel.
+     *
+     * A tag is now the unit of release, so what counts as one has to be exact:
+     * a release candidate must not reach a stable panel by being the newest
+     * thing in the list, and a branch name that happens to look numeric must
+     * not be mistaken for a version.
+     */
+    private static function releaseTags(): void
+    {
+        TestCase::group('Updates — a release is a tag, not a commit');
+
+        $stable = [
+            'v1.9.2'   => '1.9.2',
+            '1.9.2'    => '1.9.2',
+            'v10.0.1'  => '10.0.1',
+        ];
+
+        foreach ($stable as $tag => $version) {
+            TestCase::assertSame($version, GithubClient::versionOfTag($tag, false),
+                $tag . ' is a release');
+        }
+
+        // Nothing here may reach a stable panel.
+        $notStable = [
+            'v1.9.3-rc1'   => 'a release candidate',
+            'v1.9.3-beta'  => 'a beta tag',
+            'nightly'      => 'a moving tag',
+            'v1.9'         => 'a two-part version',
+            'release-1.9.2' => 'a tag that only mentions a version',
+            'v1.9.2.1'     => 'a four-part version',
+            'main'         => 'a branch name',
+        ];
+
+        foreach ($notStable as $tag => $why) {
+            TestCase::assertSame(null, GithubClient::versionOfTag($tag, false),
+                $why . ' (' . $tag . ') is not a stable release');
+        }
+
+        // Beta takes prereleases as well, and only those that still name a
+        // complete version.
+        TestCase::assertSame('1.9.3-rc1', GithubClient::versionOfTag('v1.9.3-rc1', true),
+            'beta accepts a release candidate');
+        TestCase::assertSame('1.9.2', GithubClient::versionOfTag('v1.9.2', true),
+            'and still accepts a plain release');
+        TestCase::assertSame(null, GithubClient::versionOfTag('nightly', true),
+            'but not a moving tag');
+
+        // The ordering the updater relies on. GitHub's /tags is not documented
+        // as newest-first, so the newest is decided here.
+        $versions = ['1.9.2', '1.10.0', '1.9.10', '2.0.0', '1.9.3-rc1'];
+        usort($versions, static fn (string $a, string $b): int => version_compare($b, $a));
+
+        TestCase::assertSame('2.0.0', $versions[0], 'the newest release sorts first');
+        TestCase::assert(
+            array_search('1.10.0', $versions, true) < array_search('1.9.10', $versions, true),
+            '1.10.0 is newer than 1.9.10, which a string sort would get wrong'
+        );
+        TestCase::assert(
+            array_search('1.9.3-rc1', $versions, true) < array_search('1.9.2', $versions, true),
+            'a release candidate is newer than the release before it'
+        );
+
+        // And older than the release it is a candidate for, which is the half
+        // that matters: a beta panel on 1.9.3-rc1 must still be offered 1.9.3.
+        TestCase::assertSame(-1, version_compare('1.9.3-rc1', '1.9.3'),
+            'and older than the release it is a candidate for');
+
+        // Defect 29: a panel on an untagged head — which is every panel that
+        // was updated before releases became tags — had up-to-date decided by
+        // comparing COMMITS, so the newest tag looked like an update even when
+        // it was an older release, and applying it would have installed 1.9.2
+        // over 1.9.3 with the migrations already run.
+        //
+        // The rule that closes it, stated as the code states it.
+        $offered = static fn (string $target, string $running): bool
+            => version_compare($target, $running, '>');
+
+        TestCase::assert(!$offered('1.9.2', '1.9.3'), 'an older tag is not offered as an update');
+        TestCase::assert(!$offered('1.9.3', '1.9.3'), 'nor the release already running');
+        TestCase::assert($offered('1.9.4', '1.9.3'), 'a newer tag is offered');
+        TestCase::assert($offered('1.10.0', '1.9.10'), 'and the comparison is by version, not by string');
+    }
+
     private static function sqlSplitter(): void
     {
         TestCase::group('MigrationRunner — SQL statement splitting');
@@ -555,4 +789,115 @@ final class UnitTests
         }
         @rmdir($directory);
     }
+    /**
+     * 1.9.5: the range offered by the one-click "share this computer's
+     * network".
+     *
+     * It is a suggestion, and what matters is which way it is wrong. Offering
+     * nothing when it cannot tell costs one typed line. Offering a /24 of a
+     * public address would be offering to route a stranger's network, and
+     * offering one for an address that is not an address at all would put
+     * nonsense in a box an administrator is about to confirm.
+     */
+    private static function lanSuggestion(): void
+    {
+        TestCase::group('Unit — the LAN offered for one-click sharing (1.9.5)');
+
+        $cases = [
+            // What the agent actually reports: address and port.
+            ['192.168.10.23:51820', '192.168.10.0/24', 'a shop router\'s range, from the reported endpoint'],
+            ['192.168.10.23', '192.168.10.0/24', 'and without a port'],
+            ['10.8.4.19:49500', '10.8.4.0/24', 'a 10.x site'],
+            ['172.16.5.9:51820', '172.16.5.0/24', 'a 172.16 site'],
+            // Public: this is the device's own internet address, and a /24 of
+            // it is somebody else's network.
+            ['203.0.113.9:51820', '', 'nothing is offered for a public address'],
+            // Carrier-grade NAT is not a LAN either.
+            ['100.64.3.7:51820', '', 'nothing is offered for a CGNAT address'],
+            ['', '', 'nothing is offered when the device has never reported one'],
+            ['not-an-address', '', 'nothing is offered for nonsense'],
+            ['[fe80::1]:51820', '', 'nothing is offered for IPv6, which this does not map'],
+        ];
+
+        foreach ($cases as [$endpoint, $expected, $why]) {
+            TestCase::assertSame($expected, RouteService::suggestLan($endpoint), $why);
+        }
+
+        TestCase::assertSame('', RouteService::suggestLan(null), 'and nothing at all is not a crash');
+    }
+
+    /**
+     * 1.9.5: the alert that reaches a telephone.
+     *
+     * Two things matter here and neither is "did it send". One is that a
+     * message containing a quotation mark cannot break the JSON around it —
+     * which is exactly what an error message does, on the one day anybody
+     * needs this. The other is that the number is a number: a typing mistake
+     * in the recipients box must be dropped, not turned into a message to a
+     * stranger.
+     */
+    private static function whatsAppAlerts(): void
+    {
+        TestCase::group('Unit — alerts to a telephone (1.9.5)');
+
+        $fill = static function (string $template, string $to, string $text, string $type): string {
+            $method = new \ReflectionMethod(WhatsAppAlerts::class, 'fill');
+            $method->setAccessible(true);
+
+            return (string) $method->invoke(null, $template, $to, $text, $type);
+        };
+
+        $template = '{"to": "{{to}}", "message": "{{text}}"}';
+
+        // The message a failing backup actually produces.
+        $filled = $fill($template, '+919876543210', 'Backup failed: can\'t write to "/var/backups"', 'application/json');
+        TestCase::assert(
+            json_decode($filled, true) !== null,
+            'a message with quotation marks in it still produces valid JSON',
+            $filled
+        );
+        $decoded = json_decode($filled, true);
+        TestCase::assertContains(
+            'can\'t write',
+            (string) ($decoded['message'] ?? ''),
+            'and the message survives the escaping intact'
+        );
+
+        // A form-encoded API, and a URL template.
+        TestCase::assertContains(
+            'Backup%20failed',
+            $fill('to={{to}}&text={{text}}', '+91', 'Backup failed', 'application/x-www-form-urlencoded'),
+            'a form-encoded body is percent-encoded, not left with spaces in it'
+        );
+
+        // A newline in a message must not become a header or a second line of
+        // a form body.
+        $multi = $fill($template, '+91', "line one\nline two", 'application/json');
+        TestCase::assert(
+            !str_contains($multi, "\n"),
+            'a newline in a message does not reach the request as a literal newline'
+        );
+
+        $flatten = new \ReflectionMethod(WhatsAppAlerts::class, 'flatten');
+        $flatten->setAccessible(true);
+        TestCase::assertSame(
+            'Scheduled backup failed — The scheduled backup did not complete.',
+            (string) $flatten->invoke(null, 'Scheduled backup failed', "The scheduled backup did not complete.\n\nPDOException: ..."),
+            'the telephone gets the headline and the first line, not the stack trace'
+        );
+
+        // And it is off unless somebody configured it. A half-configured alert
+        // channel that silently does nothing is the failure this has to avoid,
+        // so "enabled" means all three parts are present.
+        TestCase::assert(
+            !WhatsAppAlerts::enabled(),
+            'nothing is sent anywhere until an endpoint and a number are configured'
+        );
+
+        TestCase::assert(
+            WhatsAppAlerts::send('critical', 'Test', 'Body') === false,
+            'and sending while unconfigured is a no-op rather than an error'
+        );
+    }
+
 }

@@ -40,12 +40,42 @@ final class AclService
         $selfTags = self::tagsOf($self);
         $defaultAllow = $network['acl_default_action'] !== 'deny';
 
+        // Prefixes this device is itself the gateway for. Empty for everything
+        // that is not a subnet router, which is almost every device.
+        $serves = (int) $self['is_gateway'] === 1
+            ? NetworkRoute::servedByDevice((int) $self['id'])
+            : [];
+
         $out = [];
         foreach ($peers as $peer) {
-            $decision = self::evaluate($rules, $self, $selfTags, $peer, $defaultAllow);
-            if (!$decision['allowed']) {
+            $peerTags = self::tagsOf($peer);
+
+            // Both directions, and this device enforces both.
+            //
+            // Forward is what this device may send: rules whose source is us
+            // and whose destination is the peer. Reverse is what it may
+            // accept: rules whose source is the peer and whose destination is
+            // us. Compiling only the forward direction would put every rule on
+            // exactly one of the two machines, which is the same as trusting
+            // that machine's agent — and the agent runs on hardware the
+            // customer owns.
+            //
+            // With both compiled, a device whose own agent has been modified
+            // still cannot reach a service the far end refuses to deliver.
+            $forward = self::evaluate($rules, $self, $selfTags, $peer, $defaultAllow);
+            $reverse = self::evaluate($rules, $peer, $peerTags, $self, $defaultAllow);
+
+            // A link needs both ends to permit it. A one-sided allow would
+            // hand out an address the other end will refuse to answer, which
+            // looks to a customer like a broken tunnel rather than a rule.
+            if (!$forward['allowed'] || !$reverse['allowed']) {
                 continue;
             }
+
+            $decision = [
+                'allowed' => true,
+                'filters' => self::mergeFilters($forward['filters'], $reverse['filters']),
+            ];
 
             $allowedIps = [];
             if (!empty($peer['virtual_ip'])) {
@@ -60,6 +90,17 @@ final class AclService
 
             $out[] = [
                 'uid'          => $peer['device_uid'],
+                // What this peer may reach inside the LANs *we* route for.
+                //
+                // Without this the gateway forwards on the strength of the
+                // peer link alone, and every rule about a machine behind it is
+                // enforced only by the agent being restricted. That agent runs
+                // on hardware the customer owns, so a modified build would
+                // reach the whole NVR when the rule named one port on it — the
+                // same shape of hole as matching a source port. The gateway is
+                // the one device in the path that the customer being
+                // restricted does not control, so it checks too.
+                'routes'       => AclRouteFilters::forEachRoute($networkId, $peer, $serves),
                 'name'         => $peer['name'],
                 'public_key'   => $peer['public_key'],
                 'virtual_ip'   => $peer['virtual_ip'],
@@ -125,10 +166,15 @@ final class AclService
     }
 
     /**
+     * Does a rule's source or destination selector name this device?
+     *
+     * Public because route-filter compilation asks the same question about
+     * the same rules; keeping two copies of this would mean two answers.
+     *
      * @param array<string,mixed> $device
      * @param list<string> $tags
      */
-    private static function matches(string $type, ?string $value, array $device, array $tags): bool
+    public static function matches(string $type, ?string $value, array $device, array $tags): bool
     {
         return match ($type) {
             'any'    => true,
@@ -141,8 +187,32 @@ final class AclService
         };
     }
 
+    /**
+     * Combine the two directions' filters, keeping each rule once.
+     *
+     * A rule that names this device on both sides — "any to any on tcp/22" —
+     * is compiled by both passes and must not be applied twice: a duplicate
+     * deny is harmless, but a duplicate allow inflates the count that decides
+     * whether *any* allow rules exist, which changes the default.
+     *
+     * @param list<array<string,mixed>> $forward
+     * @param list<array<string,mixed>> $reverse
+     * @return list<array<string,mixed>>
+     */
+    private static function mergeFilters(array $forward, array $reverse): array
+    {
+        $byRule = [];
+        foreach ([...$forward, ...$reverse] as $filter) {
+            $byRule[(int) $filter['rule_id']] = $filter;
+        }
+
+        ksort($byRule);
+
+        return array_values($byRule);
+    }
+
     /** @param array<string,mixed> $rule @return array<string,mixed> */
-    private static function toFilter(array $rule): array
+    public static function toFilter(array $rule): array
     {
         return [
             'action'    => $rule['action'],
@@ -154,7 +224,7 @@ final class AclService
     }
 
     /** @param array<string,mixed> $device @return list<string> */
-    private static function tagsOf(array $device): array
+    public static function tagsOf(array $device): array
     {
         $tags = $device['tags_json'] ?? null;
         if (is_string($tags)) {

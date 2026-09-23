@@ -4,15 +4,16 @@ declare(strict_types=1);
 
 namespace App\Controllers\Api;
 
-use App\Core\Config;
 use App\Core\Crypto;
 use App\Core\Logger;
 use App\Core\Request;
 use App\Core\Response;
+use App\Middleware\RateLimitMiddleware;
 use App\Models\AgentRelease;
 use App\Models\Device;
 use App\Models\Network;
 use App\Models\UsageCounter;
+use App\Services\CoordinatorSettings;
 use App\Services\DeviceService;
 
 /**
@@ -32,16 +33,26 @@ final class AgentController
     {
         $input = $request->all();
 
-        $result = DeviceService::enroll([
-            'join_code'      => $input['join_code'] ?? '',
-            'public_key'     => $input['public_key'] ?? '',
-            'hostname'       => $input['hostname'] ?? null,
-            'os'             => $input['os'] ?? null,
-            'os_version'     => $input['os_version'] ?? null,
-            'arch'           => $input['arch'] ?? null,
-            'agent_version'  => $input['agent_version'] ?? null,
-            'hw_fingerprint' => $input['hw_fingerprint'] ?? null,
-        ]);
+        // A failed enrolment is the thing worth throttling: it means a join
+        // code that does not exist, has expired or is used up, which is the
+        // only shape enumeration can take. A successful one required a code an
+        // administrator issued, and the code carries its own use limit.
+        try {
+            $result = DeviceService::enroll([
+                'join_code'      => $input['join_code'] ?? '',
+                'public_key'     => $input['public_key'] ?? '',
+                'hostname'       => $input['hostname'] ?? null,
+                'os'             => $input['os'] ?? null,
+                'os_version'     => $input['os_version'] ?? null,
+                'arch'           => $input['arch'] ?? null,
+                'agent_version'  => $input['agent_version'] ?? null,
+                'hw_fingerprint' => $input['hw_fingerprint'] ?? null,
+            ]);
+        } catch (\Throwable $e) {
+            RateLimitMiddleware::recordEnrolmentFailure($request->ip());
+
+            throw $e;
+        }
 
         Logger::info('agent', 'Device enrolled', [
             'device_uid' => $result['device_uid'],
@@ -74,6 +85,9 @@ final class AgentController
         $device = Device::findByPublicKey($publicKey);
 
         if ($device === null || (string) $device['device_uid'] !== $deviceUid) {
+            // A claim for a key nobody enrolled is a probe, not a poll.
+            RateLimitMiddleware::recordEnrolmentFailure($request->ip());
+
             return Response::apiError('No matching enrolment.', 404, 'not_enrolled');
         }
 
@@ -123,7 +137,12 @@ final class AgentController
         $knownRevision = (int) ($request->query('revision', '0') ?? 0);
         $currentRevision = (int) $network['config_revision'];
 
-        if ($knownRevision > 0 && $knownRevision === $currentRevision) {
+        // "Nothing has changed" is about the network. An administrator
+        // pressing Update now on one device is not a change to the network, so
+        // it has to be asked about separately — otherwise the agent is told
+        // nothing has changed and the click is never delivered.
+        if ($knownRevision > 0 && $knownRevision === $currentRevision
+            && !Device::hasUpdateRequest((int) $device['id'])) {
             return Response::api([
                 'changed'  => false,
                 'revision' => $currentRevision,
@@ -149,6 +168,49 @@ final class AgentController
      * Byte counts are deltas, applied in place, so two heartbeats racing
      * cannot lose one another's increment.
      */
+    /**
+     * Problems, as far as the panel is willing to believe them.
+     *
+     * Five at most, short, and with the code restricted to the shapes the
+     * panel knows how to explain. An agent is not a trusted narrator: this
+     * text ends up on a page an administrator reads, so its length and
+     * character set are ours to decide, not the reporter's.
+     *
+     * @return list<array{code: string, detail: string}>
+     */
+    private static function sanitiseProblems(mixed $raw): array
+    {
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        $out = [];
+        foreach (array_slice($raw, 0, 5) as $problem) {
+            if (!is_array($problem)) {
+                continue;
+            }
+
+            $code = (string) ($problem['code'] ?? '');
+            if (preg_match('/^[a-z][a-z0-9_.]{0,39}$/', $code) !== 1) {
+                continue;
+            }
+
+            $detail = trim((string) ($problem['detail'] ?? ''));
+            // Control characters stripped rather than escaped: there is no
+            // legitimate reason for one here, and the view escapes on output
+            // anyway. Belt and braces on the one field an agent writes that a
+            // person reads.
+            $detail = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $detail) ?? '';
+            if ($detail === '') {
+                continue;
+            }
+
+            $out[] = ['code' => $code, 'detail' => mb_substr($detail, 0, 400)];
+        }
+
+        return $out;
+    }
+
     public function heartbeat(Request $request): Response
     {
         $device = $request->deviceContext();
@@ -158,9 +220,17 @@ final class AgentController
 
         $input = $request->all();
 
-        $connectionType = (string) ($input['connection_type'] ?? 'offline');
-        if (!in_array($connectionType, ['direct', 'relay', 'offline'], true)) {
-            $connectionType = 'offline';
+        // A heartbeat is proof the device is alive, so nothing it sends can
+        // mark it offline. `offline` is written by the staleness sweep alone.
+        //
+        // Agents up to 1.9.1 send "offline" to mean "no peer reached yet",
+        // which is what this column now calls `connecting` — the two machines
+        // that spent an evening showing as red dots were both running the
+        // whole time.
+        $connectionType = (string) ($input['connection_type'] ?? 'connecting');
+        $known = ['direct', 'relay', 'relay_https', 'connecting'];
+        if ($connectionType === 'offline' || !in_array($connectionType, $known, true)) {
+            $connectionType = 'connecting';
         }
 
         $rxDelta = max(0, (int) ($input['rx_delta'] ?? 0));
@@ -178,10 +248,45 @@ final class AgentController
             isset($input['agent_version']) ? (string) $input['agent_version'] : null
         );
 
+        // What the device could not do. Bounded and sanitised: this arrives
+        // from an agent on hardware the customer owns, so it is treated as a
+        // claim about that machine and nothing more — it is displayed, never
+        // acted on.
+        Device::recordProblems((int) $device['id'], self::sanitiseProblems($input['problems'] ?? null));
+
+        // And what it did about the last release it was offered.
+        //
+        // Reported here rather than through an endpoint of its own because
+        // this is the message a device already sends and is already
+        // authenticated for, and because the interesting case — a device that
+        // is failing to update — is one that is otherwise perfectly healthy
+        // and heartbeating.
+        if (isset($input['update']) && is_array($input['update'])) {
+            $update = $input['update'];
+
+            Device::recordUpdateState(
+                (int) $device['id'],
+                (string) ($update['state'] ?? 'idle'),
+                isset($update['version']) ? mb_substr((string) $update['version'], 0, 32) : null,
+                isset($update['error']) ? (string) $update['error'] : null
+            );
+        }
+
+        // How long the agent has been running, which is how the page answers
+        // "did it restart?" without anybody telephoning the customer.
+        if (isset($input['uptime_seconds'])) {
+            Device::recordAgentStart((int) $device['id'], (int) $input['uptime_seconds']);
+        }
+
         // Only relayed traffic is metered: direct peer-to-peer bytes never
         // touch our infrastructure, so billing for them would be dishonest.
+        //
+        // The agent's figure is recorded under its own metric and is *not*
+        // what a customer is billed on — the relay reports that, because the
+        // agent runs on hardware the customer owns and the one number they
+        // must not be able to influence is their own invoice.
         if ($connectionType === 'relay' && ($rxDelta + $txDelta) > 0) {
-            UsageCounter::increment((int) $device['tenant_id'], UsageCounter::METRIC_RELAY_BYTES, $rxDelta + $txDelta);
+            UsageCounter::increment((int) $device['tenant_id'], UsageCounter::METRIC_RELAY_BYTES_AGENT, $rxDelta + $txDelta);
         } elseif ($connectionType === 'direct' && ($rxDelta + $txDelta) > 0) {
             UsageCounter::increment((int) $device['tenant_id'], UsageCounter::METRIC_DIRECT_BYTES, $rxDelta + $txDelta);
         }
@@ -246,8 +351,8 @@ final class AgentController
                 'virtual_ip'   => $peer['virtual_ip'],
             ], $peers),
             'coordinator' => [
-                'host' => Config::get('coordinator.public_host', Config::get('coordinator.host')),
-                'port' => (int) Config::get('coordinator.port', 8443),
+                'host' => CoordinatorSettings::agentHost(),
+                'port' => (int) CoordinatorSettings::current()['port'],
             ],
         ]);
     }
@@ -281,7 +386,7 @@ final class AgentController
         return Response::api([
             'update_available' => $available,
             'version'          => $release['version'],
-            'url'              => $available ? url('agent/download/' . $release['id']) : null,
+            'url'              => $available ? url('api/v1/agent/download/' . $release['id']) : null,
             // The agent verifies BOTH before swapping its binary. An unsigned
             // or mismatched download is refused and reported.
             'sha256'           => $release['sha256'],
@@ -289,6 +394,70 @@ final class AgentController
             'size'             => (int) $release['file_size'],
             'notes'            => $release['release_notes'],
         ]);
+    }
+
+    /**
+     * Serve an agent binary to a device that is due it.
+     *
+     * Device-authenticated, because this is the one endpoint that hands out
+     * code — and the id is checked against what that device is actually
+     * offered rather than taken on trust, so a device cannot fetch a release
+     * it is not in the rollout cohort for.
+     *
+     * The agent verifies the sha256 and the ed25519 signature before it
+     * replaces its own binary. This endpoint is not the security boundary;
+     * the signature is.
+     *
+     * @param array<string,string> $params
+     */
+    public function download(Request $request, array $params): Response
+    {
+        $device = $request->deviceContext();
+        if ($device === null) {
+            return Response::apiError('Device context missing.', 401);
+        }
+
+        $release = AgentRelease::find((int) $params['id']);
+        if ($release === null || $release['published_at'] === null) {
+            return Response::apiError('No such release.', 404);
+        }
+
+        // The same decision the version endpoint made. Without this a device
+        // could name any id and take itself out of a staged rollout.
+        $offered = AgentRelease::latestFor(
+            (string) $release['channel'],
+            (string) $release['platform'],
+            (string) $release['arch'],
+            (string) $device['device_uid']
+        );
+
+        if ($offered === null || (int) $offered['id'] !== (int) $release['id']) {
+            Logger::warning('agent', 'Device asked for a release it is not offered', [
+                'device_uid' => $device['device_uid'],
+                'release_id' => $release['id'],
+            ]);
+
+            return Response::apiError('That release is not offered to this device.', 403);
+        }
+
+        $path = APP_ROOT . '/' . ltrim((string) $release['file_path'], '/');
+        if (basename((string) $release['file_path']) !== (string) $release['file_path']
+            && !str_starts_with((string) $release['file_path'], 'storage/downloads/')) {
+            // The column is written by us, not by a caller, and it stays that
+            // way: anything outside the one directory releases live in is a
+            // bug worth refusing rather than serving.
+            Logger::error('agent', 'Agent release path is outside storage/downloads', [
+                'release_id' => $release['id'],
+            ]);
+
+            return Response::apiError('That release is not available.', 500);
+        }
+
+        if (!is_file($path)) {
+            return Response::apiError('That release is no longer on disk.', 410);
+        }
+
+        return Response::file($path, 'akconnect-agent-' . $release['version'] . '.bin', 'application/octet-stream');
     }
 
     /**
@@ -300,7 +469,7 @@ final class AgentController
      */
     private function signConfig(array $config): ?string
     {
-        $secret = (string) Config::get('coordinator.signing_key', '');
+        $secret = (string) CoordinatorSettings::current()['signing_key'];
         if ($secret === '') {
             return null;
         }

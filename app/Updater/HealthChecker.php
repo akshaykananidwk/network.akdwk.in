@@ -7,6 +7,8 @@ namespace App\Updater;
 use App\Core\Config;
 use App\Core\DB;
 use App\Core\Logger;
+use App\Services\CoordinatorSettings;
+use App\Services\EdgeRelease;
 
 /**
  * Post-update verification (§9.4 step 10).
@@ -199,20 +201,39 @@ final class HealthChecker
             return 'HTTP ' . $status;
         });
 
-        $this->check('Coordinator reachable', false, function (): string {
-            $host = (string) Config::get('coordinator.host', '');
-            $port = (int) Config::get('coordinator.port', 0);
-            if ($host === '' || $port === 0) {
+        // Defect 31: this used to open a TCP socket to the coordinator's port.
+        // The coordinator listens on UDP only — one net.ListenUDP, no TCP
+        // anywhere — so the probe answered "Connection refused" on every
+        // update against a perfectly healthy edge. A check that cannot pass is
+        // worse than no check: it teaches an operator to skim the warnings.
+        //
+        // It was also the wrong question. The panel has no way to reach into
+        // the edge by design. What it has is the coordinator calling in,
+        // signed, several times a minute — so that is what is asked about.
+        $this->check('Coordinator calling in', false, function (): string {
+            $coordinator = CoordinatorSettings::current();
+            if ((string) $coordinator['host'] === '') {
                 return 'skipped (not configured)';
             }
 
-            $socket = @fsockopen($host, $port, $errno, $errstr, 3);
-            if ($socket === false) {
-                throw new \RuntimeException(sprintf('%s:%d unreachable — %s', $host, $port, $errstr));
+            $ago = EdgeRelease::coordinatorSeenSecondsAgo();
+            if ($ago === null) {
+                throw new \RuntimeException(
+                    'no coordinator has ever called this panel. Run deploy/upgrade-edge.sh '
+                    . 'on the edge server, or check the shared secret matches.'
+                );
             }
-            fclose($socket);
 
-            return $host . ':' . $port . ' reachable';
+            // Five minutes. A coordinator verifies devices far more often than
+            // that, so anything older means it has stopped talking to us.
+            if ($ago > 300) {
+                throw new \RuntimeException(sprintf(
+                    'the coordinator last called in %d minute(s) ago; it may be stopped',
+                    intdiv($ago, 60)
+                ));
+            }
+
+            return sprintf('last heard %ds ago', $ago);
         });
 
         $criticalFailures = 0;

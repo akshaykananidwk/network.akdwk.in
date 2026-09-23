@@ -37,6 +37,30 @@ final class Response
     }
 
     /**
+     * Send a file from disk, without loading it into memory.
+     *
+     * A 14 MB installer read into a string works and is still the wrong shape:
+     * the same code path serves every download, and the day one of them is a
+     * backup archive it stops working on a host with a modest memory limit.
+     * The body stays empty and send() streams the file instead.
+     */
+    public static function file(string $path, string $downloadName, string $contentType): self
+    {
+        $size = (int) @filesize($path);
+
+        return self::make('', 200)
+            ->header('Content-Type', $contentType)
+            ->header('Content-Length', (string) $size)
+            // A quoted basename, and only a basename: the name is ours, not
+            // the caller's, so there is nothing here a header injection could
+            // use.
+            ->header('Content-Disposition', 'attachment; filename="' . basename($downloadName) . '"')
+            ->header('X-Content-Type-Options', 'nosniff')
+            ->header('Cache-Control', 'public, max-age=300')
+            ->streamFrom($path);
+    }
+
+    /**
      * Standard API envelope. Every /api/v1 response has this exact shape so
      * clients can branch on `success` alone.
      *
@@ -133,6 +157,16 @@ final class Response
         return $this->headers;
     }
 
+    /** The file send() will stream instead of echoing a body. */
+    private ?string $streamPath = null;
+
+    private function streamFrom(string $path): self
+    {
+        $this->streamPath = $path;
+
+        return $this;
+    }
+
     public function send(): void
     {
         if (!headers_sent()) {
@@ -144,6 +178,30 @@ final class Response
                 setcookie($cookie['name'], $cookie['value'], $cookie['options']);
             }
         }
+
+        if ($this->streamPath !== null) {
+            // Any output buffering is discarded first: a buffer that captures
+            // fourteen megabytes defeats the point of streaming it.
+            while (ob_get_level() > 0) {
+                ob_end_flush();
+            }
+
+            $handle = fopen($this->streamPath, 'rb');
+            if ($handle !== false) {
+                while (!feof($handle)) {
+                    $chunk = fread($handle, 262144);
+                    if ($chunk === false) {
+                        break;
+                    }
+                    echo $chunk;
+                    flush();
+                }
+                fclose($handle);
+            }
+
+            return;
+        }
+
         echo $this->body;
     }
 

@@ -35,6 +35,89 @@ final class Installer
         return is_file($this->appRoot . '/config/config.php');
     }
 
+    /**
+     * Is this a live installation?
+     *
+     * The lock file alone was the gate until 1.9.2, and it is the wrong thing
+     * to trust. DEPLOY.md told an operator to `rm -rf install` once the
+     * install was finished, which removes the lock along with everything else;
+     * the next update then restored `install/` from the release — the lock is
+     * a protected path, so it was not restored with it — and the wizard served
+     * its welcome page on a production panel for two minutes.
+     *
+     * So the question is asked of the system, not of a file that an operator
+     * was told to delete: a configuration file, or a database that already has
+     * an administrator in it. Either means hands off.
+     *
+     * @return list<string> the reasons, empty when this is a fresh machine
+     */
+    public function installedEvidence(): array
+    {
+        $reasons = [];
+
+        if ($this->isLocked()) {
+            $reasons[] = 'install/install.lock exists';
+        }
+
+        if ($this->isConfigured()) {
+            $reasons[] = 'config/config.php exists';
+        }
+
+        // The database is the authority. A panel whose files were rearranged
+        // is still a live panel if its tables have an administrator in them,
+        // and that is the case this check exists for.
+        if ($this->isConfigured()) {
+            try {
+                /** @var array<string,mixed> $config */
+                $config = require $this->appRoot . '/config/config.php';
+                $db = is_array($config['db'] ?? null) ? $config['db'] : [];
+
+                $pdo = \App\Core\DB::connectWith(
+                    (string) ($db['host'] ?? '127.0.0.1'),
+                    (int) ($db['port'] ?? 3306),
+                    (string) ($db['name'] ?? ''),
+                    (string) ($db['user'] ?? ''),
+                    (string) ($db['pass'] ?? ''),
+                    (string) ($db['prefix'] ?? '')
+                );
+
+                $table = (string) ($db['prefix'] ?? '') . 'users';
+                $statement = $pdo->query('SELECT COUNT(*) FROM `' . str_replace('`', '', $table) . '`');
+                $users = $statement === false ? 0 : (int) $statement->fetchColumn();
+
+                if ($users > 0) {
+                    $reasons[] = sprintf('the database already holds %d user account(s)', $users);
+                }
+            } catch (\Throwable) {
+                // An unreachable or empty database is not evidence either way,
+                // and must not be the thing that stops a genuine reinstall.
+            }
+        }
+
+        return $reasons;
+    }
+
+    /**
+     * Put the lock back.
+     *
+     * Called when the wizard refuses because the system is plainly installed:
+     * the window that let it answer at all should not stay open until somebody
+     * notices a second time.
+     */
+    public function relock(): bool
+    {
+        if ($this->isLocked()) {
+            return true;
+        }
+
+        $body = json_encode([
+            'locked_at' => gmdate('c'),
+            'reason'    => 'restored automatically: the installer was reached on a configured system',
+        ], JSON_PRETTY_PRINT);
+
+        return @file_put_contents($this->appRoot . '/install/install.lock', (string) $body . "\n") !== false;
+    }
+
     // ------------------------------------------------------------ step 2
 
     /**
@@ -422,7 +505,11 @@ final class Installer
                 'require_2fa_super'     => true,
                 'api_rate_per_minute'   => 120,
                 'login_rate_per_15min'  => 20,
-                'enroll_rate_per_hour'  => 60,
+                // Volume ceiling, not the abuse control: forty machines in
+                // one office share one address and every request is real. What
+                // is limited tightly is a *failed* enrolment, below.
+                'enroll_requests_per_hour'    => 1200,
+                'enroll_failures_per_15min'   => 15,
                 'hsts_max_age'          => 31536000,
                 'controller_public_key' => $answers['controller_public_key'] ?? '',
                 'update_public_key'     => '',
@@ -439,9 +526,15 @@ final class Installer
                 'timeout'     => 15,
             ],
             'coordinator' => [
-                'host'          => $answers['coordinator_host'] ?? '127.0.0.1',
+                // Blank is honest: an operator who has not stood the
+                // coordinator up yet gets a panel that says so, instead of one
+                // that points every agent at its own loopback address. The key
+                // is written because DeviceService reads it — omitting it made
+                // discovery configured and silent.
+                'host'          => $answers['coordinator_host'] ?? '',
                 'port'          => (int) ($answers['coordinator_port'] ?? 8443),
                 'internal_url'  => 'http://127.0.0.1:8080',
+                'public_key'    => $answers['coordinator_public_key'] ?? '',
                 'shared_secret' => $answers['coordinator_secret'],
                 'signing_key'   => $answers['controller_secret_key'] ?? '',
                 'public_host'   => $answers['coordinator_host'] ?? '',

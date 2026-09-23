@@ -32,9 +32,13 @@ use App\Core\Config;
 use App\Core\Lang;
 use App\Core\Logger;
 use App\Core\View;
+use Tests\BackupTests;
 use Tests\DatabaseTests;
 use Tests\HttpTests;
+use Tests\ProductionDefectTests;
 use Tests\TestCase;
+use Tests\DocumentationTests;
+use Tests\GatewayTests;
 use Tests\StaticAnalysisTests;
 use Tests\UnitTests;
 
@@ -66,6 +70,9 @@ echo '  PHP ' . PHP_VERSION . ' · ' . ($hasInstall ? 'installed configuration' 
 if ($runAll || isset($options['unit'])) {
     UnitTests::run();
     StaticAnalysisTests::run();
+    DocumentationTests::run();
+    // The ten defects a real deployment found. Every check fails on 1.9.0.
+    ProductionDefectTests::run();
 }
 
 if ($runAll || isset($options['db'])) {
@@ -83,6 +90,13 @@ if ($runAll || isset($options['db'])) {
 
         try {
             DatabaseTests::run();
+            // Its own transaction, and its own fixtures: subnet routing across
+            // two customers is a different question from tenant scoping, and
+            // mixing them makes a failure in either harder to read.
+            GatewayTests::run();
+            // Runs after, and outside, the transaction DatabaseTests wraps
+            // itself in: dumping and restoring means DDL, which commits.
+            BackupTests::run();
         } catch (Throwable $e) {
             // A throw here is a genuine failure, not a missing database —
             // report it as one, with where it happened.
@@ -97,9 +111,38 @@ if ($runAll || isset($options['db'])) {
 }
 
 if ($runAll || isset($options['http'])) {
-    $baseUrl = is_string($options['url'] ?? null)
+    $chosen = is_string($options['url'] ?? null);
+    $baseUrl = $chosen
         ? rtrim((string) $options['url'], '/')
         : rtrim((string) Config::get('app.url', 'http://127.0.0.1:8088'), '/');
+
+    // Never a machine somebody else is using, unless it was named on the
+    // command line.
+    //
+    // app.url is the panel's real address — on a production installation it is
+    // the customer's domain, and this file is in the release. These tests sign
+    // in, post an agent binary to the edge endpoint, enrol devices and delete
+    // what they made. Pointed at a live panel they are an attack on it, and
+    // they were: config/config.local.php, which is how the lab points app.url
+    // at its own panel, is removed when the lab finishes, and the next run of
+    // this suite read the shipped configuration instead, resolved the real
+    // domain, and ran the whole end-to-end phase against the production server
+    // over the internet. Every authenticated request was refused, which is the
+    // only reason this is a near miss rather than an incident.
+    //
+    // So the default is loopback or nothing. --url is the way to say otherwise,
+    // and saying it is a deliberate act.
+    if (!$chosen && !httpTargetIsLocal($baseUrl)) {
+        TestCase::group('End-to-end HTTP tests');
+        TestCase::skip(
+            'all HTTP tests',
+            'app.url is ' . $baseUrl . ', which is not this machine. These tests sign in and '
+            . 'post to the edge endpoint, so they are never run against an address they were '
+            . 'not given. Start a server — php -S 127.0.0.1:8088 -t . tests/dev-server.php — '
+            . 'and pass --url=http://127.0.0.1:8088.'
+        );
+        goto httpDone;
+    }
 
     $reachable = false;
     $parts = parse_url($baseUrl);
@@ -118,6 +161,22 @@ if ($runAll || isset($options['http'])) {
     } else {
         HttpTests::run($baseUrl);
     }
+
+    httpDone:
+}
+
+/**
+ * Is this address this machine, and nothing else?
+ *
+ * By the literal loopback addresses and the one name reserved for them.
+ * Anything that has to be resolved to be judged is not local enough: a name
+ * that resolves to 127.0.0.1 today is a name somebody else controls.
+ */
+function httpTargetIsLocal(string $baseUrl): bool
+{
+    $host = strtolower((string) parse_url($baseUrl, PHP_URL_HOST));
+
+    return in_array($host, ['127.0.0.1', '::1', '[::1]', 'localhost'], true);
 }
 
 exit(TestCase::summary());

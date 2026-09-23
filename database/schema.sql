@@ -143,6 +143,10 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__networks` (
   `network_uid` CHAR(16) NOT NULL,
   `description` VARCHAR(255) NULL,
   `cidr` VARCHAR(20) NOT NULL,
+  -- Where this network's virtual prefixes come from. NULL uses the
+  -- configured default; a customer already numbering out of it needs a way
+  -- out that does not move every other customer with them.
+  `mapped_pool` VARCHAR(20) NULL DEFAULT NULL,
   `dns_json` JSON NULL,
   `search_domain` VARCHAR(190) NULL,
   `mtu` SMALLINT UNSIGNED NOT NULL DEFAULT 1280,
@@ -170,6 +174,11 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__join_codes` (
   `network_id` BIGINT UNSIGNED NOT NULL,
   `code` VARCHAR(24) NOT NULL,
   `max_uses` INT NOT NULL DEFAULT 1,
+  -- An administrator's decision, taken before the device existed: the next
+  -- machine to present this code is admitted without an approval click. R4
+  -- still holds — the decision is explicit, named, limited, short-lived and
+  -- revocable — it just happens earlier. Off unless asked for.
+  `pre_approved` TINYINT(1) NOT NULL DEFAULT 0,
   `uses` INT NOT NULL DEFAULT 0,
   `expires_at` DATETIME NOT NULL,
   `revoked_at` DATETIME NULL,
@@ -207,13 +216,43 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__devices` (
   `last_seen_at` DATETIME NULL,
   `last_endpoint` VARCHAR(64) NULL,
   `last_lan_endpoint` VARCHAR(64) NULL,
-  `connection_type` ENUM('direct','relay','offline') NOT NULL DEFAULT 'offline',
+  -- How the peers are reached, not whether this device is alive. `offline` is
+  -- written only by the staleness sweep, when the heartbeats stop; an agent
+  -- that is running and has not yet found a peer is `connecting`. Whether a
+  -- device is online is answered by last_seen_at and nothing else.
+  `connection_type` ENUM('direct','relay','connecting','offline') NOT NULL DEFAULT 'offline',
   `relay_id` BIGINT UNSIGNED NULL,
   `rx_bytes` BIGINT UNSIGNED NOT NULL DEFAULT 0,
   `tx_bytes` BIGINT UNSIGNED NOT NULL DEFAULT 0,
   `latency_ms` INT NULL,
   `tags_json` JSON NULL,
   `is_gateway` TINYINT(1) NOT NULL DEFAULT 0,
+  -- What this device could not do, reported where somebody will see it: an
+  -- NRPT rule Windows refused, a prefix that clashed with a network the
+  -- machine was already on. Neither is something the agent can fix, and a line
+  -- in a log file on the customer's machine is the same as no report at all.
+  `problems_json` JSON NULL DEFAULT NULL,
+  `problems_at` DATETIME NULL DEFAULT NULL,
+  -- When the agent process came up, from the uptime it reports. "Has it
+  -- restarted?" is where a support call starts, and a machine somebody
+  -- switches off at the wall every night looks exactly like one that has been
+  -- up for a month without it.
+  `agent_started_at` DATETIME NULL DEFAULT NULL,
+  -- The last thing the agent could not do, kept after it clears. problems_json
+  -- holds what is wrong NOW and empties when it stops, so the fault that was
+  -- happening when the customer rang leaves no trace by the time anybody looks.
+  `last_error` VARCHAR(500) NULL DEFAULT NULL,
+  `last_error_at` DATETIME NULL DEFAULT NULL,
+  -- An administrator pressed "Update now". The agent collects it on its next
+  -- configuration poll and the panel clears it; there is no channel from here
+  -- into a PC behind a shop router, and inventing one would be a far bigger
+  -- thing than this button.
+  `update_requested_at` DATETIME NULL DEFAULT NULL,
+  -- Set by the COORDINATOR, not by the device: its announcements keep arriving
+  -- and its replies are not getting back to it. An agent that hears nothing
+  -- cannot report that it hears nothing — it only knows it is still waiting —
+  -- so this is the one fault the device cannot tell us about itself.
+  `coordinator_unanswered_at` DATETIME NULL DEFAULT NULL,
   `token_hash` CHAR(64) NULL,
   `token_rotated_at` DATETIME NULL,
   `config_revision` BIGINT UNSIGNED NOT NULL DEFAULT 0,
@@ -284,6 +323,10 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__routes` (
   `tenant_id` BIGINT UNSIGNED NOT NULL,
   `network_id` BIGINT UNSIGNED NOT NULL,
   `destination_cidr` VARCHAR(20) NOT NULL,
+  -- The prefix the overlay uses for this LAN. Unique within the network,
+  -- because two customers both on 192.168.1.0/24 is the normal case and one
+  -- routing table cannot hold both.
+  `mapped_cidr` VARCHAR(20) NULL DEFAULT NULL,
   `via_device_id` BIGINT UNSIGNED NULL,
   `metric` INT NOT NULL DEFAULT 100,
   `description` VARCHAR(190) NULL,
@@ -298,6 +341,9 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__routes` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_routes_net_dest` (`route_key`),
   KEY `idx_routes_network` (`network_id`, `enabled`),
+  -- Unique: two LANs sharing a virtual prefix is the collision the virtual
+  -- prefix exists to prevent, and allocation reads before it writes.
+  UNIQUE KEY `idx_routes_mapped` (`network_id`, `mapped_cidr`),
   KEY `idx_routes_tenant` (`tenant_id`),
   CONSTRAINT `fk_routes_network` FOREIGN KEY (`network_id`) REFERENCES `__PREFIX__networks` (`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_routes_device` FOREIGN KEY (`via_device_id`) REFERENCES `__PREFIX__devices` (`id`) ON DELETE CASCADE
@@ -305,14 +351,50 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__routes` (
 
 -- ------------------------------------------------------------------- relays
 
+-- Names for machines behind a gateway (§18).
+--
+-- An NVR, a printer and a DVR are not devices: no agent, no key, no row of
+-- their own anywhere. They are addresses inside an advertised range, and this
+-- is where an operator writes down which address is which so a technician can
+-- type a name instead of a number the panel invented.
+CREATE TABLE IF NOT EXISTS `__PREFIX__route_hosts` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `tenant_id` BIGINT UNSIGNED NOT NULL,
+  `network_id` BIGINT UNSIGNED NOT NULL,
+  `route_id` BIGINT UNSIGNED NOT NULL,
+  `label` VARCHAR(63) NOT NULL,
+  -- The **real** address, the one on the label on the machine. The mapped
+  -- address is derived, because a route withdrawn and re-advertised can be
+  -- given a different prefix and a stored copy would then be wrong.
+  `address` VARCHAR(45) NOT NULL,
+  `description` VARCHAR(190) NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `deleted_at` DATETIME NULL DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  -- Two machines answering to one name, or one machine with two names, are
+  -- both ways for a technician to reach the wrong box.
+  UNIQUE KEY `uq_route_hosts_label` (`route_id`, `label`),
+  UNIQUE KEY `uq_route_hosts_address` (`route_id`, `address`),
+  KEY `idx_route_hosts_network` (`network_id`),
+  KEY `idx_route_hosts_tenant` (`tenant_id`),
+  CONSTRAINT `fk_route_hosts_route` FOREIGN KEY (`route_id`) REFERENCES `__PREFIX__routes` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `__PREFIX__relays` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `name` VARCHAR(120) NOT NULL,
   `region` VARCHAR(32) NOT NULL DEFAULT 'in',
   `host` VARCHAR(190) NOT NULL,
-  `port` INT NOT NULL DEFAULT 51820,
-  `tcp_port` INT NOT NULL DEFAULT 443,
-  `public_key` VARCHAR(64) NOT NULL,
+  -- The relay's control port. 9000 is what akconnect-relay listens on; the
+  -- old default of 51820 was WireGuard's, which a relay does not use.
+  `port` INT NOT NULL DEFAULT 9000,
+  -- TCP fallback is not implemented. The column stays for when it is.
+  `tcp_port` INT NOT NULL DEFAULT 0,
+  -- Unused. A relay authorises sessions from the coordinator's HMAC ticket and
+  -- has no keypair; this is left over from a design where agents were going to
+  -- talk to relays directly. Nullable since 1.9.1 — see the migration.
+  `public_key` VARCHAR(64) NULL DEFAULT NULL,
   `capacity_mbps` INT NOT NULL DEFAULT 100,
   `current_sessions` INT NOT NULL DEFAULT 0,
   `status` ENUM('active','draining','down','disabled') NOT NULL DEFAULT 'active',
@@ -544,6 +626,9 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__app_updates` (
   `stage_path` VARCHAR(255) NULL,
   `manifest_json` JSON NULL,
   `applied_migrations_json` JSON NULL,
+  -- The migration files MIGRATE copied into database/migrations, so a
+  -- rollback can remove exactly those and leave the rest alone.
+  `copied_migrations_json` JSON NULL,
   `error_text` TEXT NULL,
   `started_by` BIGINT UNSIGNED NULL,
   `trigger_source` ENUM('web','cli','schedule') NOT NULL DEFAULT 'web',
@@ -563,6 +648,10 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__app_backups` (
   `db_path` VARCHAR(255) NULL,
   `files_sha256` CHAR(64) NULL,
   `db_sha256` CHAR(64) NULL,
+  -- Which dumper wrote db_path. A dump mysqldump produced for a schema
+  -- with generated columns cannot be replayed (error 1906), so the
+  -- recovery instructions need to know which one it was.
+  `db_method` VARCHAR(20) NULL DEFAULT NULL,
   `size_bytes` BIGINT UNSIGNED NOT NULL DEFAULT 0,
   `app_version` VARCHAR(32) NULL,
   `app_commit` VARCHAR(40) NULL,
@@ -603,7 +692,7 @@ CREATE TABLE IF NOT EXISTS `__PREFIX__update_settings` (
   `branch` VARCHAR(120) NOT NULL DEFAULT 'main',
   -- AES-256-GCM ciphertext. Never rendered, never logged, never returned by the API.
   `token_encrypted` TEXT NULL,
-  `channel` ENUM('stable','beta') NOT NULL DEFAULT 'stable',
+  `channel` ENUM('stable','beta','edge') NOT NULL DEFAULT 'stable',
   `auto_check` TINYINT(1) NOT NULL DEFAULT 1,
   `auto_apply` TINYINT(1) NOT NULL DEFAULT 0,
   `check_interval_hours` INT NOT NULL DEFAULT 6,

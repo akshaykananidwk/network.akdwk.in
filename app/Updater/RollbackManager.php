@@ -52,15 +52,33 @@ final class RollbackManager
         $log = UpdateLog::forUpdate($updateId);
         $log->step('ROLLBACK', $reason);
 
+        // Captured now: restoreDatabase() rewinds this row to whatever the
+        // backup caught, so by the time the status is written the column would
+        // otherwise report a step the run had long since passed.
+        $reachedStep = (string) ($update['step'] ?? 'ROLLBACK');
+
         $this->maintenance->enable('Rolling back update #' . $updateId, [], 600);
 
         $steps = [];
         $failures = [];
 
-        $this->restoreFiles($update, $log, $steps, $failures);
-        $this->reverseMigrations($update, $log, $steps, $failures);
-        $this->restoreDatabase($update, $log, $steps, $failures);
-        $this->restoreVersionMarker($update, $failures);
+        // The order matters and so does stopping. If the files cannot be put
+        // back, rewinding the database and the version marker would leave new
+        // code against an old schema and stamp it with the old version number
+        // — a state that is worse than either version on its own, and one an
+        // operator would have no reason to suspect. Everything after the file
+        // restore is therefore conditional on it.
+        if ($this->restoreFiles($update, $log, $steps, $failures)) {
+            $this->reverseMigrations($update, $log, $steps, $failures);
+            $this->restoreDatabase($update, $log, $steps, $failures);
+            $this->restoreVersionMarker($update, $failures);
+        } else {
+            $log->error(
+                'Stopping here. The database and the version marker have been left alone: '
+                . 'rewinding them under files that are still on the new version would produce '
+                . 'a mixture of the two, which is harder to diagnose than either.'
+            );
+        }
 
         // A rollback that leaves the panel broken is not a rollback.
         $health = HealthChecker::make()->run();
@@ -73,7 +91,12 @@ final class RollbackManager
 
         if ($ok) {
             $this->maintenance->disable();
-            AppUpdate::markRolledBack($updateId, $reason);
+            AppUpdate::markRolledBack($updateId, $reason, $reachedStep);
+            // The undo list has been consumed: the tree is back at its
+            // pre-APPLY state, so replaying it again could only confuse a
+            // later operator. It is kept on failure, where a second attempt
+            // still needs it.
+            $this->discardJournal($update);
             $log->info('Rollback complete. The previous version is live again.');
         } else {
             AppUpdate::fail($updateId, $reason . ' — rollback incomplete: ' . implode(' ', $failures));
@@ -111,17 +134,59 @@ final class RollbackManager
      * @param list<string> $steps
      * @param list<string> $failures
      */
-    private function restoreFiles(array $update, UpdateLog $log, array &$steps, array &$failures): void
+    /**
+     * Did this update get as far as writing files?
+     *
+     * APPLY is the first step that touches the installation. Anything at or
+     * after it has a journal that matters; anything before it does not.
+     *
+     * @param array<string,mixed> $update
+     */
+    private static function reachedApply(array $update): bool
+    {
+        $order = [
+            'PRECHECK', 'MAINTENANCE', 'BACKUP_FILES', 'BACKUP_DB', 'DOWNLOAD',
+            'STAGE', 'MIGRATE', 'APPLY', 'POST', 'HEALTH', 'FINALISE',
+        ];
+
+        $reached = array_search((string) ($update['step'] ?? ''), $order, true);
+        $apply = array_search('APPLY', $order, true);
+
+        if ($reached === false) {
+            // An unrecognised step is not evidence that nothing was written.
+            // A completed update is the clearest case of having written files.
+            return in_array((string) ($update['status'] ?? ''), ['success', 'completed'], true);
+        }
+
+        return $reached >= $apply;
+    }
+
+    private function restoreFiles(array $update, UpdateLog $log, array &$steps, array &$failures): bool
     {
         try {
             $journalRelative = (string) ($update['journal_path'] ?? '');
             $journalPath = $journalRelative !== '' ? $this->appRoot . '/' . ltrim($journalRelative, '/') : '';
 
             if ($journalPath === '' || !is_file($journalPath)) {
+                // No journal is only benign when the update never wrote a file.
+                // If it reached APPLY, the journal is the *only* record of what
+                // was overwritten, and continuing would restore the database
+                // under the new files and call it a success — which is a worse
+                // state than either version on its own, and worse than stopping.
+                if (self::reachedApply($update)) {
+                    $failures[] = 'Files: the rollback journal is missing, so the files this update '
+                        . 'replaced cannot be restored. The database and version marker have been '
+                        . 'left alone deliberately — rewinding them under the new files would produce '
+                        . 'a mixture of two versions. Restore from the file backup listed in History.';
+                    $log->error(end($failures));
+
+                    return false;
+                }
+
                 $steps[] = 'Files: nothing to undo (the update had not reached APPLY).';
                 $log->info(end($steps));
 
-                return;
+                return true;
             }
 
             $journal = new RollbackJournal(
@@ -138,11 +203,34 @@ final class RollbackManager
                 foreach (array_slice($replay['failed'], 0, 10) as $failure) {
                     $log->error('  ✗ ' . $failure['path'] . ': ' . $failure['error']);
                 }
+
+                // A partial file restore is the same problem in a smaller
+                // shape: some files old, some new. Rewinding the schema under
+                // that is not an improvement.
+                return false;
             }
+
+            return true;
         } catch (\Throwable $e) {
             $failures[] = 'File rollback failed: ' . $e->getMessage();
             $log->error(end($failures));
+
+            return false;
         }
+    }
+
+    /** @param array<string,mixed> $update */
+    private function discardJournal(array $update): void
+    {
+        $relative = (string) ($update['journal_path'] ?? '');
+        if ($relative === '') {
+            return;
+        }
+
+        (new RollbackJournal(
+            $this->appRoot . '/' . ltrim($relative, '/'),
+            sprintf('%s/storage/updates/journal-%d-files', $this->appRoot, (int) $update['id'])
+        ))->discard();
     }
 
     /**
@@ -167,10 +255,47 @@ final class RollbackManager
                 count($reversal['irreversible'])
             );
             $log->info(end($steps));
+
+            $removed = $this->removeCopiedMigrationFiles($update);
+            if ($removed > 0) {
+                $steps[] = sprintf('Removed %d migration file(s) this update had added.', $removed);
+                $log->info(end($steps));
+            }
         } catch (\Throwable $e) {
             $failures[] = 'Migration rollback failed: ' . $e->getMessage();
             $log->error(end($failures));
         }
+    }
+
+    /**
+     * Delete the migration files MIGRATE copied in, and only those.
+     *
+     * Reversing a migration in the database while leaving its file on disk
+     * leaves it showing as pending, so the next `migrate.php` would re-apply a
+     * migration belonging to the version that was just rolled back.
+     *
+     * @param array<string,mixed> $update
+     */
+    private function removeCopiedMigrationFiles(array $update): int
+    {
+        $copied = (array) ($update['copied_migrations_json'] ?? []);
+        if ($copied === []) {
+            return 0;
+        }
+
+        $directory = $this->appRoot . '/database/migrations';
+        $removed = 0;
+
+        foreach ($copied as $filename) {
+            // basename() so a recorded name can never walk out of the
+            // migrations directory, however it got into the column.
+            $path = $directory . '/' . basename((string) $filename);
+            if (is_file($path) && @unlink($path)) {
+                $removed++;
+            }
+        }
+
+        return $removed;
     }
 
     /**
@@ -211,9 +336,19 @@ final class RollbackManager
     private function restoreVersionMarker(array $update, array &$failures): void
     {
         try {
-            if ($update['from_version'] !== null && $update['from_version'] !== '') {
-                file_put_contents($this->appRoot . '/VERSION', $update['from_version'] . "\n");
-                Config::set('app.version', (string) $update['from_version']);
+            $fromVersion = (string) ($update['from_version'] ?? '');
+            if ($fromVersion !== '') {
+                // The journal usually restored VERSION already, byte for byte.
+                // Rewriting it here would reconstruct the file rather than
+                // restore it — a trailing newline the original did not have is
+                // enough to make the next update see it as locally modified.
+                // So this is a fallback, for a rollback that never reached
+                // APPLY and therefore has no journal entry for it.
+                $marker = $this->appRoot . '/VERSION';
+                if (trim((string) @file_get_contents($marker)) !== $fromVersion) {
+                    file_put_contents($marker, $fromVersion . "\n");
+                }
+                Config::set('app.version', $fromVersion);
             }
             if (!empty($update['from_commit'])) {
                 UpdateSetting::setCurrentCommit((string) $update['from_commit']);
@@ -238,10 +373,24 @@ final class RollbackManager
         $filesPath = $backup['files_path'] ?? 'storage/backups/<timestamp>/files.tar.gz';
         $dbPath = $backup['db_path'] ?? 'storage/backups/<timestamp>/db.sql.gz';
 
+        $note = 'config/config.php, .env and uploads/ were never touched by the update and do not need restoring.';
+
+        // Backups taken before 1.0.2 could be written by mysqldump even on a
+        // schema with stored generated columns, and those cannot be replayed
+        // at all — the server rejects the explicit value with error 1906.
+        // Saying so here is the difference between an operator recovering and
+        // an operator discovering it at the worst possible moment.
+        if (($backup['db_method'] ?? null) === 'mysqldump' && $this->schemaHasGeneratedColumns()) {
+            $note .= ' Warning: this dump was written by mysqldump while the schema has generated columns,'
+                . ' so it may fail to restore with error 1906. Use a backup taken by version 1.0.2 or later'
+                . ' if one is available.';
+        }
+
         return [
             'backup_id'    => $backupId,
             'files_path'   => $filesPath,
             'db_path'      => $dbPath,
+            'db_method'    => $backup['db_method'] ?? null,
             'app_root'     => $this->appRoot,
             'manual_steps' => [
                 'cd ' . $this->appRoot,
@@ -249,8 +398,19 @@ final class RollbackManager
                 'gunzip -c ' . $dbPath . ' | mysql -u <db_user> -p <db_name>',
                 'rm storage/maintenance.flag   # brings the site back online',
             ],
-            'note' => 'config/config.php, .env and uploads/ were never touched by the update and do not need restoring.',
+            'note' => $note,
         ];
+    }
+
+    private function schemaHasGeneratedColumns(): bool
+    {
+        try {
+            return (new SqlDumpWriter((string) Config::get('db.name')))->generatedColumns() !== [];
+        } catch (\Throwable) {
+            // Never let a warning lookup be the reason recovery advice is
+            // withheld from someone who needs it right now.
+            return false;
+        }
     }
 
     /** @param list<string> $failures */

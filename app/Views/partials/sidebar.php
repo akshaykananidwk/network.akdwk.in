@@ -19,8 +19,10 @@ $tenantNav = [
 $platformNav = [
     ['/admin/tenants', 'Customers', 'building', 'tenant.manage'],
     ['/admin/relays',  'Relays',    'relay',    'relay.manage'],
+    ['/admin/coordinator', 'Coordinator', 'globe', 'platform.settings'],
     ['/admin/updates', 'Updates',   'download', 'update.manage'],
     ['/admin/backups', 'Backups',   'archive',  'backup.manage'],
+    ['/admin/alerts',  'Alerts',    'bell',     'platform.settings'],
 ];
 ?>
 <aside class="sidebar" id="sidebar" aria-label="Main navigation">
