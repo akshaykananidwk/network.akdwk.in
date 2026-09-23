@@ -6,6 +6,20 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.5] — development
+
+**The Test button answered 500 the first time it was pressed.** The probe
+model inherited soft-deletes, which every model gets by default, and its table
+has no deleted_at column — so each finder appended "AND deleted_at IS NULL" to
+a table that could not answer it.
+
+Nothing caught it, and that is the more interesting half. The migration was
+correct. The model was correct. They simply disagreed, and nothing in the
+suite compared them: the unit tests never touch the database, and the database
+tests only exercised the models they happened to name. Every model's finder is
+now run against the schema the migrations actually built, inside a tenant so
+the scoped ones are really exercised. Twenty-six models, checked on every run.
+
 ## [1.9.7-dev.4] — development
 
 **A panel that answered 401 disconnected every device on it.** The agent tore

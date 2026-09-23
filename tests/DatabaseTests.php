@@ -52,6 +52,7 @@ final class DatabaseTests
         // commit every fixture created up to that point — the suite would
         // still pass while leaving rows behind in the database.
         self::migrationLedger();
+        self::everyModelMatchesItsTable();
 
         $before = self::rowCensus();
 
@@ -248,6 +249,72 @@ final class DatabaseTests
     }
 
     // ------------------------------------------------------------ migrations
+
+/**
+     * Every model's finder runs against the real migrated schema.
+     *
+     * 1.9.7-dev.4 shipped a DeviceProbe model over a table with no deleted_at
+     * column. Model defaults $softDeletes to true, so every finder appended
+     * "AND deleted_at IS NULL" and the feature answered 500 the first time
+     * anybody pressed the button. Nothing caught it: the unit tests never
+     * touched the database, the migration applied cleanly because it was
+     * correct, and the model was correct too — they simply disagreed, and
+     * nothing compared them.
+     *
+     * So this compares them. Every model in app/Models is asked for a row
+     * through its own finder, against the schema the migrations actually
+     * built. A column a model assumes and a table lacks is a PDOException
+     * here rather than a 500 in somebody's hands.
+     *
+     * find() rather than a hand-written query on purpose: it exercises the
+     * soft-delete clause, the tenant scope and the table name together, which
+     * is the combination that was wrong.
+     */
+    private static function everyModelMatchesItsTable(): void
+    {
+        TestCase::group('Database — every model matches the table it was migrated onto');
+
+        $files = glob(APP_ROOT . '/app/Models/*.php') ?: [];
+        $checked = 0;
+
+        foreach ($files as $file) {
+            $class = 'App\\Models\\' . basename($file, '.php');
+
+            // Model itself is the base class; it has no table of its own.
+            if ($class === 'App\\Models\\Model' || !class_exists($class)) {
+                continue;
+            }
+
+            $reflection = new \ReflectionClass($class);
+            if ($reflection->isAbstract() || !$reflection->isSubclassOf('App\\Models\\Model')) {
+                continue;
+            }
+
+            $checked++;
+
+            // An id that will not exist. The answer is not the point — the
+            // point is that the query the model builds is one the schema can
+            // answer at all.
+            //
+            // Inside a tenant, because a tenant-scoped model refuses to build
+            // a query without one and that refusal would hide the very thing
+            // being looked for.
+            $failure = null;
+            try {
+                TenantScope::asTenant(1, static fn () => $class::find(PHP_INT_MAX));
+            } catch (\Throwable $e) {
+                $failure = $e->getMessage();
+            }
+
+            TestCase::assert(
+                $failure === null,
+                basename($file, '.php') . '::find() runs against its real table',
+                $failure ?? ''
+            );
+        }
+
+        TestCase::assert($checked > 10, $checked . ' models checked against the schema');
+    }
 
     private static function migrationLedger(): void
     {

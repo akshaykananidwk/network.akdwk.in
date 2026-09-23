@@ -17,6 +17,16 @@ final class DeviceProbe extends Model
 {
     protected static string $table = 'device_probes';
     protected static bool $tenantScoped = true;
+
+    // Not soft-deleted, and the table has no deleted_at column.
+    //
+    // Model defaults this to true, so every finder appended
+    // "AND deleted_at IS NULL" to a table without that column and the Test
+    // button answered 500. A probe is an event — it happened, at a time, with
+    // a result — and an event is not something anybody edits or retracts
+    // later. Rows age out with the device they belong to, through the
+    // foreign key.
+    protected static bool $softDeletes = false;
     protected static array $sortable = ['id', 'requested_at'];
     protected static array $fillable = [
         'tenant_id', 'device_id', 'target', 'label', 'state',
