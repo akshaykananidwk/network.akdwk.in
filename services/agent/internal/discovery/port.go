@@ -154,7 +154,22 @@ func (c *Client) noteAnswered() {
 //
 // Called from the one-second tick, so an agent whose first hello was lost
 // tries again in five seconds rather than waiting out the keepalive.
-func (c *Client) maybeRetryUnacked(keepalive time.Duration) {
+//
+// A retry is always a full hello, never a ping. A ping can only refresh an
+// entry the coordinator already has, so the one thing an unanswered
+// announcement tells us is that pinging may be pointless — and it is exactly
+// pointless in the case that matters. Restarting the coordinator empties its
+// registry; it then ignores pings from every key it has never heard of, by
+// design, because answering them would let anyone keep an entry alive. The
+// agent used to spend the first forty seconds after a restart retrying with
+// pings, because needsHello only escalates once the last acknowledgement is
+// two keepalives old. Forty seconds of sending the one message that cannot
+// work, while a relay ticket ran out. An edge upgrade restarts the
+// coordinator, so this was on the path of every Update Now.
+//
+// The cost is a token check at the panel on each retry, and retries only
+// happen when something is already wrong — retryBurst caps how many.
+func (c *Client) maybeRetryUnacked(time.Duration) {
 	c.mu.Lock()
 	unacked := c.unacked
 	since := time.Since(c.lastSend)
@@ -164,7 +179,7 @@ func (c *Client) maybeRetryUnacked(keepalive time.Duration) {
 		return
 	}
 
-	c.announce(c.needsHello(keepalive))
+	c.announce(true)
 }
 
 // maybeMovePort moves this device to a different UDP port when announcements

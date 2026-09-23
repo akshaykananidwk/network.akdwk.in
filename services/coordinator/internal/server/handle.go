@@ -32,6 +32,8 @@ func (s *Server) handle(ctx context.Context, pkt []byte, from netip.AddrPort) {
 		s.handleHello(ctx, header, rest, from)
 	case disco.TypePing:
 		s.handlePing(header, rest, from)
+	case disco.TypePathProbe:
+		s.handlePathProbe(header, rest, from)
 	case disco.TypeRelayUsage:
 		s.handleRelayUsage(rest)
 	case disco.TypeRelayRTT:
@@ -154,6 +156,43 @@ func (s *Server) handleHello(ctx context.Context, header disco.Header, sealed []
 	// whose stored set is empty gets nothing. The device approved five minutes
 	// ago is not in anybody's set until somebody asks the panel again.
 	s.invalidatePeersOf(header.Sender)
+}
+
+// handlePathProbe answers on the address the probe arrived from, and does
+// nothing else.
+//
+// No Touch, no peer list, no reverify, no "moved" — that is the entire point.
+// An agent whose control traffic is going over the HTTPS fallback still has
+// to discover that UDP has started working again, and the only way to know is
+// to put a packet on the real socket and get one back. It used to do that by
+// sending its ANNOUNCEMENT over both paths, and the coordinator dutifully
+// recorded the device at both addresses: "moved to <udp>", "moved to
+// <fallback>", twice every twenty seconds, each one telling both peers to
+// re-point. A relayed pair spent the whole time being re-introduced and never
+// carried traffic. The comment on the duplicate said it was not belt and
+// braces; it was right about the purpose and had not followed it through to
+// what the other end does with it.
+//
+// Sealed, so a probe costs a key agreement and cannot be sent by a scanner:
+// this replies to whoever asked, which is exactly the shape of an
+// amplification reflector if it answered anyone.
+func (s *Server) handlePathProbe(header disco.Header, sealed []byte, from netip.AddrPort) {
+	if _, err := disco.Open(sealed, &header.Sender, &s.opts.PrivateKey); err != nil {
+		return
+	}
+
+	// And only for a device already known, for the same reason a ping from an
+	// unknown key is ignored.
+	if _, known := s.reg.Get(header.Sender); !known {
+		return
+	}
+
+	pkt, err := s.sealTo(disco.TypePathProbeAck, header.Sender, nil)
+	if err != nil {
+		return
+	}
+
+	s.send(pkt, from)
 }
 
 func (s *Server) handlePing(header disco.Header, sealed []byte, from netip.AddrPort) {

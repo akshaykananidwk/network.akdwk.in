@@ -701,22 +701,45 @@ scenario_edge_upgrade() {
 
     wait "$ping_pid" 2>/dev/null || true
 
-    local sent lost
+    local sent lost gap
     sent="$(sed -n 's/^\([0-9]\+\) packets transmitted.*/\1/p' "$pinglog")"
     lost="$(sed -n 's/.*transmitted, \([0-9]\+\) received.*/\1/p' "$pinglog")"
     sent="${sent:-0}"
     lost=$(( sent - ${lost:-0} ))
 
+    # The longest unbroken run of missing sequence numbers, which is the
+    # number an operator actually feels. A total says 73% lost and cannot
+    # tell one thirty-second outage from thirty one-second ones, and those
+    # are different faults with different causes.
+    gap="$(awk -v sent="$sent" -F'icmp_seq=' '/icmp_seq=/ {
+        split($2, f, " "); seq = f[1] + 0
+        if (first == 0) first = seq
+        if (last != "" && seq - last - 1 > run) run = seq - last - 1
+        last = seq
+    } END {
+        # The tail counts too. A pair that went down and never came back
+        # before the ping ended leaves no later packet to measure against,
+        # and reading only the gaps BETWEEN received packets called that a
+        # clean recovery — which is the opposite of what it is.
+        if (last != "" && sent - last > run) run = sent - last
+        if (first > 1 && first - 1 > run) run = first - 1
+        printf "%d", run
+    }' "$pinglog")"
+
     # A ceiling, not a target. Rebinding is attempted every five seconds, so
     # the relay coming back costs at most one interval — 25 packets at this
     # rate. Fifty is that with room for a slow start, and still small enough
     # that a pair which silently stayed down for the rest of the run fails.
-    if [ "$sent" -gt 0 ] && [ "$lost" -le 50 ]; then
+    # Judged on the longest single outage, not the total: a restart that
+    # costs one short gap and recovers is the thing being asked about.
+    # Fifty packets is ten seconds at this rate — the relay is rebound every
+    # five, and a pair should be back within one or two of those intervals.
+    if [ "$sent" -gt 0 ] && [ "$gap" -le 50 ]; then
         record "upgrade/gap" PASS \
-            "$lost of $sent packets lost across the restart (about $((lost / 5))s, recovered on its own)"
+            "longest outage $((gap / 5))s ($gap packets), $lost of $sent lost in all, recovered on its own"
     else
         record "upgrade/gap" FAIL \
-            "$lost of $sent packets lost across the restart"
+            "longest outage $((gap / 5))s ($gap packets), $lost of $sent lost in all"
         lab::tail_log alpha-up 25
         lab::tail_log coordinator 25
     fi

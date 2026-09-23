@@ -61,14 +61,42 @@ type Bind struct {
 	// the fallback is up. Only the socket itself knows, and this is where it
 	// says so.
 	lastUDP atomic.Int64
+
+	// duplicateControl restores the pre-1.9.7-dev.19 behaviour of sending
+	// diverted control over both paths.
+	//
+	// It starts SET, and is cleared the first time the coordinator answers a
+	// path probe. That ordering is deliberate: an agent talking to a
+	// coordinator too old to understand TypePathProbe has no other way to
+	// discover that UDP is working again, and would sit on the fallback until
+	// somebody restarted it. Duplicating is the worse behaviour of the two —
+	// it is what made a relayed pair flap — but "worse" beats "stuck", and it
+	// lasts only until the first probe is answered, which on a current
+	// coordinator is the first one sent.
+	duplicateControl atomic.Bool
 }
 
 // New wraps the platform's default bind.
 func New() *Bind {
-	return &Bind{
+	b := &Bind{
 		inner:    conn.NewDefaultBind(),
 		injected: make(chan injected, injectQueue),
 	}
+	// Until a coordinator has proved it understands path probes. See the
+	// field it sets.
+	b.duplicateControl.Store(true)
+
+	return b
+}
+
+// PathProbeAnswered records that the coordinator answers path probes, which is
+// what makes it safe to stop sending control over both paths at once.
+//
+// One way only: a coordinator that has answered once is not going to stop
+// understanding the message, and a single lost reply must not put the agent
+// back to duplicating for twenty seconds.
+func (b *Bind) PathProbeAnswered() {
+	b.duplicateControl.Store(false)
 }
 
 // SetHandler installs the discovery handler. It may be called before or after
@@ -190,10 +218,9 @@ func (b *Bind) Send(bufs [][]byte, ep conn.Endpoint) error {
 
 // SendTo sends a discovery packet to a raw address.
 //
-// While the fallback is carrying control, a packet for the coordinator or a
-// relay goes out over both paths. That is not belt and braces: the UDP copy is
-// how the agent finds out that UDP has started working again, and without it
-// a device would stay on the fallback until it was restarted.
+// A diverted packet goes down the tunnel and, with one exception, nowhere
+// else. See alsoGoesOverUDP for the exception and for what sending everything
+// twice did to a relayed pair.
 func (b *Bind) SendTo(pkt []byte, to netip.AddrPort) error {
 	route := b.route.Load()
 	diverted := route.diverts(pkt, to)
@@ -201,6 +228,10 @@ func (b *Bind) SendTo(pkt []byte, to netip.AddrPort) error {
 	if diverted {
 		if err := route.tunnel.SendControl(pkt, to); err != nil {
 			return err
+		}
+
+		if !b.duplicateControl.Load() && !alsoGoesOverUDP(pkt) {
+			return nil
 		}
 	}
 

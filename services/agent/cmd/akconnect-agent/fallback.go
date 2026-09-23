@@ -27,6 +27,38 @@ const (
 	fallbackAfterSilence    = 4 * time.Second
 )
 
+// How long a device whose UDP was working seconds ago waits before it decides
+// the network has stopped carrying UDP.
+//
+// Four seconds is right for a device that has never had UDP — somebody
+// standing in a hotel lobby must not wait — and wrong for one that was
+// carrying traffic a moment ago, because the likeliest explanation by far is
+// not a network that has changed but a server that is restarting. An edge
+// upgrade restarts the coordinator and the relay back to back, which is three
+// to six seconds of nothing answering, and both ends of every relayed pair
+// concluded their network blocked UDP and opened the fallback. Measured on the
+// drill: eighteen seconds of lost traffic and a pair that did not settle for
+// minutes, every time anybody pressed Update Now.
+//
+// Fifteen seconds, and the number is a count of retries rather than a guess.
+// An unanswered announcement is now retried every five seconds with a full
+// hello, so fifteen seconds is three attempts that went nowhere — by which
+// point a restart has long since finished, because with the rest of this
+// release a coordinator and relay restart costs about three seconds end to
+// end.
+//
+// It was thirty at first, and thirty broke the drill this exists to protect:
+// a device whose network genuinely stops carrying UDP has a thirty-second
+// budget to get back, and thirty seconds of waiting plus twenty of connecting
+// does not fit in it. The cost of this number falls on a real customer either
+// way — too low and an edge upgrade drops everybody onto HTTPS, too high and
+// somebody carrying a laptop onto a bad network waits. Three failed retries
+// is the smallest amount of evidence that distinguishes them.
+const (
+	fallbackWarmSilence = 15 * time.Second
+	udpWorkedRecently   = 60 * time.Second
+)
+
 // How long UDP has to be working, and the fallback carrying nothing, before
 // the connection is dropped.
 //
@@ -34,9 +66,17 @@ const (
 // answering says nothing about whether a peer's traffic is still relayed over
 // HTTPS, and an idle tunnel on a network that blocks UDP is idle because
 // nobody is using the device, not because the path is unnecessary.
+//
+// Five minutes was the old value for fallbackUnusedFor, and while the two
+// paths both announced it was five minutes of a relayed pair being told its
+// peer had moved twice every twenty seconds. That duplicate is gone, so this
+// is no longer the dangerous window it was — but a connection nothing is
+// using, on a device whose UDP is demonstrably working, is still just a
+// socket held open through somebody's proxy. Forty-five seconds is long
+// enough not to flap it open and shut on a marginal link.
 const (
 	fallbackSettled   = 2 * time.Minute
-	fallbackUnusedFor = 5 * time.Minute
+	fallbackUnusedFor = 45 * time.Second
 )
 
 // udpProvenWithin is how recently a discovery packet must have arrived on the
@@ -108,7 +148,12 @@ func (s *session) watchFallback(ctx context.Context) {
 		// detector is held. Reasserted on every tick rather than once,
 		// because the connection comes and goes and the two must not drift.
 		if s.discovery != nil {
-			s.discovery.HoldPort(s.fallback != nil && s.fallback.Up())
+			carrying := s.fallback != nil && s.fallback.Up()
+			s.discovery.HoldPort(carrying)
+			// And while it is carrying, discovery announces down the tunnel
+			// only, and tests the real socket with a probe instead. See
+			// DivertedControl.
+			s.discovery.DivertedControl(carrying)
 		}
 
 		// And the other half of the same question: once the socket is
@@ -144,8 +189,16 @@ func (s *session) udpIsHopeless() bool {
 		return false
 	}
 
+	silence := fallbackAfterSilence
+	if s.tun != nil && s.tun.Transport().UDPAlive(udpWorkedRecently) {
+		// This device was carrying UDP within the last minute, so a few
+		// seconds of silence is far more likely to be our own servers
+		// restarting than the network changing under it.
+		silence = fallbackWarmSilence
+	}
+
 	if count, since := s.discovery.Unanswered(); count >= fallbackAfterUnanswered &&
-		since >= fallbackAfterSilence {
+		since >= silence {
 		return true
 	}
 

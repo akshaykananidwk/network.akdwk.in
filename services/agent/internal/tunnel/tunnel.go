@@ -278,7 +278,47 @@ func (t *Tunnel) SetPeerEndpoint(publicKey, endpoint string) error {
 		return err
 	}
 
-	return t.dev.IpcSet(uapi)
+	if err := t.dev.IpcSet(uapi); err != nil {
+		return err
+	}
+
+	t.nudge(publicKey)
+
+	return nil
+}
+
+// nudge makes WireGuard use a peer's new endpoint now rather than in fifteen
+// seconds.
+//
+// Changing an endpoint does not disturb the session, which is the whole point
+// of the silent upgrade — but it also means WireGuard has no reason to send
+// anything. It keeps its established session and only notices the far end has
+// gone quiet on its own timers: ten seconds of keepalive timeout and five of
+// rekey, and the log line for it is "Retrying handshake because we stopped
+// hearing back after 15 seconds".
+//
+// Measured on the edge-upgrade drill, that is most of the outage. The relay
+// restarts, both ends are re-bound to it within four seconds, and then nothing
+// happens for another eleven because neither WireGuard has any reason to
+// speak. One empty packet down the new path ends it: if the session keys are
+// still good the far end simply receives it and answers, and if they are not,
+// staging a packet is what triggers a handshake — either way immediately.
+//
+// Best effort by design. A peer the device does not know, or one that is not
+// running, needs no nudge and gets none; there is nothing here whose failure
+// should stop an endpoint being updated.
+func (t *Tunnel) nudge(publicKey string) {
+	pub, err := wgkey.ParsePublic(publicKey)
+	if err != nil {
+		return
+	}
+
+	var key device.NoisePublicKey
+	copy(key[:], pub[:])
+
+	if peer := t.dev.LookupPeer(key); peer != nil {
+		peer.SendKeepalive()
+	}
 }
 
 // PeerStatus is what the device reports back about one peer.

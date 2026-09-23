@@ -22,6 +22,8 @@ func TestEveryMessageTypeIsDistinct(t *testing.T) {
 		TypeHello:            "TypeHello",
 		TypeHelloAck:         "TypeHelloAck",
 		TypePing:             "TypePing",
+		TypePathProbe:        "TypePathProbe",
+		TypePathProbeAck:     "TypePathProbeAck",
 		TypePeers:            "TypePeers",
 		TypePunch:            "TypePunch",
 		TypePunchAck:         "TypePunchAck",

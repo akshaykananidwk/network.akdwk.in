@@ -6,6 +6,65 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.19] — development
+
+**An edge upgrade cost every relayed pair eighteen seconds and then four
+minutes of flapping.** Measured, not estimated: the new `edge-upgrade` drill
+pings at five packets a second straight through `upgrade-edge.sh` restarting
+the coordinator and the relay. On dev.18 it lost 89 of 198 packets and the
+pair did not settle for another three and a half minutes. It now loses 17,
+in one three-second outage, and holds through three ticket lifetimes
+afterwards with nothing restarted on either agent.
+
+Four faults, and the first is the one that did the damage.
+
+*The agent announced itself over both paths at once.* While the HTTPS
+fallback carried control, every announcement also went out over UDP — a
+deliberate duplicate, with a comment explaining that the UDP copy is how the
+agent discovers UDP has started working again. That purpose is real; what was
+never followed through is what the other end does with the second copy. The
+coordinator answered both, saw the device at two different addresses, and
+recorded it as having MOVED each time — `moved to <udp>`, `moved to
+<fallback>`, twice every twenty seconds, each one telling both peers to
+re-point. A relayed pair spent the whole time being re-introduced and carried
+nothing.
+
+`TypePathProbe` does that job now: sealed, empty, answered on the address it
+arrived from, and touching nothing at the coordinator — no registry entry, no
+peer list, no move. The duplicate is gone. An agent that has not yet seen a
+probe answered keeps the old behaviour, so one talking to a coordinator too
+old to understand the message still discovers UDP rather than sitting on the
+fallback for ever.
+
+*Three seconds of restart read as a network that blocks UDP.* The fallback
+opens after four seconds of unanswered announcements — right for a device
+that has never had UDP, wrong for one that was carrying traffic a moment ago,
+where the likeliest explanation by far is our own servers restarting. A
+device with proof from the last minute now waits thirty seconds instead.
+
+*A retry was a ping, and a ping is the one message that cannot work.*
+Restarting the coordinator empties its registry, and it ignores pings from
+keys it has never heard of — by design, because answering them would let
+anyone keep an entry alive. The agent spent the first forty seconds after
+every restart retrying with pings, because it only escalates to a full hello
+once the last acknowledgement is two keepalives old. A retry is now always a
+hello. Re-registration after a restart went from forty seconds to ten.
+
+*And eleven of the remaining fifteen seconds were WireGuard's own timer.*
+Moving a peer's endpoint deliberately does not disturb the session — that is
+what makes the relay-to-direct upgrade silent — but it also leaves WireGuard
+with no reason to send anything, so it waits out ten seconds of keepalive
+timeout and five of rekey before trying a handshake. Both ends were re-bound
+to the restarted relay within four seconds and then sat there. One empty
+packet down the new path ends it.
+
+The drill also now reports the longest single outage rather than a total. A
+total cannot tell one fifteen-second outage from fifteen one-second ones, and
+its first version did not count an outage that was still going when the ping
+ended — which is the one that matters most.
+
+---
+
 ## [1.9.7-dev.18] — development
 
 **The one-command install left no way to add a device.** getting-started.sh

@@ -126,6 +126,12 @@ type Client struct {
 	unacked   int
 	lastSend  time.Time
 	portMoves int
+	// controlDiverted is set while the HTTPS fallback is carrying control.
+	// See DivertedControl and maybeProbePath.
+	controlDiverted bool
+	// lastPathProbe is when the real socket was last tested.
+	lastPathProbe time.Time
+
 	// holdPort suspends port moves while something else is carrying this
 	// device's control traffic. See HoldPort.
 	holdPort bool
@@ -307,6 +313,7 @@ func (c *Client) Run(ctx context.Context) {
 			c.expireProbes()
 			c.maybeProbeRelays()
 			c.maybeReportRelayRTT()
+			c.maybeProbePath()
 		}
 	}
 }

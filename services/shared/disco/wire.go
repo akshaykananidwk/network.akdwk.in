@@ -40,6 +40,25 @@ const (
 	TypePunchAck MessageType = 0x05
 	// TypePing refreshes a NAT mapping with the coordinator. Sealed.
 	TypePing MessageType = 0x06
+	// TypePathProbe asks the coordinator to answer on the address it arrives
+	// from, and to do nothing else. Sealed, so only a device that holds a key
+	// can make the coordinator send anything.
+	//
+	// It exists because an announcement has a side effect a probe must not
+	// have. While the HTTPS fallback carries control, the agent still has to
+	// put a packet on its real UDP socket to find out whether UDP has started
+	// working again — and it used to do that by sending the announcement over
+	// both paths at once. The coordinator answered both, from two different
+	// addresses, and recorded the device as having MOVED each time: twice
+	// every twenty seconds, telling both peers to re-point, for as long as the
+	// fallback stayed open. A relayed pair never held a path.
+	//
+	// So the UDP copy is this instead. It proves the path in both directions
+	// and touches nothing: no registry entry, no peer list, no move.
+	TypePathProbe MessageType = 0x07
+	// TypePathProbeAck answers a path probe, and means only "this packet
+	// reached me and my reply reached you". Sealed.
+	TypePathProbeAck MessageType = 0x08
 )
 
 // HeaderLen is Magic plus the type byte plus the sender's public key.

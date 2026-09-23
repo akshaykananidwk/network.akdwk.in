@@ -70,10 +70,40 @@ func (r *routing) diverts(pkt []byte, to netip.AddrPort) bool {
 		return false
 	}
 
+	header, _, headerErr := disco.ParseHeader(pkt)
+
+	// A path probe is never diverted. Its entire purpose is to find out
+	// whether the real socket still works, and a copy of it sent down the
+	// tunnel would answer a question nobody asked.
+	if headerErr == nil && header.Type == disco.TypePathProbe {
+		return false
+	}
+
 	if r.control[normalise(to)] {
 		return true
 	}
 
+	return headerErr == nil && header.Type == disco.TypeRelayBind
+}
+
+// alsoGoesOverUDP reports whether a diverted packet's UDP copy still earns its
+// place.
+//
+// Almost nothing does. The rule used to be that everything diverted went out
+// both ways, so that the UDP copy could show the agent when UDP started
+// working again — a sound purpose, followed through only as far as this end.
+// The coordinator answers both copies, from two different addresses, and
+// records the device as having MOVED each time: twice every twenty seconds,
+// each one telling both peers to re-point, for as long as the fallback stayed
+// open. A relayed pair never held a path. TypePathProbe does that job now,
+// with no side effect at the other end.
+//
+// A relay bind is the exception, and it is load-bearing. The fallback stops
+// answering binds once UDP looks healthy (see PreferUDP); what then hands the
+// peer back to the ordinary path is the real relay answering the UDP copy of
+// the same bind. Without it a device that recovered would stay on the
+// expensive path until something restarted it.
+func alsoGoesOverUDP(pkt []byte) bool {
 	header, _, err := disco.ParseHeader(pkt)
 
 	return err == nil && header.Type == disco.TypeRelayBind
