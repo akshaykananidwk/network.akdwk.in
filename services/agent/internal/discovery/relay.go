@@ -366,6 +366,26 @@ const relayFailoverNeedsCoordinator = 4 * time.Second
 // before relay failover stands down, for the same reason.
 const relayFailoverNeedsAnswers = 2
 
+// relayFailoverStandDownMax bounds how long failover waits for the
+// coordinator.
+//
+// Standing down while the coordinator is silent is right when something is
+// going to take over — the fallback opens within about fifteen seconds and
+// answers through the tunnel, at which point the coordinator is answering
+// again and failover resumes by itself.
+//
+// It is wrong for ever. A device whose fallback cannot be reached at all —
+// nobody has configured Apache for it yet, which is the state every panel is
+// in until somebody runs --configure-apache — would wait for a takeover that
+// is never coming, pinned on a relay that has stopped answering, until its
+// WireGuard handshake went stale and the panel called it "connecting" while
+// traffic had been flowing minutes earlier. Reported from a real home PC on
+// its own ISP, and caused by the stand-down itself.
+//
+// So past this, ask anyway. It costs one packet, it might work, and it is
+// the only move left.
+const relayFailoverStandDownMax = 30 * time.Second
+
 // relayMissesBeforeAsking is how many unanswered rebinds prompt an early
 // announcement to the coordinator.
 //
@@ -394,6 +414,12 @@ func (c *Client) rebindRelays() {
 		ticket  []byte
 		name    string
 		dead    bool
+	}
+
+	// Cleared here rather than inside the loop, so the clock is about the
+	// coordinator and not about whichever peer happened to be looked at last.
+	if !c.udpLooksDeadLocked() {
+		c.standDownSince = time.Time{}
 	}
 
 	var bindings []binding
@@ -431,7 +457,7 @@ func (c *Client) rebindRelays() {
 		// rebinding — it costs one packet every five seconds and it is how the
 		// relay is found again the moment UDP comes back — and let the
 		// fallback take it.
-		if dead && c.udpLooksDeadLocked() {
+		if dead && c.udpLooksDeadLocked() && c.standingDownLocked() {
 			c.relayMissed[peer] = relayMissesBeforeFailover
 			dead = false
 		}
@@ -490,6 +516,18 @@ func (c *Client) rebindRelays() {
 // socket refuses is a local firewall blocking this program, where no count of
 // unanswered ones ever grows because nothing left the machine. Relay failover
 // is useless in either.
+// standingDownLocked reports whether failover should still wait, and starts
+// the clock the first time it is asked.
+//
+// Called with c.mu held.
+func (c *Client) standingDownLocked() bool {
+	if c.standDownSince.IsZero() {
+		c.standDownSince = time.Now()
+	}
+
+	return time.Since(c.standDownSince) < relayFailoverStandDownMax
+}
+
 func (c *Client) udpLooksDeadLocked() bool {
 	if c.sendFailures > 0 {
 		return true
