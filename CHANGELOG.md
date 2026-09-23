@@ -6,6 +6,29 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.13] — development
+
+**"Already advertised through DESKTOP-EKH1Q30" named two devices at once.** A
+hostname is not an identity: a PC reinstalled and re-enrolled carries the same
+one as the row it replaced, so the refusal named both the live machine and its
+deleted predecessor — and the predecessor's route could not be withdrawn from
+any page, because a deleted device appears in no list. Refusals name the uid
+now, and say plainly when the holder is deleted or revoked and therefore using
+nothing.
+
+**A migration frees what is already stuck.** dev.12 stopped new routes being
+stranded; it could not reach the rows every earlier build had already left —
+routes whose gateway was deleted or revoked, and soft-deleted routes still
+reserving their range through a generated unique column that ignores
+`deleted_at`. Both are removed. Routes through live devices are untouched: a
+range shared by a working gateway is in use.
+
+**And a reinstalled computer can take its own share back.** Where the holder
+is a deleted or revoked device with the same hostname, the page offers to move
+the range to the machine that is actually running. Moving keeps the mapped
+prefix, so every other computer goes on reaching the cameras at the address it
+already knows.
+
 ## [1.9.7-dev.12] — development
 
 **"Validation failed", with no reason and no field marked.** The share form

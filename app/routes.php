@@ -96,6 +96,7 @@ $router->group('', ['maintenance', 'auth'], static function (Router $router): vo
     // One click for the thing most customers buy this for: let the others
     // reach the camera recorder on this computer's LAN.
     $router->post('/devices/{id:int}/share-lan', 'DeviceController@shareLan', ['csrf', 'can:network.update']);
+    $router->post('/devices/{id:int}/take-share', 'DeviceController@takeShare', ['csrf', 'can:network.update']);
     $router->post('/devices/{id:int}/disable', 'DeviceController@disable', ['csrf', 'can:device.update']);
     $router->post('/devices/{id:int}/delete', 'DeviceController@destroy', ['csrf', 'can:device.delete']);
     $router->post('/devices/bulk-approve', 'DeviceController@bulkApprove', ['csrf', 'can:device.approve']);

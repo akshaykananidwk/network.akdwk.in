@@ -1,11 +1,13 @@
 {
-  "version": "1.9.7-dev.12",
+  "version": "1.9.7-dev.13",
   "released_at": "2026-09-23T09:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "A refused share says why and names the device holding the range. Deleting a device frees its shared ranges, and withdrawing one now really frees it — a soft-deleted route was reserving the range for ever.",
-  "migrations": [],
+  "notes": "Ranges held by deleted devices are freed by a migration, a refusal names the holder by uid and says when it is deleted, and a reinstalled PC can move its predecessor's share to itself without losing the mapped address.",
+  "migrations": [
+    "2026_09_23_170000_release_orphan_routes.php"
+  ],
   "protected": [
     ".env",
     "config/config.php",

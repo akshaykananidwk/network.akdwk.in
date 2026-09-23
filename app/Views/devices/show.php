@@ -273,6 +273,40 @@ declare(strict_types=1);
         </p>
     <?php endif; ?>
 
+    <?php if (($takeable_lans ?? []) !== []): ?>
+        <?php
+        // This machine, before it was reinstalled.
+        //
+        // The range is held by a device with this hostname that was deleted
+        // or revoked, so it appears in no list and its route cannot be
+        // withdrawn from any page — which is exactly what somebody hit after
+        // re-enrolling a PC: told the network belonged to a device they could
+        // not find.
+        //
+        // Moving keeps the mapped prefix, so every other computer goes on
+        // reaching the cameras at the address it already knows.
+        ?>
+        <?php foreach ($takeable_lans as $orphan): ?>
+            <p class="field-hint text-danger">
+                <strong><?= e((string) $orphan['destination_cidr']) ?> is still held by an earlier
+                enrolment of this computer</strong>
+                (<?= e((string) ($orphan['via_device_uid'] ?? 'unknown')) ?>,
+                <?= ($orphan['via_device_deleted_at'] ?? null) !== null ? 'deleted' : 'revoked' ?>),
+                so nothing is using it.
+            </p>
+            <form method="post" class="form"
+                  action="<?= e(url('devices/' . $device['id'] . '/take-share')) ?>">
+                <?= csrf_field() ?>
+                <input type="hidden" name="route_id" value="<?= (int) $orphan['id'] ?>">
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">
+                        Move <?= e((string) $orphan['destination_cidr']) ?> to this computer
+                    </button>
+                </div>
+            </form>
+        <?php endforeach; ?>
+    <?php endif; ?>
+
     <form method="post" action="<?= e(url('devices/' . $device['id'] . '/share-lan')) ?>" class="form">
         <?= csrf_field() ?>
         <div class="field">

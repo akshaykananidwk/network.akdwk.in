@@ -26,7 +26,14 @@ final class NetworkRoute extends Model
     /** @return list<array<string,mixed>> */
     public static function forNetwork(int $networkId, bool $enabledOnly = true): array
     {
-        $sql = 'SELECT r.*, d.name AS via_device_name, d.virtual_ip AS via_device_ip
+        // The uid and the deletion state come with the name, because the name
+        // alone is not an identity: a PC reinstalled and re-enrolled has the
+        // same hostname as the row it replaced, so "already advertised
+        // through DESKTOP-EKH1Q30" named two different devices at once and
+        // sent somebody looking for a route they could not see.
+        $sql = 'SELECT r.*, d.name AS via_device_name, d.virtual_ip AS via_device_ip,
+                       d.device_uid AS via_device_uid, d.deleted_at AS via_device_deleted_at,
+                       d.status AS via_device_status
                 FROM ' . self::tableName() . ' r
                 LEFT JOIN ' . DB::table('devices') . ' d ON d.id = r.via_device_id
                 WHERE r.network_id = :n AND r.deleted_at IS NULL';

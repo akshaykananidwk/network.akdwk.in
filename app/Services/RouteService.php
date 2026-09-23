@@ -75,6 +75,77 @@ final class RouteService
     }
 
     /**
+     * Ranges held by a device that cannot use them, which this one could.
+     *
+     * Offered on the device page when the holder is deleted or revoked and
+     * carries the same hostname — a PC reinstalled and re-enrolled. The
+     * alternative for that person is to be told the range belongs to a device
+     * that appears in no list, which is what happened.
+     *
+     * Same name only. Two live machines that happen to share a LAN range are
+     * a different situation and must not be silently merged.
+     *
+     * @return list<array<string,mixed>>
+     */
+    public static function takeableBy(int $deviceId): array
+    {
+        $device = Device::find($deviceId);
+        if ($device === null || $device['network_id'] === null) {
+            return [];
+        }
+
+        $takeable = [];
+
+        foreach (NetworkRoute::forNetwork((int) $device['network_id'], false) as $route) {
+            if ((int) ($route['via_device_id'] ?? 0) === $deviceId) {
+                continue;
+            }
+
+            $dead = ($route['via_device_deleted_at'] ?? null) !== null
+                || (string) ($route['via_device_status'] ?? '') === 'revoked';
+
+            if (!$dead) {
+                continue;
+            }
+
+            if ((string) ($route['via_device_name'] ?? '') !== (string) $device['name']) {
+                continue;
+            }
+
+            $takeable[] = $route;
+        }
+
+        return $takeable;
+    }
+
+    /**
+     * Move a share to a different device.
+     *
+     * The route keeps its mapped prefix, so every other machine on the
+     * overlay keeps reaching the cameras at the addresses it already knows —
+     * which is the whole reason to move a route rather than withdraw it and
+     * make a new one.
+     */
+    public static function moveTo(int $routeId, int $deviceId): array
+    {
+        $route = NetworkRoute::findOrFail($routeId);
+        $device = self::validateGateway($deviceId, (int) $route['network_id']);
+
+        NetworkRoute::update($routeId, ['via_device_id' => (int) $device['id']]);
+        Device::update((int) $device['id'], ['is_gateway' => 1]);
+        Network::bumpRevision((int) $route['network_id']);
+
+        AuditService::log('route.move', 'route', $routeId, [
+            'via_device_id' => $route['via_device_id'],
+        ], [
+            'via_device_id'    => (int) $device['id'],
+            'destination_cidr' => $route['destination_cidr'],
+        ]);
+
+        return NetworkRoute::findOrFail($routeId);
+    }
+
+    /**
      * Withdraw every range a device shares, and say which they were.
      *
      * Called when the device is deleted. A route through a device that no
@@ -332,6 +403,40 @@ final class RouteService
      * covers (network, subnet, gateway) and so does not catch this case: two
      * *different* gateways offering the same subnet satisfy it.
      */
+    /**
+     * Name the device holding a route, unambiguously.
+     *
+     * A hostname is not an identity. A PC reinstalled and re-enrolled carries
+     * the same one as the row it replaced, so "already advertised through
+     * DESKTOP-EKH1Q30" named both the live device and its deleted predecessor
+     * — and the predecessor's route could not be withdrawn from any page,
+     * because a deleted device appears in no list.
+     *
+     * @param array<string,mixed> $route
+     */
+    private static function describeHolder(array $route): string
+    {
+        $name = (string) ($route['via_device_name'] ?? '');
+        if ($name === '') {
+            return 'another device';
+        }
+
+        $uid = (string) ($route['via_device_uid'] ?? '');
+        if ($uid !== '') {
+            $name .= ' (' . $uid . ')';
+        }
+
+        if (($route['via_device_deleted_at'] ?? null) !== null) {
+            return $name . ' — a DELETED device, so nothing is using this route';
+        }
+
+        if ((string) ($route['via_device_status'] ?? '') === 'revoked') {
+            return $name . ' — a revoked device, so nothing is using this route';
+        }
+
+        return $name;
+    }
+
     private static function refuseDuplicate(int $networkId, string $cidr): void
     {
         foreach (NetworkRoute::forNetwork($networkId, false) as $existing) {
@@ -344,7 +449,7 @@ final class RouteService
                 continue;
             }
 
-            $via = $existing['via_device_name'] ?? 'another device';
+            $via = self::describeHolder($existing);
 
             throw new ValidationException([
                 'destination_cidr' => $cidr === $other

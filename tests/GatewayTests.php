@@ -62,6 +62,7 @@ final class GatewayTests
             self::aHostAddressIsTheSameSubnet();
             self::aDeletedDeviceReleasesItsShares();
             self::refusalsSayWhy();
+            self::aReEnrolledMachineCanTakeBackItsShare();
         } finally {
             DB::rollback();
             Auth::reset();
@@ -601,6 +602,66 @@ final class GatewayTests
             'and says why');
 
         RouteService::withdrawAllFor(self::$fx['hotelA_laptop']);
+    }
+
+    /**
+     * A reinstalled PC can take back the range its predecessor held.
+     *
+     * The holder is a device with the same hostname that has been deleted, so
+     * it appears in no list and its route cannot be withdrawn from any page.
+     * Somebody who re-enrolled a machine was told the network belonged to a
+     * device they could not find, with no way forward at all.
+     *
+     * Moving keeps the mapped prefix, which is the whole reason to move
+     * rather than withdraw and re-create: every other computer goes on
+     * reaching the cameras at the address it already knows.
+     */
+    private static function aReEnrolledMachineCanTakeBackItsShare(): void
+    {
+        TestCase::group('Gateway — a reinstalled computer can take back its own share');
+
+        self::act('hotelA');
+
+        $route = RouteService::advertise(self::$fx['hotelA_network'], [
+            'destination_cidr' => '192.168.55.0/24',
+            'via_device_id'    => self::$fx['hotelA_laptop'],
+        ]);
+        $mapped = (string) $route['mapped_cidr'];
+
+        // The machine is reinstalled: same hostname, new enrolment, and the
+        // old row is deleted WITHOUT its routes being withdrawn — which is
+        // every panel that ran a build before 1.9.7-dev.12.
+        $old = Device::findOrFail(self::$fx['hotelA_laptop']);
+        $replacement = Device::create([
+            'tenant_id'  => (int) $old['tenant_id'],
+            'network_id' => (int) $old['network_id'],
+            'device_uid' => 'dev_reinstalled_same_box',
+            'name'       => (string) $old['name'],
+            'public_key' => str_repeat('c', 44),
+            'status'     => 'authorized',
+            'os'         => (string) $old['os'],
+            'arch'       => (string) $old['arch'],
+        ]);
+        Device::delete((int) $old['id']);
+
+        $takeable = RouteService::takeableBy($replacement);
+
+        TestCase::assertSame(1, count($takeable),
+            'the new enrolment is offered the range its predecessor held');
+
+        $moved = RouteService::moveTo((int) $takeable[0]['id'], $replacement);
+
+        TestCase::assertSame($replacement, (int) $moved['via_device_id'],
+            'and the route now goes through the machine that is actually running');
+        TestCase::assertSame($mapped, (string) $moved['mapped_cidr'],
+            'keeping its mapped prefix, so no other computer has to change anything');
+
+        // A live device with a different name is never offered somebody
+        // else's range.
+        TestCase::assertSame(0, count(RouteService::takeableBy(self::$fx['hotelA_phone'] ?? 0)),
+            'and a different machine is offered nothing');
+
+        RouteService::withdrawAllFor($replacement);
     }
 
     private static function duplicateWithinOneNetworkRefused(): void

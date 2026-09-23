@@ -95,6 +95,10 @@ final class DeviceController extends Controller
             // panel's own answer, not the device's — a device that was told
             // there is nothing for it has nothing to report.
             'update_status' => AgentUpdateStatus::forDevice($device),
+            // Ranges held by this machine's deleted predecessor, which it can
+            // take back rather than being told they belong to a device that
+            // appears in no list.
+            'takeable_lans' => RouteService::takeableBy((int) $device['id']),
         ]);
     }
 
@@ -148,6 +152,37 @@ final class DeviceController extends Controller
      *
      * @param array<string,string> $params
      */
+    /**
+     * Take over a share held by this machine's deleted predecessor.
+     *
+     * @param array<string,string> $params
+     */
+    public function takeShare(Request $request, array $params): Response
+    {
+        $deviceId = (int) $params['id'];
+
+        $device = Device::find($deviceId);
+        if ($device === null) {
+            throw new NotFoundException('App\\Models\\Device #' . $deviceId . ' not found');
+        }
+
+        try {
+            $route = RouteService::moveTo((int) $request->input('route_id', '0'), $deviceId);
+        } catch (ValidationException $e) {
+            return $this->redirect('devices/' . $deviceId, '', $e->userMessage());
+        }
+
+        return $this->redirect(
+            'devices/' . $deviceId,
+            sprintf(
+                '%s is now shared through this computer, still reachable at %s — the other '
+                    . 'computers do not have to change anything.',
+                (string) $route['destination_cidr'],
+                (string) $route['mapped_cidr']
+            )
+        );
+    }
+
     public function shareLan(Request $request, array $params): Response
     {
         $deviceId = (int) $params['id'];
