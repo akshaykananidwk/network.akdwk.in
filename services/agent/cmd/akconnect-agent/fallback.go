@@ -92,6 +92,10 @@ func (s *session) watchFallback(ctx context.Context) {
 		}
 	}()
 
+	// The moment this device gave up on UDP. Everything the socket recorded
+	// before it is evidence about a different network.
+	var gaveUp time.Time
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -111,21 +115,24 @@ func (s *session) watchFallback(ctx context.Context) {
 		// carrying discovery traffic again, the fallback stops answering
 		// binds so the peers go back to UDP by themselves.
 		if s.fallback != nil {
-			s.fallback.PreferUDP(s.udpIsWorking())
+			s.fallback.PreferUDP(s.udpIsWorking(gaveUp))
 		}
 
 		switch {
 		case stop == nil && s.udpIsHopeless():
 			s.logf("fallback: UDP is not being answered on this network; trying HTTPS instead")
 
+			gaveUp = time.Now()
+
 			running, cancel := context.WithCancel(ctx)
 			stop = cancel
 
 			go s.fallback.Run(running)
-		case stop != nil && s.fallbackNoLongerNeeded():
+		case stop != nil && s.fallbackNoLongerNeeded(gaveUp):
 			s.logf("fallback: UDP is working again and nothing is using the HTTPS path; closing it")
 			stop()
 			stop = nil
+			gaveUp = time.Time{}
 		}
 	}
 }
@@ -173,9 +180,25 @@ func (s *session) udpIsHopeless() bool {
 // is therefore enough on its own to stop preferring UDP. Once the fallback is
 // up the coordinator answers through it, nothing goes unanswered, and the
 // socket is the only thing left deciding — which is what it should be.
-func (s *session) udpIsWorking() bool {
+// Since is the moment this device gave up on UDP, or the zero time when it
+// has not.
+func (s *session) udpIsWorking(since time.Time) bool {
 	if s.tun == nil || s.udpIsHopeless() {
 		return false
+	}
+
+	// Once we have given up, only a packet that arrived AFTER that counts.
+	//
+	// The forty-five second window is right for "is this socket still alive"
+	// and wrong for "has this network started carrying UDP again", and on a
+	// machine carried from a working network onto one that drops UDP the two
+	// give opposite answers: the stamp is four seconds old and describes the
+	// office car park. The fallback would come up, hand the peers straight
+	// back to a network that carries nothing, and the device would report
+	// relay-udp while its traffic went over HTTPS — which is the one thing
+	// this release exists to be able to tell apart.
+	if !since.IsZero() {
+		return s.tun.Transport().UDPAliveSince(since)
 	}
 
 	return s.tun.Transport().UDPAlive(udpProvenWithin)
@@ -185,12 +208,12 @@ func (s *session) udpIsWorking() bool {
 //
 // Both conditions, and both measured at the socket. "The coordinator is
 // answering" is not one of them: on the fallback it always is.
-func (s *session) fallbackNoLongerNeeded() bool {
+func (s *session) fallbackNoLongerNeeded(since time.Time) bool {
 	if s.fallback == nil {
 		return false
 	}
 
-	return s.udpIsWorking() && s.fallback.Idle() > fallbackUnusedFor
+	return s.udpIsWorking(since) && s.fallback.Idle() > fallbackUnusedFor
 }
 
 // fallbackState is what the status file says about the HTTPS path.

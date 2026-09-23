@@ -128,21 +128,33 @@ final class DocumentationTests
     }
 
     /**
-     * The release manifest names the release this tree is.
+     * Every place this tree writes its own version number says the same one.
      *
-     * The panel reads update.json AFTER it has downloaded the tag, and acts on
-     * what it says: the version it reports afterwards, and which migrations it
-     * runs. A manifest left at the previous release installs the new code,
-     * reports the old version, and runs none of the new migrations.
+     * Three places, and each is read by something different at a different
+     * moment, so any two of them disagreeing breaks a different thing:
      *
-     * It happened on 1.9.6, and it would have installed the HTTPS fallback
-     * without the column the panel needs to show it — the feature present and
-     * invisible, on the release whose whole point is a path the panel has to
-     * be able to name.
+     *   VERSION       upgrade-edge.sh compares it against the version the
+     *                 panel reports, and refuses the upgrade when they
+     *                 differ. Left behind, the edge cannot be upgraded at
+     *                 all — which is how this was found: "the checkout says
+     *                 1.9.5, the panel says 1.9.6".
+     *   update.json   the panel reads it AFTER downloading the tag and acts
+     *                 on it: the version it then reports, and which
+     *                 migrations it runs. Left behind, it installs the new
+     *                 code, reports the old version, and runs none of the new
+     *                 migrations. On 1.9.6 that would have installed the
+     *                 HTTPS fallback without the column the panel needs to
+     *                 show it — the feature present and invisible, on the
+     *                 release whose whole point is a path the panel has to be
+     *                 able to name.
+     *   CHANGELOG.md  what a person reads, and the only one of the three that
+     *                 nobody can forget, because writing the release notes is
+     *                 the act of making a release.
      *
-     * The tag cannot be checked from here: it does not exist until after this
-     * commit. The changelog can, and it is edited by the same hand in the same
-     * release, so disagreeing with it is the shape the mistake takes.
+     * The tag itself cannot be checked from here: it does not exist until
+     * after this commit. These three can, and they are edited by the same
+     * hand in the same release, so disagreeing with each other is the shape
+     * the mistake takes — twice in two days, in two different files.
      */
     private static function manifestAgreesWithTheChangelog(): void
     {
@@ -165,6 +177,13 @@ final class DocumentationTests
             $newest[1],
             $version,
             'update.json names the release CHANGELOG.md documents at the top'
+        );
+
+        $versionFile = trim((string) @file_get_contents(APP_ROOT . '/VERSION'));
+        TestCase::assertSame(
+            $version,
+            $versionFile,
+            'VERSION names the same release as update.json — upgrade-edge.sh refuses the edge upgrade when it does not'
         );
 
         // And every migration it names is really in the tree, because one that

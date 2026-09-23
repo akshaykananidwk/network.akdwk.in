@@ -528,29 +528,47 @@ func TestDoesNotAskTheCoordinatorWhileTheRelayAnswers(t *testing.T) {
 	}
 }
 
-// While the fallback is carrying a peer, a relay offer must not point
-// WireGuard at the relay's real port.
+// While the fallback is carrying a peer, the RELAY's answer must not steal
+// it — and the FALLBACK's own answer must still be applied.
 //
-// A relay bind is answered twice on a network with no UDP: once by the relay
-// naming a real port, once by the fallback naming a tunnelled one — and the
-// relay's answer arrives THROUGH the fallback, so it arrives even though the
-// port it names is unreachable. Applying it made the endpoint flap between the
-// two, and while it was flapped the device reported relay-udp: the wrong
-// answer, on the release whose point is telling those two apart.
+// Both arrive here while the fallback is up. A relay bind is answered twice on
+// a network with no UDP: once by the relay naming a real port, once by the
+// fallback naming a tunnelled one, and the relay's answer arrives THROUGH the
+// fallback, so it arrives even though the port it names is unreachable.
+// Applying it made the endpoint flap, and while it was flapped the device
+// reported relay-udp: the wrong answer, on the release whose point is telling
+// those two apart.
+//
+// The first attempt at this refused on "the fallback is carrying this peer",
+// which refused the fallback's own answer too and left WireGuard pointed at
+// the relay it had been using before the network died. Four of five lab runs
+// still reported relay-udp, for the opposite reason. The address is the only
+// thing that tells the two answers apart.
 func TestARelayOfferDoesNotStealAPeerTheFallbackIsCarrying(t *testing.T) {
 	h := newHarness(t)
 
 	var peer [32]byte
 	peer[0] = 19
 
-	diverted := true
-	h.client.opts.Diverted = func([32]byte) bool { return diverted }
+	tunnelled := netip.MustParseAddrPort("10.0.0.1:65000")
+	real_ := netip.MustParseAddrPort("10.0.0.1:52386")
 
-	real := netip.MustParseAddrPort("10.0.0.1:52386")
-	h.client.adoptRelay(peer, real)
+	carrying := true
+	h.client.opts.DivertedTo = func([32]byte) (netip.AddrPort, bool) {
+		return tunnelled, carrying
+	}
 
-	if got := h.peers.endpointOf(base64Key(peer)); got != "" {
-		t.Fatalf("pointed WireGuard at %s while the fallback was carrying the peer", got)
+	// The fallback's own answer is applied: without it nothing ever points
+	// WireGuard at the tunnel.
+	h.client.adoptRelay(peer, tunnelled)
+	if got := h.peers.endpointOf(base64Key(peer)); got != tunnelled.String() {
+		t.Fatalf("endpoint is %q after the fallback answered, want %s", got, tunnelled)
+	}
+
+	// The relay's own answer, arriving through that same tunnel, is not.
+	h.client.adoptRelay(peer, real_)
+	if got := h.peers.endpointOf(base64Key(peer)); got != tunnelled.String() {
+		t.Fatalf("a relay offer moved the endpoint to %q while the fallback was carrying the peer", got)
 	}
 
 	// The path is still relayed, because it is — the panel has to say so.
@@ -559,10 +577,9 @@ func TestARelayOfferDoesNotStealAPeerTheFallbackIsCarrying(t *testing.T) {
 	}
 
 	// And once the fallback hands the peer back, the next offer is applied.
-	diverted = false
-	h.client.adoptRelay(peer, real)
-
-	if got := h.peers.endpointOf(base64Key(peer)); got != real.String() {
-		t.Fatalf("endpoint is %q after the fallback released the peer, want %s", got, real)
+	carrying = false
+	h.client.adoptRelay(peer, real_)
+	if got := h.peers.endpointOf(base64Key(peer)); got != real_.String() {
+		t.Fatalf("endpoint is %q after the fallback released the peer, want %s", got, real_)
 	}
 }

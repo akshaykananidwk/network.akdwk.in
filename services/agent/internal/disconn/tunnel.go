@@ -204,6 +204,24 @@ func (b *Bind) UDPAlive(within time.Duration) bool {
 	return last != 0 && time.Since(time.Unix(last, 0)) <= within
 }
 
+// UDPAliveSince reports whether a real UDP packet has arrived since a moment.
+//
+// The freshness window UDPAlive allows is forty-five seconds, and it has to
+// be: the keepalive that produces those packets is twenty seconds and one lost
+// datagram must not read as the network failing. But a device that was working
+// on UDP a moment ago and has just been carried onto a network that drops it
+// has a stamp that is both fresh and worthless — it is evidence about the
+// network it left.
+//
+// So once the fallback is carrying, the question stops being "how old is the
+// stamp" and becomes "is there a stamp from after we gave up on UDP". Nothing
+// before that moment says anything about now.
+func (b *Bind) UDPAliveSince(t time.Time) bool {
+	last := b.lastUDP.Load()
+
+	return last != 0 && time.Unix(last, 0).After(t)
+}
+
 // TunnelActive reports whether the fallback is currently attached.
 func (b *Bind) TunnelActive() bool {
 	route := b.route.Load()

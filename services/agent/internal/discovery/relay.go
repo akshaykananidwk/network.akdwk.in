@@ -244,18 +244,27 @@ func (c *Client) adoptRelay(peer [32]byte, at netip.AddrPort) {
 		return
 	}
 
-	// The fallback owns this peer's endpoint while it is carrying it. The path
-	// is still recorded — the pair IS relayed, and the panel has to say so —
-	// but WireGuard is not pointed at the relay's real port, which on a
-	// network with no UDP is an address nothing can reach. Applying it made
-	// the endpoint flap between the two for as long as offers kept arriving,
-	// and while it was flapped the device reported relay-udp: the wrong
-	// answer, on the one release whose point is telling those two apart.
-	if c.opts.Diverted != nil && c.opts.Diverted(peer) {
-		c.paths[peer] = pathRelay
-		c.mu.Unlock()
+	// The fallback owns this peer's endpoint while it is carrying it, so an
+	// answer naming any OTHER address is refused: on a network with no UDP
+	// the relay's real port is an address nothing can reach, and applying it
+	// made the endpoint flap between the two for as long as offers kept
+	// arriving. While it was flapped the device reported relay-udp — the
+	// wrong answer, on the one release whose point is telling those two
+	// apart.
+	//
+	// By address, not by "is the fallback up". Both answers arrive here while
+	// it is up, and refusing on that alone refuses the fallback's own answer
+	// too — which leaves WireGuard pointed at the relay it was using before
+	// the network died, and the tunnel never gets adopted at all. The path is
+	// still recorded as relayed either way, because it is, and the panel has
+	// to say so.
+	if c.opts.DivertedTo != nil {
+		if owned, ok := c.opts.DivertedTo(peer); ok && owned != at {
+			c.paths[peer] = pathRelay
+			c.mu.Unlock()
 
-		return
+			return
+		}
 	}
 
 	c.established[peer] = at

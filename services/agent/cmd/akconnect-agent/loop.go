@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"time"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
@@ -372,18 +373,16 @@ func (s *session) peerStatus() []state.RuntimePeer {
 // one the fallback handed out, rather than by remembering that it once did.
 // The two stop matching the instant discovery adopts a real relay port, which
 // is exactly when this should stop being true.
-// diverted reports whether the fallback is carrying this peer right now.
+// divertedTo reports the endpoint the fallback is carrying this peer on.
 //
-// Told from the fallback's own table rather than remembered, so it stops being
-// true the moment releasePeers hands the peers back to UDP.
-func (s *session) diverted(peer [32]byte) bool {
+// Read from the fallback's own table rather than remembered, so it stops
+// answering the moment releasePeers hands the peers back to UDP.
+func (s *session) divertedTo(peer [32]byte) (netip.AddrPort, bool) {
 	if s.fallback == nil || !s.fallback.Up() {
-		return false
+		return netip.AddrPort{}, false
 	}
 
-	_, ok := s.fallback.Endpoint(peer)
-
-	return ok
+	return s.fallback.Endpoint(peer)
 }
 
 func (s *session) onFallback(peer [32]byte, endpoint string) bool {

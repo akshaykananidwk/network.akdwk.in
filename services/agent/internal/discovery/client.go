@@ -69,8 +69,8 @@ type Options struct {
 	// Reopening on the same port is the right answer to the first and no
 	// answer at all to the second. See port.go.
 	MovePort func() (int, []netip.AddrPort, error)
-	// Diverted reports whether a peer's traffic is currently being carried by
-	// the HTTPS fallback, which owns that peer's endpoint while it is.
+	// DivertedTo reports the endpoint the HTTPS fallback is carrying a peer
+	// on, when it is carrying one.
 	//
 	// Optional; nil means nothing is ever diverted.
 	//
@@ -79,10 +79,14 @@ type Options struct {
 	// and the relay's answer arrives THROUGH the fallback, so it arrives even
 	// though the port it names is unreachable. Whichever is applied last
 	// decides where WireGuard sends. PreferUDP stops the fallback answering
-	// once UDP works again; this is the other direction, and without it a
-	// relay offer arriving mid-fallback points WireGuard at an address this
-	// network cannot reach until the fallback puts it back.
-	Diverted func([32]byte) bool
+	// once UDP works again; this is the other direction.
+	//
+	// It returns the address rather than a yes or no because both answers
+	// reach adoptRelay while the fallback is up, and the only thing that
+	// tells them apart is which address they name. Refusing on "the fallback
+	// is carrying this peer" alone refuses the fallback's own answer too, and
+	// then nothing points WireGuard at the tunnel at all.
+	DivertedTo func([32]byte) (netip.AddrPort, bool)
 }
 
 // Client keeps this agent announced and its peers reachable.

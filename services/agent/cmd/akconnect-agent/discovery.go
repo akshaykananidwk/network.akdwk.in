@@ -70,7 +70,7 @@ func (s *session) startDiscovery(ctx context.Context, cfg *panel.Config, priv wg
 		MovePort: s.movePort,
 		// And so a relay offer arriving through the fallback does not point
 		// WireGuard at a port this network cannot reach. See adoptRelay.
-		Diverted: s.diverted,
+		DivertedTo: s.divertedTo,
 	})
 	if err != nil {
 		s.logf("discovery: %v", err)
