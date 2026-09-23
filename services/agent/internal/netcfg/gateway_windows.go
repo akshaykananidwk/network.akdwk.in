@@ -4,6 +4,7 @@ package netcfg
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"os/exec"
 	"strings"
@@ -26,13 +27,31 @@ import (
 // present on Windows 10/11 Pro and Enterprise without the Hyper-V role being
 // enabled, which covers the machines this product is sold onto.
 //
-// Forwarding itself is a per-interface registry setting, applied through
-// netsh, plus the global IPEnableRouter. Both are set here.
+// Forwarding on Windows needs three things, and until 1.9.7 this set one of
+// them. A field test shared a LAN, saw it mapped, and got a timeout from the
+// other end of the tunnel:
 //
-// NONE OF THIS HAS RUN ON WINDOWS. It compiles, the commands are the
-// documented ones, and the ordering matches what the runbook asks a tester to
-// verify by hand. Treat it as untested until the field kit says otherwise —
-// see services/kit/WINDOWS-RUNBOOK.md.
+//   - forwarding on the TUNNEL interface, which was set;
+//   - forwarding on the LAN interface as well. Windows routes between two
+//     interfaces only when both have it. Packets arrived on the tunnel with
+//     the destination already rewritten to the real LAN address, and were
+//     dropped on the way out because the Ethernet adapter was not forwarding.
+//     That is a silent drop: it looks exactly like a firewall on the far
+//     device, which is where anybody would look first and where nothing is
+//     wrong.
+//   - the global IPEnableRouter. The comment here used to say "plus the
+//     global IPEnableRouter. Both are set here", and the string appeared
+//     nowhere else in the tree. It was never set.
+//
+// store=persistent as well as active, because a reception-desk PC is rebooted
+// nightly and a gateway that stops routing every morning until somebody logs
+// in is not a gateway.
+//
+// Tailscale's subnet routers need the same thing — its documentation makes
+// enabling IP forwarding the first step, and its --snat-subnet-routes flag is
+// Linux-only precisely because Windows has no equivalent knob. The difference
+// is that Tailscale tells you to do it and fails loudly; this now does it and
+// reports which part it could not do.
 
 // natPrefix names the NAT instance so it can be found and removed again. A
 // name rather than an address, because an operator reading Get-NetNat should
@@ -40,12 +59,27 @@ import (
 const natPrefix = "AKConnect-"
 
 func applyGateway(plan *GatewayPlan) error {
-	// Forwarding on the tunnel interface, and globally. The global switch
-	// needs a reboot to take effect on some builds, which the runbook says to
-	// check rather than assume.
-	if err := run("netsh", "interface", "ipv4", "set", "interface",
-		fmt.Sprintf("interface=%s", plan.Interface), "forwarding=enabled", "store=active"); err != nil {
-		return fmt.Errorf("gateway: enabling forwarding on %s: %w", plan.Interface, err)
+	// The tunnel, where the packets arrive.
+	if err := enableForwarding(plan.Interface); err != nil {
+		return err
+	}
+
+	// And every interface that owns an advertised LAN, where they leave.
+	// Windows forwards between two interfaces only when both are set, and
+	// leaving this one out is a drop with no message anywhere.
+	for _, iface := range lanInterfacesFor(plan.Advertised) {
+		if err := enableForwarding(iface); err != nil {
+			return err
+		}
+	}
+
+	// The global switch. Some builds want a reboot before it takes effect,
+	// which is why the per-interface settings above are not left to it.
+	if err := runPowerShell(
+		`Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters' ` +
+			`-Name 'IPEnableRouter' -Value 1 -Type DWord -ErrorAction Stop`,
+	); err != nil {
+		return fmt.Errorf("gateway: enabling IPEnableRouter: %w", err)
 	}
 
 	if len(plan.Advertised) == 0 {
@@ -78,6 +112,63 @@ func applyGateway(plan *GatewayPlan) error {
 	}
 
 	return nil
+}
+
+// enableForwarding turns routing on for one interface, now and after a reboot.
+func enableForwarding(iface string) error {
+	for _, store := range []string{"active", "persistent"} {
+		if err := run("netsh", "interface", "ipv4", "set", "interface",
+			fmt.Sprintf("interface=%s", iface), "forwarding=enabled",
+			fmt.Sprintf("store=%s", store)); err != nil {
+			return fmt.Errorf("gateway: enabling forwarding on %s (%s): %w", iface, store, err)
+		}
+	}
+
+	return nil
+}
+
+// lanInterfacesFor names the local interfaces that own the advertised LANs.
+//
+// Found from the machine's own addresses rather than asked for in the plan,
+// because the panel knows which range is shared and has no idea which adapter
+// the site's cable is in — and on a reception-desk PC it can be an Ethernet
+// port, a Wi-Fi card, or a USB dongle somebody plugged in this morning.
+func lanInterfacesFor(advertised []netip.Prefix) []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+
+	var names []string
+	seen := map[string]bool{}
+
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, raw := range addrs {
+			ipnet, ok := raw.(*net.IPNet)
+			if !ok {
+				continue
+			}
+
+			addr, ok := netip.AddrFromSlice(ipnet.IP.To4())
+			if !ok {
+				continue
+			}
+
+			for _, prefix := range advertised {
+				if prefix.Contains(addr) && !seen[iface.Name] {
+					seen[iface.Name] = true
+					names = append(names, iface.Name)
+				}
+			}
+		}
+	}
+
+	return names
 }
 
 func removeGateway(plan *GatewayPlan) error {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"sort"
 	"time"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
@@ -115,6 +116,7 @@ func (s *session) heartbeat(ctx context.Context) error {
 			s.lastRX, s.lastTX = rx, tx
 
 			hb.ConnectionType = s.connectionType(peers)
+			hb.Peers = s.peerLinks(peers)
 		}
 	}
 
@@ -179,6 +181,55 @@ func (s *session) refresh(ctx context.Context, priv wgPrivate) (int, error) {
 // not accept "offline" from an agent any more, and should not: a heartbeat
 // arriving is proof the device is not offline, and the panel decides that from
 // when it last heard rather than from what it was told.
+// peerLinks is this device's account of every peer it was given.
+//
+// Every peer, including the ones it cannot reach — that is the point. A peer
+// with no path is reported with an empty path rather than left out, because
+// "I have three peers and can reach two" and "I have two peers" are different
+// sentences and only one of them is true.
+func (s *session) peerLinks(peers []tunnel.PeerStatus) []panel.PeerLink {
+	if len(s.peerMeta) == 0 {
+		return nil
+	}
+
+	cutoff := time.Now().Add(-3 * time.Minute).Unix()
+
+	// Indexed by the hex key WireGuard reports, so a peer the device has no
+	// session for at all still gets a row.
+	live := make(map[string]tunnel.PeerStatus, len(peers))
+	for _, p := range peers {
+		live[p.PublicKeyHex] = p
+	}
+
+	links := make([]panel.PeerLink, 0, len(s.peerMeta))
+	for hex, meta := range s.peerMeta {
+		if meta.uid == "" {
+			continue
+		}
+
+		link := panel.PeerLink{UID: meta.uid}
+
+		if p, ok := live[hex]; ok && p.LastHandshake > cutoff {
+			link.Path = "direct"
+
+			if s.discovery != nil && s.discovery.Path(meta.publicKey) == "relay" {
+				link.Path = "relay-udp"
+				if s.onFallback(meta.publicKey, p.Endpoint) {
+					link.Path = "relay-https"
+				}
+			}
+		}
+
+		links = append(links, link)
+	}
+
+	// Stable, so a heartbeat that says the same thing twice looks the same
+	// twice — map order would make every one of them a change.
+	sort.Slice(links, func(i, j int) bool { return links[i].UID < links[j].UID })
+
+	return links
+}
+
 func (s *session) connectionType(peers []tunnel.PeerStatus) string {
 	cutoff := time.Now().Add(-3 * time.Minute).Unix()
 	live := false

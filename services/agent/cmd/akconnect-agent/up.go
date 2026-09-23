@@ -526,6 +526,7 @@ func joinPrefixes(prefixes []netip.Prefix) string {
 // peerNames is the descriptive half of a peer, kept so the status file can
 // say "shop-till-2" rather than only a base64 key.
 type peerNames struct {
+	uid       string
 	name      string
 	virtualIP string
 	publicKey [32]byte
@@ -541,7 +542,7 @@ func (s *session) rememberPeerNames(cfg *panel.Config) {
 		if err != nil {
 			continue
 		}
-		s.peerMeta[key.Hex()] = peerNames{name: p.Name, virtualIP: p.VirtualIP, publicKey: [32]byte(key)}
+		s.peerMeta[key.Hex()] = peerNames{uid: p.UID, name: p.Name, virtualIP: p.VirtualIP, publicKey: [32]byte(key)}
 	}
 }
 

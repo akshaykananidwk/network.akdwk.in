@@ -211,6 +211,19 @@ func (c *Client) FetchConfig(ctx context.Context, knownRevision int) (*Config, i
 	return &out, pollAfter, nil
 }
 
+// PeerLink is what this device can say about one of its peers.
+//
+// Path is "direct", "relay-udp", "relay-https", or "" when there is no path
+// to this peer at all — which is an ordinary state, not a fault: the other
+// machine may simply be switched off.
+type PeerLink struct {
+	UID  string `json:"uid"`
+	Path string `json:"path,omitempty"`
+	// LatencyMS is the round trip this device last measured to that peer, or
+	// zero when it has not measured one.
+	LatencyMS int `json:"latency_ms,omitempty"`
+}
+
 // Heartbeat is what the agent reports on each cycle.
 //
 // The byte fields are deltas since the last heartbeat, not totals. The panel
@@ -238,6 +251,20 @@ type Heartbeat struct {
 	// timestamp because a machine with a wrong clock is common and a duration
 	// does not care what the clock says.
 	UptimeSeconds int `json:"uptime_seconds,omitempty"`
+	// Peers is this device's own account of each peer it was given: whether
+	// it can reach it, and by which path.
+	//
+	// The panel used to have one word for the whole device, and that word was
+	// about the PAIR rather than the device: a machine with one peer, and
+	// that peer switched off, reported "connecting" — which reads as a fault
+	// on a device that is working perfectly and has nobody to talk to. In a
+	// field test of three PCs that is what an evening looks like when
+	// somebody goes home.
+	//
+	// Reported per peer, so the panel can say "2 of 3 peers reachable" and,
+	// when there is nothing to reach, say that instead of blaming this
+	// device for it.
+	Peers []PeerLink `json:"peers,omitempty"`
 	// Update is this agent's own account of what it did about the last
 	// release it was offered.
 	//
