@@ -277,9 +277,20 @@ declare(strict_types=1);
         <?= csrf_field() ?>
         <div class="field">
             <label for="destination_cidr">Range to share</label>
+            <?php
+            // The placeholder is deliberately NOT a plausible local range.
+            //
+            // It used to be 192.168.10.0/24, which is the range a great many
+            // of these sites actually use — so a form with nothing filled in
+            // looked exactly like a form with the right answer already in it,
+            // in grey, beside a sentence saying no address had been reported.
+            // Somebody pressing the button then shared nothing, or argued
+            // with a page that was telling the truth.
+            $known = (string) ($suggested_lan ?? '');
+            ?>
             <input type="text" id="destination_cidr" name="destination_cidr"
-                   value="<?= e((string) ($suggested_lan ?? '')) ?>"
-                   placeholder="192.168.10.0/24">
+                   value="<?= e($known) ?>"
+                   placeholder="<?= $known === '' ? 'type the range, e.g. 10.0.0.0/24' : '' ?>">
             <p class="field-hint">
                 <?php if (($suggested_lan ?? '') !== ''): ?>
                     Filled in from the address this computer reports

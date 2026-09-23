@@ -165,10 +165,15 @@ final class DeviceController extends Controller
         try {
             $route = RouteService::shareLan($deviceId, $cidr);
         } catch (ValidationException $e) {
-            // The service's own words: "that range overlaps the overlay",
-            // "that is not a LAN". They are written for whoever has to act on
-            // them, which is the person who just pressed the button.
-            return $this->redirect('devices/' . $deviceId, '', $e->getMessage());
+            // userMessage(), not getMessage().
+            //
+            // getMessage() is the exception's own generic label — "Validation
+            // failed" — and that is exactly what the page showed: a red bar
+            // with no reason and no field marked, on a form whose one input
+            // had just been refused for a reason the service had written out
+            // in full. The reasons live in the errors array and userMessage
+            // is what renders them.
+            return $this->redirect('devices/' . $deviceId, '', $e->userMessage());
         }
 
         return $this->redirect(
@@ -286,9 +291,35 @@ final class DeviceController extends Controller
         // soft-delete. Deleting without revoking would leave live peers.
         DeviceService::revoke($deviceId, 'Device deleted');
         IpamService::release($deviceId);
+
+        // And take its shared ranges with it.
+        //
+        // A deleted device left its routes behind, holding both the customer's
+        // range and the mapped prefix allocated to it — so the SAME PC,
+        // re-enrolled after a reinstall, could not share the network it had
+        // just been sharing: its own former self was still advertising it.
+        // Nothing pointed at the cause, because the device holding the range
+        // no longer appeared anywhere.
+        //
+        // A route through a device that does not exist cannot carry a packet.
+        // Keeping it is not caution, it is a reservation held by nobody.
+        $released = RouteService::withdrawAllFor($deviceId);
+
         Device::delete($deviceId);
 
-        return $this->redirect('devices', sprintf('%s deleted.', $device['name']));
+        $message = sprintf('%s deleted.', $device['name']);
+        if ($released !== []) {
+            $message .= ' ' . sprintf(
+                'Its shared range%s %s %s free again, so the same computer can share %s after '
+                    . 're-enrolling.',
+                count($released) === 1 ? '' : 's',
+                implode(' and ', $released),
+                count($released) === 1 ? 'is' : 'are',
+                count($released) === 1 ? 'it' : 'them'
+            );
+        }
+
+        return $this->redirect('devices', $message);
     }
 
     /**

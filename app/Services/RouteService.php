@@ -75,6 +75,31 @@ final class RouteService
     }
 
     /**
+     * Withdraw every range a device shares, and say which they were.
+     *
+     * Called when the device is deleted. A route through a device that no
+     * longer exists cannot carry a packet, and leaving it in place holds both
+     * the customer's range and the mapped prefix allocated to it — so the same
+     * PC, re-enrolled after a reinstall, was refused permission to share the
+     * network it had been sharing an hour earlier, blocked by its own former
+     * self. Nothing on any page pointed at the cause, because the device
+     * holding the range was gone from every list.
+     *
+     * @return list<string> the ranges released, for the message
+     */
+    public static function withdrawAllFor(int $deviceId): array
+    {
+        $released = [];
+
+        foreach (self::forDevice($deviceId) as $route) {
+            $released[] = (string) $route['destination_cidr'];
+            self::withdraw((int) $route['id']);
+        }
+
+        return $released;
+    }
+
+    /**
      * The LANs this device already shares.
      *
      * @return list<array<string,mixed>>
@@ -179,7 +204,21 @@ final class RouteService
     {
         $route = NetworkRoute::findOrFail($routeId);
 
-        NetworkRoute::delete($routeId);
+        // Hard, not soft.
+        //
+        // routes has a generated unique column, route_key, made of
+        // network_id, destination_cidr and via_device_id — and it does not
+        // include deleted_at. So a soft-deleted route went on reserving that
+        // range for that device for ever: withdrawing a share did not free
+        // it, and neither did deleting the device that held it. The same PC,
+        // re-enrolled after a reinstall, was refused permission to share the
+        // network it had been sharing an hour earlier.
+        //
+        // A withdrawn route is operational configuration that has been turned
+        // off, not a record worth keeping: the audit log below already holds
+        // what was withdrawn, by whom and when, which is where that history
+        // belongs.
+        NetworkRoute::forceDelete($routeId);
         Network::bumpRevision((int) $route['network_id']);
 
         // A device with no routes left is no longer a gateway, so it stops

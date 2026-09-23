@@ -21,6 +21,7 @@ use App\Services\DeviceService;
 use App\Services\DnsZone;
 use App\Services\RouteHostService;
 use App\Services\NetworkService;
+use App\Core\ValidationException;
 use App\Services\RouteService;
 use App\Services\SubnetMapper;
 use App\Core\Rbac;
@@ -59,6 +60,8 @@ final class GatewayTests
             self::approvalGatesTheRoute();
             self::duplicateWithinOneNetworkRefused();
             self::aHostAddressIsTheSameSubnet();
+            self::aDeletedDeviceReleasesItsShares();
+            self::refusalsSayWhy();
         } finally {
             DB::rollback();
             Auth::reset();
@@ -512,6 +515,92 @@ final class GatewayTests
             (string) $accepted['destination_cidr'],
             'a separate range is accepted, stored as its network address'
         );
+    }
+
+    /**
+     * Deleting a device frees the ranges it shared.
+     *
+     * A PC was reinstalled and re-enrolled, and could not share the network it
+     * had been sharing an hour earlier: its own deleted former self still held
+     * both the customer's range and the mapped prefix. Nothing on any page
+     * pointed at it, because the device holding the range no longer appeared
+     * in any list. A route through a device that does not exist cannot carry
+     * a packet; keeping it is a reservation held by nobody.
+     */
+    private static function aDeletedDeviceReleasesItsShares(): void
+    {
+        TestCase::group('Gateway — a deleted device does not keep holding its ranges');
+
+        self::act('hotelA');
+
+        $route = RouteService::advertise(self::$fx['hotelA_network'], [
+            'destination_cidr' => '192.168.77.0/24',
+            'via_device_id'    => self::$fx['hotelA_laptop'],
+        ]);
+        $mapped = (string) $route['mapped_cidr'];
+
+        $released = RouteService::withdrawAllFor(self::$fx['hotelA_laptop']);
+
+        TestCase::assert(in_array('192.168.77.0/24', $released, true),
+            'the range is reported as released, so the page can say so');
+
+        TestCase::assertSame(0, count(array_filter(
+            NetworkRoute::forNetwork(self::$fx['hotelA_network']),
+            static fn (array $r): bool => $r['destination_cidr'] === '192.168.77.0/24'
+        )), 'and the route is gone');
+
+        // The same machine, re-enrolled, can share it again. This is the
+        // thing that was impossible.
+        $again = RouteService::advertise(self::$fx['hotelA_network'], [
+            'destination_cidr' => '192.168.77.0/24',
+            'via_device_id'    => self::$fx['hotelA_laptop'],
+        ]);
+
+        TestCase::assertSame('192.168.77.0/24', (string) $again['destination_cidr'],
+            'and the same range can be shared again after the holder is deleted');
+
+        TestCase::assert($mapped !== '', 'the mapped prefix was allocated in the first place');
+
+        RouteService::withdrawAllFor(self::$fx['hotelA_laptop']);
+    }
+
+    /**
+     * A refused share says why, not "Validation failed".
+     *
+     * The page showed a red bar with no reason and no field marked, on a form
+     * whose one input had just been refused for a reason the service had
+     * written out in full. getMessage() is the exception's generic label; the
+     * reasons are in the errors array.
+     */
+    private static function refusalsSayWhy(): void
+    {
+        TestCase::group('Gateway — a refused share names the reason and the device');
+
+        self::act('hotelA');
+
+        RouteService::advertise(self::$fx['hotelA_network'], [
+            'destination_cidr' => '192.168.88.0/24',
+            'via_device_id'    => self::$fx['hotelA_laptop'],
+        ]);
+
+        $shown = '';
+        try {
+            RouteService::advertise(self::$fx['hotelA_network'], [
+                'destination_cidr' => '192.168.88.0/24',
+                'via_device_id'    => self::$fx['hotelA_laptop'],
+            ]);
+        } catch (ValidationException $e) {
+            $shown = $e->userMessage();
+        }
+
+        TestCase::assert($shown !== '' && $shown !== 'Validation failed',
+            'the message shown to a person is not the generic label', $shown);
+        TestCase::assertContains('192.168.88.0/24', $shown,
+            'it names the range that was refused');
+        TestCase::assertContains('already advertised', $shown,
+            'and says why');
+
+        RouteService::withdrawAllFor(self::$fx['hotelA_laptop']);
     }
 
     private static function duplicateWithinOneNetworkRefused(): void

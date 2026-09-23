@@ -6,6 +6,31 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.12] — development
+
+**"Validation failed", with no reason and no field marked.** The share form
+showed the exception's generic label instead of the reasons inside it — on a
+form whose one input had just been refused for a reason the service had
+written out in full, naming the range and the device already advertising it.
+`getMessage()` where `userMessage()` was meant.
+
+**A withdrawn range was never actually freed.** `routes` carries a generated
+unique column made of network, destination and device, and it does not include
+`deleted_at` — so a soft-deleted route reserved that range for that device
+permanently. Withdrawing a share did not release it and neither did deleting
+the device. A PC reinstalled and re-enrolled was refused permission to share
+the network it had been sharing an hour earlier, blocked by its own deleted
+former self, with nothing on any page pointing at the cause because the device
+holding the range no longer appeared in any list. Withdrawal is a hard delete
+now; the audit log already records what was withdrawn, by whom and when.
+
+**Deleting a device withdraws its shares**, and says which ranges it freed.
+
+**The empty field no longer looks filled in.** The placeholder was
+`192.168.10.0/24` — a range a great many of these sites actually use — so a
+form with nothing in it looked exactly like a form with the right answer
+already in it, in grey, beside a sentence saying no address had been reported.
+
 ## [1.9.7-dev.11] — development
 
 **Two message types shared one number.** `TypeRelayBindRefused` was added at
