@@ -224,6 +224,18 @@ final class RouteService
             ]);
         }
 
+        // Normalised to the network address before anything compares it.
+        //
+        // A field test shared 192.168.1.0/24 and then 192.168.1.1/24 on the
+        // same device and got both: the same LAN, twice, with two mapped
+        // prefixes allocated to it and two routes for a packet to take. Every
+        // check below this line, and the duplicate check above, compares
+        // strings — so any host address inside a range it had already been
+        // given was a brand new subnet to them. A person typing the router's
+        // own address is not making a second network; they are naming the
+        // same one the way a person names it.
+        $cidr = self::networkAddressOf($address, $prefix) . '/' . $prefix;
+
         if ($cidr === (string) $network['cidr']) {
             throw new ValidationException([
                 'destination_cidr' => 'That is the overlay\'s own range. A gateway cannot route the tunnel back into itself.',
@@ -231,6 +243,27 @@ final class RouteService
         }
 
         return $cidr;
+    }
+
+    /**
+     * The network address a host address and prefix name.
+     *
+     * 192.168.1.1/24 and 192.168.1.0/24 are the same subnet, and the second
+     * is what the routing table wants.
+     */
+    private static function networkAddressOf(string $address, int $prefix): string
+    {
+        $long = ip2long($address);
+        if ($long === false) {
+            return $address;
+        }
+
+        // A /0 mask cannot be written as -1 << 32 in PHP, and a /0 is refused
+        // above anyway; this keeps the shift in range for every case that
+        // reaches it.
+        $mask = $prefix === 0 ? 0 : (-1 << (32 - $prefix)) & 0xFFFFFFFF;
+
+        return long2ip($long & $mask);
     }
 
     /** @return array<string,mixed> */
@@ -263,20 +296,57 @@ final class RouteService
     private static function refuseDuplicate(int $networkId, string $cidr): void
     {
         foreach (NetworkRoute::forNetwork($networkId, false) as $existing) {
-            if ((string) $existing['destination_cidr'] !== $cidr) {
+            $other = (string) $existing['destination_cidr'];
+
+            // Overlapping, not just identical. 192.168.1.0/24 inside an
+            // existing 192.168.0.0/16 is not a second network either, and two
+            // routes covering one address is a packet with two places to go.
+            if (!self::overlaps($cidr, $other)) {
                 continue;
             }
 
             $via = $existing['via_device_name'] ?? 'another device';
 
             throw new ValidationException([
-                'destination_cidr' => sprintf(
-                    '%s is already advertised through %s on this network. '
-                    . 'Withdraw that route first — a device can only have one route to a subnet.',
-                    $cidr,
-                    $via
-                ),
+                'destination_cidr' => $cidr === $other
+                    ? sprintf(
+                        '%s is already advertised through %s on this network. '
+                        . 'Withdraw that route first — a device can only have one route to a subnet.',
+                        $cidr,
+                        $via
+                    )
+                    : sprintf(
+                        '%s overlaps %s, which is already advertised through %s. '
+                        . 'Two routes covering the same address give a packet two places to go. '
+                        . 'Withdraw that one first, or advertise a range that does not overlap it.',
+                        $cidr,
+                        $other,
+                        $via
+                    ),
             ]);
         }
+    }
+
+    /**
+     * Do two CIDRs cover any address in common?
+     *
+     * The shorter prefix is the wider range, so they overlap exactly when the
+     * wider one contains the narrower one's network address.
+     */
+    private static function overlaps(string $a, string $b): bool
+    {
+        [$aAddr, $aBits] = array_pad(explode('/', $a, 2), 2, '32');
+        [$bAddr, $bBits] = array_pad(explode('/', $b, 2), 2, '32');
+
+        $aLong = ip2long($aAddr);
+        $bLong = ip2long($bAddr);
+        if ($aLong === false || $bLong === false) {
+            return $a === $b;
+        }
+
+        $bits = min((int) $aBits, (int) $bBits);
+        $mask = $bits === 0 ? 0 : (-1 << (32 - $bits)) & 0xFFFFFFFF;
+
+        return ($aLong & $mask) === ($bLong & $mask);
     }
 }

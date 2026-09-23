@@ -58,6 +58,7 @@ final class GatewayTests
             self::namedHostsMustBeInsideTheirRoute();
             self::approvalGatesTheRoute();
             self::duplicateWithinOneNetworkRefused();
+            self::aHostAddressIsTheSameSubnet();
         } finally {
             DB::rollback();
             Auth::reset();
@@ -449,6 +450,70 @@ final class GatewayTests
      * Inside one network the prefix must be unique, because there the agent
      * genuinely cannot tell which gateway to send a packet to.
      */
+    /**
+     * 192.168.1.1/24 is not a second network.
+     *
+     * A field test shared 192.168.1.0/24 on a device and then shared
+     * 192.168.1.1/24 on the same device, and got both: the same LAN, twice,
+     * with two mapped prefixes allocated to it and two routes for a packet to
+     * take. Every check compared strings, so any host address inside a range
+     * already advertised was a brand new subnet to them. A person typing the
+     * router's own address is naming the network they are on, the way people
+     * name it.
+     */
+    private static function aHostAddressIsTheSameSubnet(): void
+    {
+        TestCase::group('Gateway — a host address names the subnet it is in, not a new one');
+
+        self::act('hotelA');
+
+        // Normalised on the way in, so what is stored is what a routing table
+        // wants and what every later comparison will see.
+        $refused = false;
+        try {
+            RouteService::advertise(self::$fx['hotelA_network'], [
+                'destination_cidr' => '192.168.1.1/24',
+                'via_device_id'    => self::$fx['hotelA_laptop'],
+            ]);
+        } catch (Throwable $e) {
+            $refused = true;
+        }
+
+        TestCase::assert($refused, '192.168.1.1/24 is refused when 192.168.1.0/24 is already shared');
+
+        TestCase::assertSame(1, count(array_filter(
+            NetworkRoute::forNetwork(self::$fx['hotelA_network']),
+            static fn (array $r): bool => $r['destination_cidr'] === '192.168.1.0/24'
+        )), 'and the LAN still has exactly one route and one mapped prefix');
+
+        // Overlap, not just equality: a /16 containing an advertised /24 is
+        // not a separate network either.
+        $overlapRefused = false;
+        try {
+            RouteService::advertise(self::$fx['hotelA_network'], [
+                'destination_cidr' => '192.168.0.0/16',
+                'via_device_id'    => self::$fx['hotelA_laptop'],
+            ]);
+        } catch (Throwable $e) {
+            $overlapRefused = true;
+        }
+
+        TestCase::assert($overlapRefused, 'a wider range containing an advertised one is refused');
+
+        // And a range that really is separate is still accepted, or this
+        // would have made the feature unusable rather than correct.
+        $accepted = RouteService::advertise(self::$fx['hotelA_network'], [
+            'destination_cidr' => '192.168.9.7/24',
+            'via_device_id'    => self::$fx['hotelA_laptop'],
+        ]);
+
+        TestCase::assertSame(
+            '192.168.9.0/24',
+            (string) $accepted['destination_cidr'],
+            'a separate range is accepted, stored as its network address'
+        );
+    }
+
     private static function duplicateWithinOneNetworkRefused(): void
     {
         TestCase::group('Gateway — the same prefix twice in one network is refused (§17)');
