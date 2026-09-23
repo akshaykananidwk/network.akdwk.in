@@ -281,3 +281,61 @@ scenario_https_recover() {
     record "https-recover/upgraded" FAIL "still on the fallback 90s after UDP was working again"
     record "https-recover/traffic" INFO "not measured: the path never changed"
 }
+
+# --------------------------------------------------- the lost relay offer
+#
+# A home laptop on its own ISP went from "Online · relay-udp" to
+# "Online · connecting" by itself and never came back. The diagnostics bundle
+# says why: one "asking for a relay" in the log, and then ten minutes of
+# punching into a network that could not carry a direct path, with the
+# coordinator answering the whole time and both peers reporting rx_bytes 0
+# and no handshake ever.
+#
+# The agent asked once. The entry recording the request was written before the
+# request was sent, the rebind loop skips a peer whose relay address is still
+# zero, and nothing revisited it — so one lost datagram, the request going out
+# or the offer coming back, stranded that pair until somebody restarted the
+# service. It is not a rare shape: the request and the answer are single UDP
+# packets, and that laptop had just been given a new socket by a configuration
+# reload.
+#
+# Reproduced by dropping UDP at alpha's router across the window where the
+# offer would arrive, then lifting it and leaving everything else alone.
+# Nothing is restarted. Red before the fix — alpha never asks again — and
+# green after.
+scenario_relay_offer_lost() {
+    step "a relay offer that never arrives must be asked for again"
+
+    # Symmetric on both sides, so a direct path cannot be punched and a relay
+    # is the only way these two can reach each other.
+    fixture symmetric symmetric
+
+    # Let the pair ask for a relay, and lose the answer. The window starts
+    # before the punch deadline expires and covers the offer.
+    lab::block_udp both
+    sleep 25
+    lab::unblock_udp
+
+    # From here the network is perfect. Nothing is restarted, no address
+    # changes, and the coordinator has been up and answering throughout.
+    if lab::wait_tunnel alpha "$BETA_IP" 60; then
+        record "offerlost/recovered" PASS "the pair connected after the offer was lost, with nothing restarted"
+    else
+        record "offerlost/recovered" FAIL \
+            "the pair never connected: the relay was asked for once and the answer was lost"
+        lab::tail_log alpha-up 20
+
+        return
+    fi
+
+    local path
+    path="$(lab::settled_path alpha 20)"
+    case "$path" in
+        relay*)
+            record "offerlost/path" PASS "and it is on a relay, which is the only path these two have"
+            ;;
+        *)
+            record "offerlost/path" FAIL "the path is '$path', so this is not testing what it says"
+            ;;
+    esac
+}

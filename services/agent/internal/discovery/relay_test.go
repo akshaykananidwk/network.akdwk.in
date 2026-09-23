@@ -665,3 +665,65 @@ func TestTheStandDownClockRestartsWhenTheCoordinatorAnswers(t *testing.T) {
 		t.Fatal("the stand-down clock kept running while the coordinator was answering")
 	}
 }
+
+// A relay offer that never arrives must be asked for again.
+//
+// This was "asked once, never again": the entry that records the request is
+// written before it is sent, rebindRelays skips a peer whose relay address is
+// still zero, and nothing else revisited it. One lost datagram — the request
+// going out or the offer coming back — stranded that pair until somebody
+// restarted the service.
+//
+// A home laptop on its own ISP did exactly that: one "asking for a relay" in
+// the log, then ten minutes of punching into a network that could not carry
+// it, with the coordinator answering the whole time. The panel said
+// "connecting" and the machine had been moving traffic over a relay minutes
+// before.
+func TestARelayThatIsNeverOfferedIsAskedForAgain(t *testing.T) {
+	h := newHarness(t)
+
+	var peer [32]byte
+	peer[0] = 31
+
+	// A peer that has been stalled long enough to want a relay.
+	h.client.mu.Lock()
+	h.client.paths[peer] = pathConnecting
+	h.client.firstSeen[peer] = time.Now().Add(-2 * punchDeadline)
+	h.client.mu.Unlock()
+
+	h.client.escalateStalledPeers()
+
+	if got := h.transport.count(disco.TypeRelayRequest); got != 1 {
+		t.Fatalf("asked %d time(s) on the first escalation, want 1", got)
+	}
+
+	// Nothing answers. Before the timeout it must not ask again, or a busy
+	// coordinator would be asked once a second.
+	h.client.escalateStalledPeers()
+
+	if got := h.transport.count(disco.TypeRelayRequest); got != 1 {
+		t.Fatalf("asked %d time(s) while still inside the offer timeout, want 1", got)
+	}
+
+	// Past it, ask again: the answer is not coming and waiting is not a plan.
+	h.client.mu.Lock()
+	h.client.relayAskedAt[peer] = time.Now().Add(-2 * relayOfferTimeout)
+	h.client.mu.Unlock()
+
+	h.client.escalateStalledPeers()
+
+	if got := h.transport.count(disco.TypeRelayRequest); got != 2 {
+		t.Fatalf("asked %d time(s) after the offer timeout, want 2 — the pair is stranded", got)
+	}
+
+	// And once an offer does arrive, the asking stops.
+	h.client.mu.Lock()
+	h.client.relayControl[peer] = netip.MustParseAddrPort("10.0.0.9:9000")
+	h.client.mu.Unlock()
+
+	h.client.escalateStalledPeers()
+
+	if got := h.transport.count(disco.TypeRelayRequest); got != 2 {
+		t.Fatalf("asked %d time(s) after a relay was offered, want 2", got)
+	}
+}

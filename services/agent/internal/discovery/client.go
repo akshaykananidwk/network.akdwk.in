@@ -156,6 +156,8 @@ type Client struct {
 	// on this side can see it, because a dead relay simply goes quiet.
 	relayName   map[[32]byte]string
 	relayMissed map[[32]byte]int
+	// relayAskedAt is when a relay was last asked for and not yet offered.
+	relayAskedAt map[[32]byte]time.Time
 	// standDownSince is when relay failover last began waiting for the
 	// coordinator to start answering again. Zero when it is not waiting.
 	standDownSince time.Time
@@ -239,6 +241,7 @@ func New(opts Options) (*Client, error) {
 		relayTicket:    make(map[[32]byte][]byte),
 		relayName:      make(map[[32]byte]string),
 		relayMissed:    make(map[[32]byte]int),
+		relayAskedAt:   make(map[[32]byte]time.Time),
 		relayRTT:       make(map[string]uint16),
 		probesInFlight: make(map[[disco.ProbeNonceLen]byte]pendingProbe),
 		repunchCount:   make(map[[32]byte]int),
@@ -315,13 +318,33 @@ func (c *Client) escalateStalledPeers() {
 		if now.Sub(since) < punchDeadline {
 			continue
 		}
-		if _, asked := c.relayControl[peer]; asked {
-			continue
+		// Asked already, and still waiting for an answer?
+		//
+		// Waiting is right for a few seconds and wrong for ever. This used to
+		// be "asked once, never again": the entry is written before the
+		// request, rebindRelays skips a peer whose relay address is still
+		// zero, and nothing else ever revisited it. So a single lost
+		// datagram — the request going out, or the offer coming back —
+		// stranded that pair until somebody restarted the service.
+		//
+		// It happened on a home laptop on its own ISP. The log has one
+		// "asking for a relay" and then ten minutes of punching into a
+		// network that could not carry it, with the coordinator answering
+		// the whole time; the panel said "connecting" and the machine had
+		// been moving traffic over a relay minutes earlier.
+		if at, asked := c.relayControl[peer]; asked {
+			if at.IsValid() {
+				continue
+			}
+			if now.Sub(c.relayAskedAt[peer]) < relayOfferTimeout {
+				continue
+			}
 		}
 
 		// Marked before the request so a slow coordinator does not produce a
 		// request per second.
 		c.relayControl[peer] = netip.AddrPort{}
+		c.relayAskedAt[peer] = now
 		stalled = append(stalled, peer)
 	}
 	c.mu.Unlock()
