@@ -6,6 +6,26 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.18] — development
+
+**The one-command install left no way to add a device.** getting-started.sh
+ran `upgrade-edge.sh --skip-pack`, to save a couple of minutes of
+cross-compiling. The pack is what builds `akconnect-setup.exe` and publishes
+it to the panel, so `/download/setup.exe` answered 503 and the first thing
+anybody does after installing — add a PC — could not be done. An install that
+finishes by telling somebody to run another command before they can add a
+machine is not a one-command install.
+
+It now builds it, then asks the panel whether it is really being served and
+says so either way. `zip` is installed, because the pack builder needs it. The
+builder already refuses to ship an executable that is not stamped with the
+panel's own address, so an installer served from this panel is by
+construction pointed at this panel.
+
+A check in the verification suite fails if `--skip-pack` is ever put back.
+
+---
+
 ## [1.9.7-dev.17] — development
 
 **One command on a fresh server.**

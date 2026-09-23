@@ -372,7 +372,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 run_quiet apt-get update || die "apt-get update failed"
 
-BASE_PACKAGES="ca-certificates curl gnupg git unzip rsync openssl sudo ufw jq python3 debian-keyring debian-archive-keyring apt-transport-https"
+BASE_PACKAGES="ca-certificates curl gnupg git unzip rsync openssl sudo ufw jq zip python3 debian-keyring debian-archive-keyring apt-transport-https"
 # shellcheck disable=SC2086  # the list is meant to be split into arguments
 run_quiet apt-get install -y $BASE_PACKAGES || die "could not install the base packages"
 ok "base tools"
@@ -954,11 +954,30 @@ step "the edge upgrade timer"
 # end-to-end proof that the panel, the shared secret and the fallback all work
 # together — it asks the panel which release it is on, and cannot get an
 # answer unless they do.
-if "$SRC_DIR/deploy/upgrade-edge.sh" --skip-pack; then
+#
+# Not --skip-pack. It takes a couple of minutes of cross-compiling, and
+# without it the panel has no installer to serve: /download/setup.exe answers
+# 503 and there is no way to enrol the first device. An install that finishes
+# by telling somebody to go and run another command before they can add a PC
+# is not a one-command install.
+say "this builds the Windows installer as well, which takes a few minutes"
+if "$SRC_DIR/deploy/upgrade-edge.sh"; then
     ok "edge upgrade ran, and its timer is installed"
 else
     warn "the first edge upgrade reported a problem — the table above says which check"
     say "Nothing is broken by this: the services are installed and running. Run it again with:"
+    say "    sudo $SRC_DIR/deploy/upgrade-edge.sh"
+fi
+
+# Asked of the panel rather than inferred from the build, because what matters
+# is whether a customer can download it — and the builder already refused to
+# ship an executable that was not stamped with this panel's address.
+SETUP_STATUS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$PANEL_URL/download/setup.exe" 2>/dev/null)"
+if [ "$SETUP_STATUS" = "200" ]; then
+    ok "$PANEL_URL/download/setup.exe is being served, stamped for $DOMAIN"
+else
+    warn "$PANEL_URL/download/setup.exe answered $SETUP_STATUS — no installer is published yet"
+    say "Run this again once the edge upgrade succeeds:"
     say "    sudo $SRC_DIR/deploy/upgrade-edge.sh"
 fi
 
@@ -982,6 +1001,7 @@ SETUP_LINK="$(sudo -u "$WEB_USER" "$PHP_BIN" "$PANEL_DIR/cli/setup-link.php" --q
 printf '\n'
 printf '  %sAK Connect is installed.%s\n\n' "$GREEN$BOLD" "$RESET"
 printf '  Panel        %s\n' "$PANEL_URL"
+printf '  Installer    %s/download/setup.exe\n' "$PANEL_URL"
 printf '  Channel      %s\n' "$CHANNEL"
 printf '  Version      %s\n' "${PANEL_VERSION:-unknown}"
 printf '\n'

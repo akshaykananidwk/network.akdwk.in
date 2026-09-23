@@ -1,10 +1,10 @@
 {
-  "version": "1.9.7-dev.17",
-  "released_at": "2026-09-23T15:00:00Z",
+  "version": "1.9.7-dev.18",
+  "released_at": "2026-09-23T16:30:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "One command installs AK Connect on a fresh server: deploy/getting-started.sh asks for a domain, an email and a channel, and configures Caddy with automatic certificates, PHP-FPM, MariaDB, the panel, the coordinator, a relay, the HTTPS fallback, the firewall and the timers.",
+  "notes": "The installer now builds and publishes the Windows installer, so /download/setup.exe works the moment the install finishes. Without it there was no way to enrol the first device.",
   "migrations": [],
   "protected": [
     ".env",

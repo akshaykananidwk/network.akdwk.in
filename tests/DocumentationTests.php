@@ -362,6 +362,25 @@ final class DocumentationTests
             );
         }
 
+        // And it must leave the panel with an installer to serve. The first
+        // thing anybody does after installing is add a device, and that needs
+        // /download/setup.exe — which only exists once the edge upgrade has
+        // built and published it. A --skip-pack here finishes the install and
+        // leaves no way to enrol anything.
+        TestCase::assert(
+            !preg_match('/upgrade-edge\.sh[^\n]*--skip-pack/', $script),
+            'the installer does not skip building the Windows installer',
+            preg_match('/upgrade-edge\\.sh[^\\n]*--skip-pack/', $script)
+                ? 'getting-started.sh runs upgrade-edge.sh with --skip-pack, so /download/setup.exe '
+                    . 'answers 503 and no device can be enrolled'
+                : ''
+        );
+
+        TestCase::assert(
+            str_contains($script, '/download/setup.exe'),
+            'the installer checks that the panel really serves setup.exe'
+        );
+
         TestCase::assert(
             str_contains($script, 'handle ' . \App\Services\CoordinatorSettings::FALLBACK_PATH),
             'the installer serves the fallback on the path the panel hands to agents ('
