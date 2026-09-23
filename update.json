@@ -1,13 +1,11 @@
 {
-  "version": "1.9.7-dev.3",
+  "version": "1.9.7-dev.4",
   "released_at": "2026-09-23T09:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Test button on the device page: the agent pings a peer or a shared-LAN address and the panel shows the reply time, or why it failed. Measured on the machine, because the panel has no route to either network.",
-  "migrations": [
-    "2026_09_23_100000_device_probes.php"
-  ],
+  "notes": "A panel answering 401 no longer disconnects devices. Only the panel's own device_unauthorized code counts as revocation, and only after it has been repeated — Apache dropping a header, a WAF, maintenance mode or a sick database used to cut every tunnel at once.",
+  "migrations": [],
   "protected": [
     ".env",
     "config/config.php",

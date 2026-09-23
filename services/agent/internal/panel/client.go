@@ -106,6 +106,25 @@ func (e *APIError) Unauthorized() bool {
 	return e.StatusCode == http.StatusUnauthorized || e.StatusCode == http.StatusForbidden
 }
 
+// Revoked reports that the PANEL said this device is no longer authorized.
+//
+// Not "the panel answered 401". That is the distinction this exists for, and
+// getting it wrong takes every customer down at once.
+//
+// A 401 or a 403 arrives for many reasons that have nothing to do with a
+// device being revoked: Apache not passing the Authorization header to
+// PHP-FPM, a WAF or mod_security answering with an HTML page, maintenance
+// mode, a rate limiter, a panel whose database is down. The agent used to
+// treat all of them as revocation and tear the tunnel down — so a
+// misconfigured or briefly unhealthy panel would disconnect every device on
+// it, and none of them would come back without somebody re-enrolling by hand.
+//
+// R6 says the data plane outlives the control plane. So revocation is only
+// the panel's own structured answer saying exactly that, and nothing else.
+func (e *APIError) Revoked() bool {
+	return e.Code == "device_unauthorized"
+}
+
 // NoCredential reports that the panel saw no credential at all, as opposed to
 // one it did not like.
 //

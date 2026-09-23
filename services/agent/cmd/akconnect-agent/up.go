@@ -140,14 +140,18 @@ type session struct {
 	// pendingProbes are reachability tests the panel has asked for and this
 	// agent has not yet run.
 	pendingProbes []panel.ProbeRequest
-	logf          func(string, ...any)
-	iface         string
-	port          int
-	verbose       bool
-	applied       bool
-	lastRX        int64
-	lastTX        int64
-	startedAt     time.Time
+	// revokedSince and revokedSeen count consecutive "not authorized" answers
+	// from the panel, so one is never acted on. See confirmRevoked.
+	revokedSince time.Time
+	revokedSeen  int
+	logf         func(string, ...any)
+	iface        string
+	port         int
+	verbose      bool
+	applied      bool
+	lastRX       int64
+	lastTX       int64
+	startedAt    time.Time
 	// updateRequested is an administrator having pressed "Update now" on this
 	// device's page, carried in the configuration the panel publishes.
 	updateRequested bool

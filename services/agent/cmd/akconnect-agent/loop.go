@@ -56,7 +56,7 @@ func (s *session) loop(ctx context.Context, priv wgPrivate, pollAfter int) error
 		s.publishRuntime(true)
 
 		if err := s.heartbeat(ctx); err != nil {
-			if revoked(err) {
+			if s.confirmRevoked(err) {
 				s.logf("this device has been revoked; disconnecting")
 				return nil
 			}
@@ -68,7 +68,7 @@ func (s *session) loop(ctx context.Context, priv wgPrivate, pollAfter int) error
 
 		next, err := s.refresh(ctx, priv)
 		if err != nil {
-			if revoked(err) {
+			if s.confirmRevoked(err) {
 				s.logf("this device has been revoked; disconnecting")
 				return nil
 			}
@@ -492,10 +492,65 @@ func (s *session) onFallback(peer [32]byte, endpoint string) bool {
 	return ok && at.String() == endpoint
 }
 
+// revokeConfirmations is how many times in a row the panel must say a device
+// is unauthorized before the agent believes it.
+//
+// One is not enough even when the code is right. A panel mid-deploy, a
+// database that came back with an empty table for a few seconds, a botched
+// migration — any of these can answer correctly-shaped nonsense briefly, and
+// the cost of believing it is every device disconnecting at once with no way
+// back but a site visit. The cost of waiting is that a genuinely revoked
+// device keeps passing traffic for another minute, which is a bounded and much
+// smaller harm.
+const revokeConfirmations = 3
+
+// revokeConfirmWindow is how long those answers must span.
+//
+// Both conditions, so three fast polls in the same second do not count as
+// confirmation.
+const revokeConfirmWindow = 60 * time.Second
+
+// confirmRevoked decides whether to believe the panel.
+//
+// Returns true only when the panel has said "this device is not authorized" —
+// its own structured code, not merely a 401 — enough times, over long enough,
+// that a transient fault has been ruled out.
+func (s *session) confirmRevoked(err error) bool {
+	if !revoked(err) {
+		// Anything else resets the count, including a success: the evidence
+		// has to be consecutive to mean anything.
+		s.revokedSince = time.Time{}
+		s.revokedSeen = 0
+
+		return false
+	}
+
+	if s.revokedSeen == 0 {
+		s.revokedSince = time.Now()
+	}
+	s.revokedSeen++
+
+	if s.revokedSeen < revokeConfirmations || time.Since(s.revokedSince) < revokeConfirmWindow {
+		s.logf("the panel says this device is not authorized (%d of %d checks); "+
+			"leaving the tunnel up until it is confirmed",
+			s.revokedSeen, revokeConfirmations)
+
+		return false
+	}
+
+	return true
+}
+
+// revoked reports the panel's own answer that this device is not authorized.
+//
+// The structured code, not the status. See APIError.Revoked: a 401 or 403
+// arrives from Apache dropping a header, a WAF, maintenance mode, a rate
+// limiter or a panel with a sick database, and treating those as revocation
+// disconnects an entire fleet over somebody else's outage.
 func revoked(err error) bool {
 	var apiErr *panel.APIError
 
-	return errors.As(err, &apiErr) && apiErr.Unauthorized()
+	return errors.As(err, &apiErr) && apiErr.Revoked()
 }
 
 func pollInterval(seconds int) time.Duration {

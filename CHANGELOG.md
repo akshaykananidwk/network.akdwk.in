@@ -6,6 +6,23 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.4] — development
+
+**A panel that answered 401 disconnected every device on it.** The agent tore
+its tunnel down on any 401 or 403, and those arrive for many reasons that have
+nothing to do with a device being revoked: Apache not passing the
+Authorization header to PHP-FPM — a fault this product has already had once —
+a WAF or mod_security answering with an HTML page, maintenance mode, a rate
+limiter, a panel whose database is briefly down. Every one of them would have
+disconnected the whole fleet, and nothing would have come back without
+somebody re-enrolling by hand at each site.
+
+Revocation is now the panel's own structured answer and nothing else, and it
+must be repeated three times over a minute before it is believed. R6 says the
+data plane outlives the control plane; this is what that has to mean. A
+genuinely revoked device keeps passing traffic for up to a minute longer,
+which is bounded and much smaller than the alternative.
+
 ## [1.9.7-dev.3] — development
 
 **"Can these two actually reach each other?" can now be asked from the panel.**
