@@ -38,6 +38,30 @@ final class UpdateSetting extends Model
     ];
 
     /** @return array<string,mixed> the row, creating it if the table is empty */
+    /**
+     * The agent release channel this panel's devices follow.
+     *
+     * Derived from the panel's own channel rather than stored separately,
+     * because two channels that can disagree is how a panel ends up running
+     * development builds while telling every device it manages that there is
+     * nothing newer — which is exactly what happened, silently, for six
+     * releases.
+     *
+     * The panel's channels are stable, beta and edge; agent releases are
+     * published as stable, beta or dev. Edge is the panel following a branch
+     * head, and the agent equivalent of that is dev.
+     */
+    public static function agentChannel(): string
+    {
+        $channel = (string) (self::current()['channel'] ?? 'stable');
+
+        return match ($channel) {
+            'edge'  => 'dev',
+            'beta'  => 'beta',
+            default => 'stable',
+        };
+    }
+
     public static function current(): array
     {
         $row = DB::selectOne('SELECT * FROM ' . self::tableName() . ' WHERE id = 1');

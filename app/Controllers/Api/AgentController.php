@@ -12,6 +12,7 @@ use App\Middleware\RateLimitMiddleware;
 use App\Models\AgentRelease;
 use App\Models\Device;
 use App\Models\DeviceProbe;
+use App\Models\UpdateSetting;
 use App\Models\Network;
 use App\Models\UsageCounter;
 use App\Services\CoordinatorSettings;
@@ -388,7 +389,20 @@ final class AgentController
             return Response::apiError('Device context missing.', 401);
         }
 
-        $channel = (string) ($request->query('channel', 'stable'));
+        // The panel's own channel decides what an agent is offered.
+        //
+        // The agent sends no channel — it has no way to know one, and it
+        // should not: a fleet's release channel is an administrator's
+        // decision, made once on the panel, not a setting on thirty PCs. So
+        // the default was 'stable', every device was treated as Stable, and a
+        // panel deliberately running development builds offered its agents
+        // nothing at all. Every upgrade-edge.sh run on the edge reported
+        // success publishing a dev build that no device would ever be told
+        // about.
+        //
+        // A query parameter still wins when one is sent, so a single device
+        // can be pinned for testing without moving the fleet.
+        $channel = (string) ($request->query('channel', UpdateSetting::agentChannel()));
         $platform = (string) ($request->query('platform', (string) $device['os']));
         $arch = (string) ($request->query('arch', (string) $device['arch']));
 

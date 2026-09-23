@@ -6,6 +6,33 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.8] — development
+
+**A relayed pair bound on both ends and carried nothing.** dev.6 taught the
+relay to name the peer in its bind acknowledgement, and taught the agent to
+drop an acknowledgement that named nobody when two peers shared a relay —
+reasoning that it cost one rebind. Against an older relay it cost every
+rebind, for ever: both ends bound, zero bytes received, no handshake, until
+the relay itself was upgraded. The relay and the agents update on separate
+schedules, so that gap is an ordinary state. An unnamed acknowledgement is
+matched by address again, as it was before the name existed, with a line in
+the log asking for the relay to be upgraded. A flapping pair is degraded; a
+pair that never binds is dead.
+
+**Orphan pairs.** The agent kept rebinding every five seconds for devices that
+had been deleted, for ever, because nothing ever removed them. The
+coordinator's peer list is authoritative and anything absent from it is
+forgotten — except when the list is empty, which is a device alone on its
+network rather than evidence of deletion.
+
+**A panel on Edge offered its devices nothing.** The agent sends no channel
+and never should — a fleet's release channel is one decision on the panel, not
+a setting on thirty PCs — so the default was stable and six development
+builds were published, successfully, to devices that were never told. Agents
+are offered the panel's own channel now, builds are published to the channel
+their version names, and a channel sees itself plus everything more stable, so
+a panel on dev does not fall behind stable when development pauses.
+
 ## [1.9.7-dev.7] — development
 
 **Why a device is not updating itself.** One machine sat on 1.9.5 through

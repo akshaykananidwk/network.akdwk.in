@@ -34,13 +34,35 @@ final class AgentRelease extends Model
      */
     public static function latestFor(string $channel, string $platform, string $arch, string $deviceUid = ''): ?array
     {
+        // A channel sees itself and everything more stable than it.
+        //
+        // Without this, a panel on dev would be offered development builds
+        // and nothing else — so the moment development stopped it would fall
+        // behind the stable release it is supposed to be ahead of. Beta sees
+        // beta and stable; stable sees only stable, which is the whole point
+        // of stable.
+        $visible = match ($channel) {
+            'dev'   => ['dev', 'beta', 'stable'],
+            'beta'  => ['beta', 'stable'],
+            default => ['stable'],
+        };
+
+        $placeholders = [];
+        $bindings = ['p' => $platform, 'a' => $arch];
+        foreach ($visible as $i => $name) {
+            $key = 'c' . $i;
+            $placeholders[] = ':' . $key;
+            $bindings[$key] = $name;
+        }
+
         $rows = DB::select(
             'SELECT * FROM ' . self::tableName() . '
-             WHERE channel = :c AND platform = :p AND arch = :a
+             WHERE channel IN (' . implode(', ', $placeholders) . ')
+               AND platform = :p AND arch = :a
                AND published_at IS NOT NULL AND published_at <= UTC_TIMESTAMP() AND deleted_at IS NULL
              ORDER BY published_at DESC, id DESC
              LIMIT 10',
-            ['c' => $channel, 'p' => $platform, 'a' => $arch]
+            $bindings
         );
 
         foreach ($rows as $row) {

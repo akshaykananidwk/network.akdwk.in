@@ -83,6 +83,53 @@ func (c *Client) handlePeers(header disco.Header, sealed []byte) {
 	for _, peer := range peers.Peers {
 		c.probe(prefer(peer, c.opts.LocalEndpoints))
 	}
+
+	// This list is the whole truth about who this device has. Anything the
+	// agent is still holding relay state for and that is not in it has been
+	// deleted or revoked, and rebinding for it is one packet every five
+	// seconds to a relay that will never answer — for ever, because nothing
+	// ever removed it. Two such orphans were seen in the field, from devices
+	// that no longer existed, still rebinding alongside the live pair.
+	c.forgetPeersNotIn(peers.Peers)
+}
+
+// forgetPeersNotIn drops everything remembered about peers the coordinator no
+// longer lists.
+func (c *Client) forgetPeersNotIn(current []disco.PeerInfo) {
+	live := make(map[[32]byte]bool, len(current))
+	for _, peer := range current {
+		live[peer.PublicKey] = true
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// An empty list is not evidence of deletion. A device alone on its
+	// network, or one whose peers are all offline, is told about nobody —
+	// and throwing away a working pair's relay state because one message
+	// arrived empty would be its own outage.
+	if len(live) == 0 {
+		return
+	}
+
+	for peer := range c.relayControl {
+		if live[peer] {
+			continue
+		}
+
+		c.opts.Logf("discovery: %x… is no longer on this network; forgetting its relay", peer[:6])
+
+		delete(c.relayControl, peer)
+		delete(c.relayTicket, peer)
+		delete(c.relayName, peer)
+		delete(c.relayMissed, peer)
+		delete(c.relayAskedAt, peer)
+		delete(c.relayTicketSeen, peer)
+		delete(c.relayRenewed, peer)
+		delete(c.established, peer)
+		delete(c.paths, peer)
+		delete(c.firstSeen, peer)
+	}
 }
 
 // prefer puts a candidate on one of our own subnets first.

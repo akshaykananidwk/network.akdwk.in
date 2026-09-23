@@ -242,11 +242,25 @@ func (c *Client) handleRelayBindAck(from netip.AddrPort, body []byte) {
 	}
 	c.mu.Unlock()
 
-	// An older relay that does not name the peer, and more than one peer on
-	// it: there is no way to tell which this is, and guessing is the defect.
-	// Dropping it costs one rebind, which comes round in five seconds.
+	// An older relay does not name the peer. With two peers bound through it
+	// there is no way to tell which acknowledgement this is — but dropping it
+	// is far worse than guessing.
+	//
+	// The previous version dropped it, on the reasoning that "it costs one
+	// rebind, which comes round in five seconds". That was wrong: against an
+	// older relay it costs EVERY rebind, for ever. A device with two peers on
+	// one relay — which is every device on a three-machine network — had both
+	// ends bound, zero bytes received and no handshake ever, until the relay
+	// was upgraded. The relay and the agents update on separate schedules, so
+	// that gap is a state the field really sits in, and 792 KB flowed through
+	// the same pair on the build before this check existed.
+	//
+	// So an unnamed acknowledgement is matched by address, exactly as it was
+	// before the name existed. The flapping that the name prevents is a
+	// degraded pair; refusing to bind at all is a dead one.
 	if found && !hasName && matches > 1 {
-		return
+		c.opts.Logf("discovery: this relay does not say which peer a bind is for; " +
+			"upgrade it to stop two peers on one relay swapping ports")
 	}
 
 	if !found {

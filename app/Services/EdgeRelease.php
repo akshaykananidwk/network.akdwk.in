@@ -424,16 +424,23 @@ final class EdgeRelease
             ]);
         }
 
+        // The channel follows the version. A build called 1.9.7-dev.7 is a
+        // development build and belongs on the dev channel; publishing it as
+        // stable would push it at every customer, and publishing it nowhere —
+        // which is what happened — means a panel deliberately running
+        // development builds offers its own devices nothing.
+        $channel = str_contains($version, '-') ? 'dev' : 'stable';
+
         $existing = AgentRelease::findBy([
             'version'  => $version,
             'platform' => 'windows',
             'arch'     => 'amd64',
-            'channel'  => 'stable',
+            'channel'  => $channel,
         ]);
 
         $attributes = [
             'version'         => $version,
-            'channel'         => 'stable',
+            'channel'         => $channel,
             'platform'        => 'windows',
             'arch'            => 'amd64',
             'file_path'       => self::DIR . '/' . $filename,

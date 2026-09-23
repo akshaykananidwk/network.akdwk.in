@@ -6,6 +6,7 @@ namespace App\Services;
 
 use App\Models\AgentRelease;
 use App\Models\Device;
+use App\Models\UpdateSetting;
 
 /**
  * Why a device is, or is not, being offered a newer agent.
@@ -44,22 +45,28 @@ final class AgentUpdateStatus
         $arch = (string) ($device['arch'] ?? 'amd64');
         $current = (string) ($device['agent_version'] ?? '');
 
-        $release = AgentRelease::latestFor('stable', $platform, $arch, (string) ($device['device_uid'] ?? ''));
+        // The panel's channel, not a hard-coded 'stable'. A panel running
+        // development builds was telling every device it managed that there
+        // was nothing newer, because the agent sends no channel and the
+        // default was stable.
+        $channel = UpdateSetting::agentChannel();
+
+        $release = AgentRelease::latestFor($channel, $platform, $arch, (string) ($device['device_uid'] ?? ''));
 
         if ($release === null) {
             // Is there anything at all for this platform, or is the cohort
             // the thing excluding it? The two need different actions.
-            $any = AgentRelease::latestFor('stable', $platform, $arch);
+            $any = AgentRelease::latestFor($channel, $platform, $arch);
 
             if ($any === null) {
                 return [
                     'offered' => false,
                     'version' => '',
-                    'reason'  => 'nothing published',
+                    'reason'  => 'nothing published on the ' . $channel . ' channel',
                     'detail'  => 'No agent has been published for ' . $platform . '/' . $arch
-                        . '. The agent binary is published by deploy/upgrade-edge.sh on the edge '
-                        . 'server — updating the panel does not publish one. Run it there, or press '
-                        . 'Update edge now.',
+                        . ' on the ' . $channel . ' channel. The agent binary is published by '
+                        . 'deploy/upgrade-edge.sh on the edge server — updating the panel does not '
+                        . 'publish one.',
                 ];
             }
 
@@ -89,7 +96,9 @@ final class AgentUpdateStatus
                 'offered' => false,
                 'version' => (string) $release['version'],
                 'reason'  => 'already current',
-                'detail'  => 'This device is on ' . $current . ', which is the newest published agent.',
+                'detail'  => 'This device is on ' . $current . ', and the newest agent on the '
+                    . $channel . ' channel is ' . $release['version'] . '. Channel ' . $channel
+                    . ': no release newer than ' . $current . '.',
             ];
         }
 

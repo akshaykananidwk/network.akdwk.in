@@ -419,3 +419,70 @@ scenario_ticket_renewal() {
 
     unset LAB_TICKET_SECONDS
 }
+
+# -------------------------------------------- both directions, for two lives
+#
+# A pair bound on a relay, both ends, and carried nothing: zero bytes received
+# and no handshake ever. Every check the lab had was satisfied — both agents
+# reported a relay path, the relay reported two sides bound — because nothing
+# required a packet to make the round trip.
+#
+# The cause was an acknowledgement the agent dropped rather than applied, and
+# the shape of it matters for the drill: the relay and the agents update on
+# separate schedules, so a version gap between them is an ordinary state and
+# not an exotic one.
+#
+# So this requires traffic BOTH WAYS, repeatedly, across two ticket lifetimes.
+# One direction proves a path exists; two prove the relay is forwarding for
+# both sides, which is the thing that was broken.
+scenario_relay_both_ways() {
+    step "a relayed pair must carry traffic in both directions, and keep doing it"
+
+    LAB_TICKET_SECONDS=60
+    export LAB_TICKET_SECONDS
+
+    fixture cgnat symmetric
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
+        record "bothways/up" FAIL "the pair never connected at all"
+        lab::tail_log alpha-up 20
+        unset LAB_TICKET_SECONDS
+
+        return
+    fi
+    record "bothways/up" PASS "alpha reached beta"
+
+    # The direction nothing checked. A relay that forwards one way and not the
+    # other looks identical from the side that works.
+    if lab::wait_tunnel beta "$ALPHA_IP" 60; then
+        record "bothways/reverse" PASS "and beta reached alpha"
+    else
+        record "bothways/reverse" FAIL \
+            "beta cannot reach alpha: the relay forwards one way only"
+        lab::tail_log beta-up 20
+        unset LAB_TICKET_SECONDS
+
+        return
+    fi
+
+    # Two ticket lifetimes, both directions, throughout.
+    local deadline=$(( $(date +%s) + 120 )) fwd=0 rev=0 rounds=0
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        sleep 15
+        rounds=$((rounds + 1))
+
+        lab::ping alpha "$BETA_IP" 2  || fwd=$((fwd + 1))
+        lab::ping beta  "$ALPHA_IP" 2 || rev=$((rev + 1))
+    done
+
+    if [ "$fwd" -eq 0 ] && [ "$rev" -eq 0 ]; then
+        record "bothways/sustained" PASS \
+            "both directions carried traffic for 2 ticket lifetimes ($rounds rounds)"
+    else
+        record "bothways/sustained" FAIL \
+            "lost traffic on $fwd forward and $rev reverse checks of $rounds"
+        lab::tail_log alpha-up 20
+    fi
+
+    unset LAB_TICKET_SECONDS
+}

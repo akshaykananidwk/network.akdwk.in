@@ -804,16 +804,26 @@ func TestTwoPeersOnOneRelayKeepTheirOwnPorts(t *testing.T) {
 		t.Fatalf("first peer moved to %q on a repeated acknowledgement", got)
 	}
 
-	// An older relay that does not name the peer, with two peers on it: there
-	// is no way to tell which this is, so it is dropped rather than guessed.
-	// One rebind comes round in five seconds; a wrong guess costs a handshake.
+	// An older relay does not name the peer, and it must still work.
+	//
+	// The first version of this dropped an unnamed acknowledgement when two
+	// peers shared a relay, reasoning that it cost one rebind. Against an
+	// older relay it cost every rebind for ever: both ends bound, zero bytes
+	// received, no handshake, until the relay itself was upgraded. The relay
+	// and the agents update on separate schedules, so that gap is a state the
+	// field really sits in.
+	//
+	// Matched by address instead, as it was before the name existed. An
+	// occasionally flapping pair is degraded; a pair that never binds is
+	// dead.
 	h.client.handleRelayBindAck(control, []byte{0xCC, 0xDD})
 
-	if got := h.peers.endpointOf(base64Key(first)); got != "10.0.0.9:51909" {
-		t.Fatalf("an unnamed acknowledgement moved a peer to %q by guessing", got)
-	}
-	if got := h.peers.endpointOf(base64Key(second)); got != "10.0.0.9:52165" {
-		t.Fatalf("an unnamed acknowledgement moved a peer to %q by guessing", got)
+	moved := h.peers.endpointOf(base64Key(first)) == "10.0.0.9:52445" ||
+		h.peers.endpointOf(base64Key(second)) == "10.0.0.9:52445"
+
+	if !moved {
+		t.Fatal("an unnamed acknowledgement was ignored; against an older relay " +
+			"that is a pair that never binds at all")
 	}
 }
 

@@ -8,6 +8,7 @@ use App\Core\Auth;
 use App\Core\Crypto;
 use App\Core\DB;
 use App\Models\AgentRelease;
+use App\Models\UpdateSetting;
 use App\Services\AgentUpdateStatus;
 use App\Core\ForbiddenException;
 use App\Core\LimitExceededException;
@@ -296,8 +297,10 @@ final class DatabaseTests
             // upgrade-edge.sh on the EDGE, and updating the panel publishes
             // nothing.
             $status = AgentUpdateStatus::forDevice($device);
-            TestCase::assertSame('nothing published', $status['reason'],
+            TestCase::assertContains('nothing published', $status['reason'],
                 'with no release row, the reason is that nothing published one');
+            TestCase::assertContains('channel', $status['reason'],
+                'and it names the channel, because a panel on dev sees no stable-only fleet');
             TestCase::assertContains('upgrade-edge.sh', $status['detail'],
                 'and it names what publishes one');
 
@@ -325,6 +328,27 @@ final class DatabaseTests
             $status = AgentUpdateStatus::forDevice($device);
             TestCase::assert($status['offered'], 'a signed, newer release is offered');
             TestCase::assertSame('9.9.9', $status['version'], 'and names the version');
+
+            // The channel the panel is on decides what a device is offered.
+            //
+            // The agent sends no channel, so every device was treated as
+            // Stable and a panel deliberately running development builds
+            // offered its own machines nothing — for six releases, while
+            // every publish on the edge reported success.
+            AgentRelease::update($id, ['rollout_percent' => 100, 'channel' => 'dev', 'version' => '9.9.10']);
+
+            $onStable = AgentUpdateStatus::forDevice($device);
+            TestCase::assert(!$onStable['offered'],
+                'a stable panel is not offered a development build');
+
+            UpdateSetting::save(['channel' => 'edge'] + UpdateSetting::current());
+
+            $onEdge = AgentUpdateStatus::forDevice($device);
+            TestCase::assert($onEdge['offered'],
+                'and a panel on Edge IS offered it — which is the defect that hid six releases');
+
+            UpdateSetting::save(['channel' => 'stable'] + UpdateSetting::current());
+            AgentRelease::update($id, ['channel' => 'stable', 'version' => '9.9.9']);
 
             // Held back by a partial rollout.
             AgentRelease::update($id, ['rollout_percent' => 0]);
