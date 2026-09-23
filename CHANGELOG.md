@@ -85,6 +85,34 @@ whose service needs a new flag would have installed the binary and left the old
 unit behind — which 1.9.6 is exactly: the fallback is switched on by
 `--ws-listen`.
 
+**A working relayed pair broke by itself and never came back.** Three of
+these, found in one diagnostics bundle from a home laptop on its own ISP —
+readable because of the permissions fix above, which is what that fix was
+for. The pair had been carrying traffic minutes earlier; the panel showed
+"connecting" and nothing recovered until the service was restarted.
+
+The agent asked the coordinator for a relay exactly once. The entry recording
+the request was written before the request was sent, the rebind loop skips a
+peer whose relay address is still zero, and nothing revisited it — so one lost
+datagram, the request going out or the answer coming back, stranded that pair
+for good. It is asked for again after twelve seconds now. The laptop had just
+been handed a new socket by a configuration reload, which is the moment a NAT
+is least likely to carry anything.
+
+Before that, its two peers spent seven minutes being handed each other's relay
+ports, back and forth every five seconds, each swap a WireGuard endpoint
+change. Both were on the same relay, the acknowledgement arrives from that
+relay's one control address, and the agent matched it to a peer by that
+address alone — whichever entry its map happened to yield first. The relay
+names the peer in the acknowledgement now, because it is the only party that
+knows.
+
+And relay failover, which 1.9.6 taught to stand down while the coordinator is
+silent, waited for a fallback takeover that could not come: nobody had
+configured Apache on that panel yet, which is the state every panel is in
+until somebody does. The wait is bounded at thirty seconds; past it the agent
+asks anyway, because it costs one packet and is the only move left.
+
 **The panel and the coordinator could hold different keys and say nothing.**
 An agent seals its announcement to the public key the panel hands it. If that
 is not the key the coordinator is running, the coordinator cannot open a single
