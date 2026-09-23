@@ -6,6 +6,22 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.11] — development
+
+**Two message types shared one number.** `TypeRelayBindRefused` was added at
+`0x14` in dev.6; `TypeRelayProbe` already held it. Nothing broke, entirely by
+luck of direction — agents send probes and never receive them, relays send
+refusals and never receive them — so each side's switch only ever saw one
+meaning of the number. The next message type either direction gained would
+have landed on it and produced a fault unreadable from any log.
+
+Corrected to `0x18` while only one release has carried it. A new agent still
+reads `0x14` as a refusal, because a relay running dev.6 to dev.10 sends it at
+that number and the relay and the agents update on separate schedules.
+
+The numbering is now held by the compiler: the types are map keys in a test,
+so two on one number does not fail the test, it fails to build.
+
 ## [1.9.7-dev.10] — development
 
 **The drill could not reach the path that was broken.** `publish-agent.php`

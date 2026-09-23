@@ -1,10 +1,10 @@
 {
-  "version": "1.9.7-dev.10",
+  "version": "1.9.7-dev.11",
   "released_at": "2026-09-23T09:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "The self-update drill could only ever test the stable channel, which is why it never caught a panel on Edge offering its devices nothing. It now tests both, and both pass.",
+  "notes": "Two protocol message types shared one number. Corrected, with the old number still accepted from relays that have not been upgraded, and the numbering is now checked by the compiler.",
   "migrations": [],
   "protected": [
     ".env",

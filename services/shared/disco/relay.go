@@ -29,7 +29,20 @@ const (
 	// one, every twenty seconds, until the only relay in the fleet was taken
 	// out of rotation by its own complaints. Saying "your ticket expired" is
 	// the difference between renewing and failing over.
-	TypeRelayBindRefused MessageType = 0x14
+	//
+	// 0x18, not 0x14. It was introduced at 0x14 in 1.9.7-dev.6, which
+	// TypeRelayProbe already held. Nothing broke, entirely by luck of
+	// direction: agents send probes to relays and never receive them, and
+	// relays send refusals to agents and never receive them, so each side's
+	// switch only ever saw one meaning of the number. That is not a property
+	// to rely on — the next message type either direction gains would have
+	// landed on it — so the number is corrected while only one release has
+	// carried it.
+	//
+	// See handleRelayBindRefused for why the agent still accepts 0x14: a
+	// relay running dev.6 through dev.10 sends refusals at that number, and
+	// the relay and the agents update on separate schedules.
+	TypeRelayBindRefused MessageType = 0x18
 
 	// TypeRelayBindAck tells the agent which port to send its tunnel traffic to.
 	TypeRelayBindAck MessageType = 0x13

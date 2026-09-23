@@ -25,7 +25,13 @@ func (c *Client) handle(pkt []byte, from netip.AddrPort) {
 		c.handlePunchAck(header, from)
 	case disco.TypeRelayOffer:
 		c.handleRelayOffer(header, rest)
-	case disco.TypeRelayBindRefused:
+	case disco.TypeRelayBindRefused, disco.TypeRelayProbe:
+		// 0x14 as well as 0x18. A relay running dev.6 through dev.10 sends
+		// refusals at 0x14, which is also TypeRelayProbe — a collision those
+		// builds carried. An agent never receives a probe (it sends them), so
+		// reading 0x14 here as a refusal is unambiguous in this direction and
+		// keeps a new agent working against a relay that has not been
+		// upgraded yet.
 		c.handleRelayBindRefused(from, rest)
 	case disco.TypeRelayBindAck:
 		c.handleRelayBindAck(from, rest)
