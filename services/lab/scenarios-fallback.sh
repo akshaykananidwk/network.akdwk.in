@@ -306,9 +306,13 @@ scenario_https_recover() {
 scenario_relay_offer_lost() {
     step "a relay offer that never arrives must be asked for again"
 
-    # Symmetric on both sides, so a direct path cannot be punched and a relay
-    # is the only way these two can reach each other.
-    fixture symmetric symmetric
+    # CGNAT on alpha and symmetric on beta, so a direct path cannot be punched
+    # and a relay is the only way these two can reach each other. It is also
+    # the topology that has a customer-premises router to drop packets at,
+    # which is where the loss has to happen: the agent's own sends must
+    # succeed and only the silence afterwards say anything, exactly as on the
+    # laptop this came from.
+    fixture cgnat symmetric
 
     # Let the pair ask for a relay, and lose the answer. The window starts
     # before the punch deadline expires and covers the offer.

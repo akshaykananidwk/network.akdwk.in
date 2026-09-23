@@ -727,3 +727,65 @@ func TestARelayThatIsNeverOfferedIsAskedForAgain(t *testing.T) {
 		t.Fatalf("asked %d time(s) after a relay was offered, want 2", got)
 	}
 }
+
+// Two peers on one relay must not be given each other's ports.
+//
+// The acknowledgement arrives from the relay's one control address, and both
+// peers are bound through it. Matching the answer to a peer by that address
+// alone matched whichever entry the map happened to yield first — so in the
+// field two peers' ports were swapped back and forth every five seconds for
+// seven minutes, each swap a WireGuard endpoint change, on a pair that had
+// been carrying traffic. The relay names the peer from 1.9.7.
+func TestTwoPeersOnOneRelayKeepTheirOwnPorts(t *testing.T) {
+	h := newHarness(t)
+
+	var first, second [32]byte
+	first[0] = 41
+	second[0] = 43
+
+	control := netip.MustParseAddrPort("10.0.0.9:9000")
+
+	h.client.mu.Lock()
+	h.client.relayControl[first] = control
+	h.client.relayControl[second] = control
+	h.client.paths[first] = pathConnecting
+	h.client.paths[second] = pathConnecting
+	h.client.mu.Unlock()
+
+	ack := func(peer [32]byte, port uint16) []byte {
+		body := []byte{byte(port >> 8), byte(port)}
+
+		return append(body, peer[:]...)
+	}
+
+	h.client.handleRelayBindAck(control, ack(first, 51909))
+	h.client.handleRelayBindAck(control, ack(second, 52165))
+
+	if got := h.peers.endpointOf(base64Key(first)); got != "10.0.0.9:51909" {
+		t.Fatalf("first peer is on %q, want 10.0.0.9:51909", got)
+	}
+	if got := h.peers.endpointOf(base64Key(second)); got != "10.0.0.9:52165" {
+		t.Fatalf("second peer is on %q, want 10.0.0.9:52165", got)
+	}
+
+	// Repeating the same answers changes nothing, which is what stops the
+	// endpoint flapping every time a rebind is acknowledged.
+	h.client.handleRelayBindAck(control, ack(first, 51909))
+	h.client.handleRelayBindAck(control, ack(second, 52165))
+
+	if got := h.peers.endpointOf(base64Key(first)); got != "10.0.0.9:51909" {
+		t.Fatalf("first peer moved to %q on a repeated acknowledgement", got)
+	}
+
+	// An older relay that does not name the peer, with two peers on it: there
+	// is no way to tell which this is, so it is dropped rather than guessed.
+	// One rebind comes round in five seconds; a wrong guess costs a handshake.
+	h.client.handleRelayBindAck(control, []byte{0xCC, 0xDD})
+
+	if got := h.peers.endpointOf(base64Key(first)); got != "10.0.0.9:51909" {
+		t.Fatalf("an unnamed acknowledgement moved a peer to %q by guessing", got)
+	}
+	if got := h.peers.endpointOf(base64Key(second)); got != "10.0.0.9:52165" {
+		t.Fatalf("an unnamed acknowledgement moved a peer to %q by guessing", got)
+	}
+}

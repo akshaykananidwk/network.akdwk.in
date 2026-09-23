@@ -195,20 +195,53 @@ func (c *Client) handleRelayBindAck(from netip.AddrPort, body []byte) {
 
 	port := uint16(body[0])<<8 | uint16(body[1])
 
-	// Match the acknowledgement back to the peer whose relay control address
-	// this is. Without the match, an unsolicited ack could repoint an
-	// unrelated peer at an attacker's port.
+	// Which peer this port is for.
+	//
+	// The relay says so from 1.9.7, because the agent cannot work it out. Two
+	// peers of one device are commonly on the same relay, the acknowledgement
+	// arrives from that relay's one control address, and matching by the
+	// address alone matched whichever entry the map happened to yield first.
+	// In the field that swapped two peers' ports back and forth every five
+	// seconds for seven minutes, each swap a WireGuard endpoint change, on a
+	// pair that had been carrying traffic.
+	var named [32]byte
+	hasName := len(body) >= 2+32
+	if hasName {
+		copy(named[:], body[2:2+32])
+	}
+
+	// Still matched against what this agent asked for, named or not: an
+	// unsolicited acknowledgement must not repoint a peer at an attacker's
+	// port, and a name in the packet is the attacker's to choose.
 	c.mu.Lock()
 	var peer [32]byte
 	var found bool
+	matches := 0
 	for candidate, control := range c.relayControl {
-		if control.Addr() == from.Addr() && control.Port() == from.Port() {
-			peer, found = candidate, true
-
-			break
+		if control.Addr() != from.Addr() || control.Port() != from.Port() {
+			continue
 		}
+
+		matches++
+
+		if hasName {
+			if candidate == named {
+				peer, found = candidate, true
+			}
+
+			continue
+		}
+
+		peer, found = candidate, true
 	}
 	c.mu.Unlock()
+
+	// An older relay that does not name the peer, and more than one peer on
+	// it: there is no way to tell which this is, and guessing is the defect.
+	// Dropping it costs one rebind, which comes round in five seconds.
+	if found && !hasName && matches > 1 {
+		return
+	}
 
 	if !found {
 		return
