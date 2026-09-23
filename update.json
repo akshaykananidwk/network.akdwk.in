@@ -1,13 +1,11 @@
 {
-  "version": "1.9.7-dev.9",
+  "version": "1.9.7-dev.10",
   "released_at": "2026-09-23T09:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Testing the router of a shared network from the gateway itself now tests the real LAN address. The gateway has no route for the mapped one — the mapping applies to traffic arriving from the overlay, not to what the gateway sends.",
-  "migrations": [
-    "2026_09_23_140000_probe_method_wider.php"
-  ],
+  "notes": "The self-update drill could only ever test the stable channel, which is why it never caught a panel on Edge offering its devices nothing. It now tests both, and both pass.",
+  "migrations": [],
   "protected": [
     ".env",
     "config/config.php",

@@ -429,7 +429,17 @@ final class EdgeRelease
         // stable would push it at every customer, and publishing it nowhere —
         // which is what happened — means a panel deliberately running
         // development builds offers its own devices nothing.
-        $channel = str_contains($version, '-') ? 'dev' : 'stable';
+        // A DEVELOPMENT build, not merely a version with a hyphen in it.
+        //
+        // The first rule was "contains a hyphen", and the lab's own fixtures are
+        // called things like 9.9.9-gate — so every drill published to the dev
+        // channel and nine checks that had passed for months went red at once.
+        // That was the rule being wrong, not the drills: a suffix is not a
+        // statement about who a build is for.
+        //
+        // -dev.N is what this project names its development builds, and nothing
+        // else is treated as one.
+        $channel = preg_match('/-dev\\./', $version) === 1 ? 'dev' : 'stable';
 
         $existing = AgentRelease::findBy([
             'version'  => $version,

@@ -121,9 +121,35 @@ if ($tamper === 'digest') {
 
 DB::execute('DELETE FROM ' . DB::table('agent_releases') . ' WHERE version = :v', ['v' => $version]);
 
+// The channel follows the version, as EdgeRelease does it on the real panel.
+// LAB_AGENT_CHANNEL overrides it for the drill that checks a stable panel is
+// NOT offered a development build.
+$channel = (string) (getenv('LAB_AGENT_CHANNEL') ?: '');
+if ($channel === '') {
+    // A DEVELOPMENT build, not merely a version with a hyphen in it.
+    //
+    // The first rule was "contains a hyphen", and the lab's own fixtures are
+    // called things like 9.9.9-gate — so every drill published to the dev
+    // channel and nine checks that had passed for months went red at once.
+    // That was the rule being wrong, not the drills: a suffix is not a
+    // statement about who a build is for.
+    //
+    // -dev.N is what this project names its development builds, and nothing
+    // else is treated as one.
+    $channel = preg_match('/-dev\\./', $version) === 1 ? 'dev' : 'stable';
+}
+
 AgentRelease::create([
     'version'         => $version,
-    'channel'         => 'stable',
+    // The channel follows the version, exactly as EdgeRelease does it: a
+    // build whose version carries a prerelease suffix is a development build
+    // and belongs on the dev channel.
+    //
+    // Hard-coded to 'stable' until 1.9.7-dev.10, which meant this drill could
+    // only ever exercise the stable path — and the defect that hid six
+    // releases from a fleet lived entirely on the dev one. A gate that cannot
+    // reach a path cannot defend it.
+    'channel'         => $channel,
     'platform'        => $platform,
     'arch'            => $arch,
     'file_path'       => 'storage/downloads/' . $filename,

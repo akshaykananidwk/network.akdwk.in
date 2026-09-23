@@ -76,6 +76,8 @@ exit(match ($command) {
     'problems'  => labProblems((string) ($args[0] ?? '')),
     'update-now' => labUpdateNow((string) ($args[0] ?? '')),
     'update-state' => labUpdateState((string) ($args[0] ?? '')),
+    'set-channel'  => labSetChannel((string) ($args[0] ?? '')),
+    'offered'      => labOffered((string) ($args[0] ?? '')),
     'endpoint'  => labEndpoint((string) ($args[0] ?? '')),
     'joincode'  => labJoinCode($args),
     'usage'     => labUsage((int) ($args[0] ?? 0)),
@@ -457,4 +459,59 @@ function findDevice(string $uid): ?array
         'lab harness',
         static fn (): ?array => Device::findByUid($uid)
     );
+}
+
+/**
+ * Set the panel's release channel.
+ *
+ * The drill needs both sides of it: a Stable panel must not be offered a
+ * development build, and an Edge panel must be. The second was false for six
+ * releases and nothing could see it.
+ */
+function labSetChannel(string $channel): int
+{
+    if (!in_array($channel, ['stable', 'beta', 'edge'], true)) {
+        return fail('channel must be stable, beta or edge');
+    }
+
+    \App\Models\UpdateSetting::save(['channel' => $channel] + \App\Models\UpdateSetting::current());
+
+    echo $channel, "\n";
+
+    return 0;
+}
+
+/**
+ * What version this device would be offered right now, or "none".
+ *
+ * Asked through exactly what the panel asks — the device's own platform and
+ * arch, the panel's channel, the rollout cohort — so the drill measures the
+ * decision the agent will really be given rather than a simplified copy of it.
+ */
+function labOffered(string $deviceUid): int
+{
+    // Across tenants, because this is a lab tool run from a shell with no
+    // signed-in administrator — the same reason every other command here
+    // does it.
+    $release = \App\Middleware\TenantScope::acrossAllTenants('lab drill', static function () use ($deviceUid) {
+        $device = \App\Models\Device::findByUid($deviceUid);
+        if ($device === null) {
+            return false;
+        }
+
+        return \App\Models\AgentRelease::latestFor(
+            \App\Models\UpdateSetting::agentChannel(),
+            (string) ($device['os'] ?? 'linux'),
+            (string) ($device['arch'] ?? 'amd64'),
+            $deviceUid
+        );
+    });
+
+    if ($release === false) {
+        return fail('no such device: ' . $deviceUid);
+    }
+
+    echo $release === null ? "none\n" : $release['version'] . "\n";
+
+    return 0;
 }

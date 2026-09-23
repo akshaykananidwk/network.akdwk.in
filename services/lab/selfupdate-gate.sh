@@ -334,3 +334,52 @@ esac
 
 kill "$AGENT_PID" 2>/dev/null
 AGENT_PID=""
+
+# ---------------------------------------------- the channel that hid six builds
+#
+# A panel deliberately running development builds offered its own devices
+# nothing, for six releases, while every publish on the edge reported success.
+# The agent sends no channel — it has no way to know one and should not, since
+# a fleet's release channel is one decision on the panel — so the panel
+# defaulted to stable and every device was treated as a Stable device.
+#
+# This drill could never have caught it: until now publish-agent.php wrote
+# channel 'stable' for everything, so the dev path did not exist in the lab at
+# all. A gate that cannot reach a path cannot defend it.
+step "a panel on Edge offers development builds to its own devices"
+
+DEV_VERSION="9.9.20-dev.1"
+php "$LAB/publish-agent.php" "$DEV_VERSION" "$WORK/new-agent" linux amd64 >/dev/null \
+    || die "could not publish the development build"
+
+# A panel on Stable must NOT be offered it: publishing a dev build to every
+# customer is the opposite mistake and just as bad.
+php "$LAB/lab-setup.php" set-channel stable >/dev/null 2>&1
+OFFER="$(php "$LAB/lab-setup.php" offered "$UID_DEV" 2>/dev/null)"
+
+case "$OFFER" in
+    *"$DEV_VERSION"*)
+        fail "a Stable panel was offered a development build" \
+            "publishing a dev build at every customer is the opposite mistake"
+        ;;
+    *)
+        pass "a Stable panel is not offered a development build"
+        ;;
+esac
+
+# And a panel on Edge must be.
+php "$LAB/lab-setup.php" set-channel edge >/dev/null 2>&1
+OFFER="$(php "$LAB/lab-setup.php" offered "$UID_DEV" 2>/dev/null)"
+
+case "$OFFER" in
+    *"$DEV_VERSION"*)
+        pass "a panel on Edge is offered $DEV_VERSION"
+        ;;
+    *)
+        fail "a panel on Edge was offered nothing" \
+            "this is the defect that hid six releases from a live fleet; got '$OFFER'"
+        ;;
+esac
+
+php "$LAB/lab-setup.php" set-channel stable >/dev/null 2>&1
+php "$LAB/publish-agent.php" --withdraw "$DEV_VERSION" >/dev/null 2>&1

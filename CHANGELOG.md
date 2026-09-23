@@ -6,6 +6,23 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.10] — development
+
+**The drill could not reach the path that was broken.** `publish-agent.php`
+wrote channel `stable` for every release it published, so the self-update
+gate had never exercised the dev channel at all — which is how a panel on
+Edge came to offer its own devices nothing for six releases with every drill
+passing. It publishes to the channel a version names now, and the gate
+requires both halves: a Stable panel must NOT be offered a development build,
+and an Edge panel must be. Twenty checks, all passing.
+
+**And the rule that decided the channel was wrong.** dev.8 used "the version
+contains a hyphen", and the lab's own fixtures are called things like
+`9.9.9-gate` — so every drill published to dev and nine checks that had passed
+for months went red at once. The gate was right and the rule was wrong: a
+suffix is not a statement about who a build is for. Only `-dev.N` is treated
+as a development build.
+
 ## [1.9.7-dev.9] — development
 
 **The gateway reported its own router unreachable.** Asked to test 10.128.5.1
