@@ -6,6 +6,22 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.2] — development
+
+**A shared range could be created and not removed.** "Share this computer's
+network" offered to add one and the table beside it had no way to take one
+away — the Remove button existed only on the network page, which is not where
+anybody shares from. A range typed wrongly was unremovable from the one screen
+that offered to create it. It is there now, with a confirmation naming both
+the real range and the mapped one that stops answering.
+
+**And the wrong range could be created twice.** 192.168.1.1/24 is the network
+192.168.1.0/24, not a second one, but every check compared strings — so a host
+address inside a range already shared was a brand new subnet, with its own
+mapped prefix and its own route. Addresses are masked to their prefix before
+anything compares them, and overlaps are refused, not just exact repeats: a
+/16 containing an advertised /24 gives a packet two places to go.
+
 ## [1.9.7-dev.1] — development
 
 Unreleased work on release/1.9.7, published so the Edge channel can install it.

@@ -220,7 +220,7 @@ declare(strict_types=1);
 
     <?php if (($shared_lans ?? []) !== []): ?>
         <table class="table">
-            <thead><tr><th>Shared range</th><th>Others reach it at</th><th>Status</th></tr></thead>
+            <thead><tr><th>Shared range</th><th>Others reach it at</th><th>Status</th><th></th></tr></thead>
             <tbody>
             <?php foreach ($shared_lans as $route): ?>
                 <tr>
@@ -230,6 +230,22 @@ declare(strict_types=1);
                         <?= (int) $route['approved'] === 1
                             ? '<span class="badge badge-ok">live</span>'
                             : '<span class="badge">waiting for approval</span>' ?>
+                    </td>
+                    <td class="text-right">
+                        <?php if (can('network.update')): ?>
+                            <?php
+                            // Removing it here rather than only on the network
+                            // page, because this is where it was shared from —
+                            // a range typed wrongly was unremovable from the
+                            // one screen that offered to create it.
+                            ?>
+                            <form method="post" class="inline"
+                                  action="<?= e(url('networks/' . (int) $route['network_id'] . '/routes/' . (int) $route['id'] . '/withdraw')) ?>"
+                                  onsubmit="return confirm('Stop sharing <?= e((string) $route['destination_cidr']) ?>?\n\nThe other computers lose their route to it, and <?= e((string) $route['mapped_cidr']) ?> stops answering. Nothing on this network is changed.');">
+                                <?= csrf_field() ?>
+                                <button type="submit" class="btn btn-sm btn-danger">Remove</button>
+                            </form>
+                        <?php endif; ?>
                     </td>
                 </tr>
             <?php endforeach; ?>
