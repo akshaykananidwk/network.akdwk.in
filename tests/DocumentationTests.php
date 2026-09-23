@@ -162,14 +162,20 @@ final class DocumentationTests
         TestCase::assert(is_array($manifest), 'update.json is valid JSON');
 
         $version = (string) ($manifest['version'] ?? '');
+
+        // A development build on a release branch carries a -dev.N suffix, so
+        // the Edge channel has something newer than the last tag to offer and
+        // each push is distinguishable from the one before. version_compare
+        // orders them the way this needs: 1.9.6 < 1.9.7-dev.1 < 1.9.7-dev.2
+        // < 1.9.7, so a dev build never outranks the release it precedes.
         TestCase::assert(
-            preg_match('/^\d+\.\d+\.\d+$/', $version) === 1,
-            'update.json names a three-part version'
+            preg_match('/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/', $version) === 1,
+            'update.json names a three-part version, optionally a prerelease'
         );
 
         $changelog = (string) @file_get_contents(APP_ROOT . '/CHANGELOG.md');
         TestCase::assert(
-            preg_match('/^## \[(\d+\.\d+\.\d+)\]/m', $changelog, $newest) === 1,
+            preg_match('/^## \[(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\]/m', $changelog, $newest) === 1,
             'CHANGELOG.md has a newest release heading'
         );
 

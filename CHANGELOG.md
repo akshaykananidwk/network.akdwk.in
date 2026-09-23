@@ -6,6 +6,20 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.1] — development
+
+Unreleased work on release/1.9.7, published so the Edge channel can install it.
+Each push bumps this to the next dev number.
+
+**Windows shared a LAN and could not carry it.** Forwarding was enabled on the
+tunnel interface and never on the adapter holding the customer's own network,
+and Windows routes between two interfaces only when both have it — so the
+packet arrived with its destination already rewritten and was dropped on the
+way out, silently, looking exactly like a firewall on the far device. The
+global IPEnableRouter, which a comment claimed was set here, was never set at
+all. Both are now, and they survive the reboot a reception-desk PC gets every
+night.
+
 ## [1.9.6] — 2026-09-22
 
 Any network a browser works on.

@@ -1,15 +1,11 @@
 {
-  "version": "1.9.6",
-  "released_at": "2026-09-23T06:00:00Z",
+  "version": "1.9.7-dev.1",
+  "released_at": "2026-09-23T09:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Any network a browser works on. A device on a network that carries no UDP at all — hotel wifi, a guest network, an office that drops the replies — now connects over TCP 443, carrying both its control messages and its tunnel traffic through the same port a browser uses. It keeps trying UDP the whole time and returns to it by itself when the network allows it, with nothing restarted. The panel says which path each device is on, and what each device did about the last release — a machine that never checked and one that refused a badly signed release used to look identical. The diagnostics bundle can read the two files it exists to collect. Firewall rules name the program rather than a port. The installer reads back what happened instead of announcing success because its calls returned. The panel says when the public key it publishes is not the one the coordinator is running — a fault that otherwise has no symptom at all. Apache is configured for the fallback only when asked for by name, into the panel's own virtual host and nowhere else, after showing exactly what it will change.",
-  "migrations": [
-    "2026_09_22_230000_device_coordinator_unanswered.php",
-    "2026_09_22_235900_device_relay_https_state.php",
-    "2026_09_22_235930_device_update_state.php"
-  ],
+  "notes": "Development build on release/1.9.7. Windows gateway forwarding fixed: forwarding is enabled on the LAN interface as well as the tunnel, and IPEnableRouter is set, which it never was.",
+  "migrations": [],
   "protected": [
     ".env",
     "config/config.php",
