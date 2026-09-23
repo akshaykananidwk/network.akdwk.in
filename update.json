@@ -1,10 +1,10 @@
 {
-  "version": "1.9.7-dev.14",
-  "released_at": "2026-09-23T09:00:00Z",
+  "version": "1.9.7-dev.15",
+  "released_at": "2026-09-23T12:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "A panel that cannot answer no longer stops traffic. The coordinator keeps the last answer the panel really gave, for a day; a half-offered pair is no longer silent; and usage the panel refused is billed on the next report instead of being lost.",
+  "notes": "php cli/maintenance.php on|off puts this panel alone into maintenance, so nobody has to stop a web server that is serving other people's sites to test it. The edge-upgrade drill measures what restarting the coordinator and relay costs a live pair.",
   "migrations": [],
   "protected": [
     ".env",

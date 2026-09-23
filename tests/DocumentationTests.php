@@ -17,6 +17,7 @@ final class DocumentationTests
     {
         self::securityCitations();
         self::requiredDocuments();
+        self::nothingStopsTheWebServer();
     }
 
     private static function securityCitations(): void
@@ -200,5 +201,101 @@ final class DocumentationTests
                 'update.json migration ' . $migration . ' exists'
             );
         }
+    }
+
+    /**
+     * No instruction in this repository may tell an operator to stop Apache.
+     *
+     * The R6 drill needs the panel to stop answering for a few minutes, and
+     * the obvious way to arrange that is `systemctl stop apache2`. It was
+     * suggested here, for a server that carries more than thirty other
+     * people's websites and their mail: the drill would have taken every one
+     * of them down, along with mail delivery, to find out something about one
+     * virtual host.
+     *
+     * cli/maintenance.php is the answer — one site, 503, reversible, and the
+     * rest of the machine never notices. This check exists because writing
+     * that down is not the same as it being followed: the next person to need
+     * a quiet panel will reach for the same blunt instrument unless something
+     * refuses it.
+     *
+     * Prose about the rule is allowed; an instruction is not. The difference
+     * is a command line, so that is what is matched.
+     */
+    private static function nothingStopsTheWebServer(): void
+    {
+        TestCase::group('Documentation — nothing tells an operator to stop the web server');
+
+        $roots = ['deploy', 'docs', 'services/lab', 'cli', 'install'];
+        $files = [
+            APP_ROOT . '/DEPLOY.md',
+            APP_ROOT . '/README.md',
+            APP_ROOT . '/CHANGELOG.md',
+        ];
+
+        foreach ($roots as $root) {
+            $dir = APP_ROOT . '/' . $root;
+            if (!is_dir($dir)) {
+                continue;
+            }
+
+            /** @var iterable<\SplFileInfo> $found */
+            $found = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($dir, \FilesystemIterator::SKIP_DOTS));
+            foreach ($found as $entry) {
+                if ($entry->isFile() && in_array($entry->getExtension(), ['md', 'sh', 'php', 'txt'], true)) {
+                    $files[] = $entry->getPathname();
+                }
+            }
+        }
+
+        // Any web server, not only Apache: httpd, nginx and php-fpm serve the
+        // same other people.
+        $services = 'apache2?|httpd|nginx|php[0-9.]*-fpm';
+        $pattern = '/(?:systemctl|service|rc-service)\s+(?:stop|disable)\s+(?:' . $services . ')'
+            . '|(?:systemctl|rc-service)\s+(?:' . $services . ')\s+stop'
+            . '|\bservice\s+(?:' . $services . ')\s+stop'
+            . '|\bapachectl\s+(?:stop|graceful-stop)/i';
+
+        $offenders = [];
+        foreach (array_unique($files) as $file) {
+            $body = (string) @file_get_contents($file);
+            if ($body === '') {
+                continue;
+            }
+
+            foreach (explode("\n", $body) as $number => $line) {
+                if (preg_match($pattern, $line) !== 1) {
+                    continue;
+                }
+
+                // The rule may quote the thing it forbids.
+                if (stripos($line, 'never') !== false || stripos($line, 'not stop') !== false) {
+                    continue;
+                }
+
+                $offenders[] = ltrim(str_replace(APP_ROOT . '/', '', $file) . ':' . ($number + 1)
+                    . ' — ' . trim($line));
+            }
+        }
+
+        TestCase::assert(
+            $offenders === [],
+            'no shipped instruction stops a web server the whole machine shares',
+            $offenders === []
+                ? ''
+                : implode('; ', array_slice($offenders, 0, 5))
+                . '. Use cli/maintenance.php: it takes this panel alone to 503 and leaves every other site serving.'
+        );
+
+        // And the replacement is really there to be reached for.
+        TestCase::assert(
+            is_file(APP_ROOT . '/cli/maintenance.php'),
+            'cli/maintenance.php ships, so there is something to use instead'
+        );
+
+        TestCase::assert(
+            str_contains((string) @file_get_contents(APP_ROOT . '/DEPLOY.md'), 'cli/maintenance.php'),
+            'DEPLOY.md documents it'
+        );
     }
 }

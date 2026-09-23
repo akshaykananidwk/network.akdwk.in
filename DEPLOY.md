@@ -553,6 +553,41 @@ one is what step 2 does.
 
 ---
 
+## Taking the panel down, without taking anything else down
+
+This panel shares its server with more than thirty other people's websites and
+their mail. **Never stop Apache to test the panel.** Doing so takes down every
+site on the machine — and their mail — to answer a question about one virtual
+host. No instruction in this repository should ever ask for it, and if you
+find one, it is a defect.
+
+```bash
+php cli/maintenance.php on  "Upgrading the panel" --allow=<your ip>
+php cli/maintenance.php status
+php cli/maintenance.php off
+```
+
+It writes a flag file the panel's own middleware reads. Apache keeps running,
+every other virtual host keeps serving, mail is untouched, and requests to
+this panel alone get 503 with a `Retry-After`. `--allow` keeps your own
+address working so you are not locked out of the thing you are testing.
+
+**What this is for.** From 1.9.7-dev.14 a relayed pair carries traffic
+straight through a panel outage: the coordinator keeps deciding from the last
+answer the panel gave it, for up to a day, and usage that cannot be reported
+is held and billed on the next successful report. That is R6 — the data plane
+outlives the control plane — and this is how to check it on a live machine:
+
+1. Get two devices onto a relayed path and start a `ping` between them.
+2. `php cli/maintenance.php on "R6 check" --allow=<your ip>`
+3. Wait three or four minutes. **The ping must not drop a packet**, and the
+   panel must answer 503 while every other site on the server answers
+   normally.
+4. `php cli/maintenance.php off`
+5. The ping is still running, and nothing was restarted anywhere.
+
+---
+
 ## Updating the edge servers
 
 The panel's updater updates the panel. The coordinator and the relay are Go

@@ -561,3 +561,102 @@ scenario_panel_maintenance() {
 
     unset LAB_TICKET_SECONDS
 }
+
+# An edge upgrade restarts the coordinator and the relay, under live traffic.
+#
+# upgrade-edge.sh does exactly this, in this order, on every deploy:
+#
+#     for svc in coordinator relay; do systemctl restart "akconnect-$svc"; done
+#
+# Both registries are in memory. The coordinator forgets every device; the
+# relay forgets every binding. The question this answers is the one an
+# operator actually has — does pressing Update Now on the panel cut the pairs
+# that are carrying traffic, and do they come back on their own?
+#
+# Nothing is restarted on the agent side, which is the point: a pair that
+# needs an agent restart to recover is stranded, because nobody is at the PC.
+#
+# Sixty-second tickets, and the drill keeps pinging for several lifetimes
+# after the restart. A ticket that outlives the coordinator only gets the pair
+# through the first few minutes; the claim being tested is that renewal works
+# afterwards too, which needs the agent to have re-announced itself to a
+# coordinator that has never heard of it.
+scenario_edge_upgrade() {
+    step "restarting the coordinator and relay must not strand a relayed pair"
+
+    LAB_TICKET_SECONDS=60
+    export LAB_TICKET_SECONDS
+
+    fixture cgnat symmetric
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
+        record "upgrade/paired" FAIL "the pair never connected, so there is nothing to interrupt"
+        lab::tail_log alpha-up 20
+        unset LAB_TICKET_SECONDS
+
+        return
+    fi
+    record "upgrade/paired" PASS "connected over a relay before the restart"
+
+    # A packet every 200ms for 40 seconds, started before the restart and left
+    # running through it. The gap is measured rather than sampled: a 20-second
+    # poll would call a five-second outage zero.
+    local pinglog="$LOGS/upgrade-ping.txt"
+    ( ip netns exec alpha ping -i 0.2 -W 1 -w 40 "$BETA_IP" >"$pinglog" 2>&1 ) &
+    local ping_pid=$!
+
+    sleep 5
+
+    # What upgrade-edge.sh does, in its order.
+    say "restarting the coordinator and the relay, as an edge upgrade does"
+    lab::stop_pid "${COORD_PID:-}"
+    lab::coord_start
+    lab::stop_pid "${RELAY_PID:-}"
+    lab::relay_start
+
+    wait "$ping_pid" 2>/dev/null || true
+
+    local sent lost
+    sent="$(sed -n 's/^\([0-9]\+\) packets transmitted.*/\1/p' "$pinglog")"
+    lost="$(sed -n 's/.*transmitted, \([0-9]\+\) received.*/\1/p' "$pinglog")"
+    sent="${sent:-0}"
+    lost=$(( sent - ${lost:-0} ))
+
+    # A ceiling, not a target. Rebinding is attempted every five seconds, so
+    # the relay coming back costs at most one interval — 25 packets at this
+    # rate. Fifty is that with room for a slow start, and still small enough
+    # that a pair which silently stayed down for the rest of the run fails.
+    if [ "$sent" -gt 0 ] && [ "$lost" -le 50 ]; then
+        record "upgrade/gap" PASS \
+            "$lost of $sent packets lost across the restart (about $((lost / 5))s, recovered on its own)"
+    else
+        record "upgrade/gap" FAIL \
+            "$lost of $sent packets lost across the restart"
+        lab::tail_log alpha-up 25
+        lab::tail_log coordinator 25
+    fi
+
+    # Several ticket lifetimes past the restart, with nothing restarted on
+    # either PC. This is the part that needs the agents to have found their
+    # way back into a coordinator that started empty: without that, the first
+    # renewal after the ticket runs out has nobody to ask.
+    local lost_after=0 checks=0 deadline=$(( $(date +%s) + 210 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        sleep 15
+        checks=$((checks + 1))
+
+        lab::ping alpha "$BETA_IP" 2 || lost_after=$((lost_after + 1))
+    done
+
+    if [ "$lost_after" -eq 0 ]; then
+        record "upgrade/renewal" PASS \
+            "still up through $((210 / 60)) ticket lifetimes after the restart ($checks checks, no agent restarted)"
+    else
+        record "upgrade/renewal" FAIL \
+            "traffic stopped on $lost_after of $checks checks after the restart"
+        lab::tail_log alpha-up 25
+        lab::tail_log coordinator 25
+    fi
+
+    unset LAB_TICKET_SECONDS
+}

@@ -6,6 +6,31 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.15] — development
+
+**A way to take this panel down without taking the server down.**
+The R6 drill needs the panel to stop answering for a few minutes. The obvious
+way to arrange that on the live server is to stop Apache, and that was
+suggested here — on a machine serving more than thirty other people's websites
+and their mail. It is the wrong answer to the question by a wide margin.
+
+`php cli/maintenance.php on "reason" --allow=<your ip>` writes the flag the
+panel's own middleware already reads: this virtual host answers 503 with a
+`Retry-After`, every other site on the box is untouched, and `--allow` keeps
+the operator's own address working. `off` removes it, `status` says which it
+is. DEPLOY.md now carries the runbook, and says plainly that Apache is never
+to be stopped to test the panel.
+
+**What an edge upgrade costs a pair that is carrying traffic.**
+`upgrade-edge.sh` restarts the coordinator and the relay, and both registries
+live in memory. The new `edge-upgrade` drill pings at five packets a second
+through that restart and then keeps the pair up for several ticket lifetimes
+afterwards, with nothing restarted on either agent — so the cost is measured
+rather than assumed, and a pair that needs a human at the PC to recover fails
+the drill.
+
+---
+
 ## [1.9.7-dev.14] — development
 
 **Pressing Update Now cut a working relayed pair, and it did not come back.**
