@@ -354,6 +354,7 @@ declare -A SCENARIOS=(
     [relay-offer-lost]=scenario_relay_offer_lost
     [ticket-renewal]=scenario_ticket_renewal
     [relay-both-ways]=scenario_relay_both_ways
+    [panel-maintenance]=scenario_panel_maintenance
     [https-recover]=scenario_https_recover
 )
 ORDER=(cone relay cgnat cgnat-direct late-joiner shared-router reconnect reconnect-both roaming https-fallback https-inbound https-switch https-recover cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash overlay-clash gateway-tamper subnet-mapping dns resolved revocation)

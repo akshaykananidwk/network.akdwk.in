@@ -486,3 +486,78 @@ scenario_relay_both_ways() {
 
     unset LAB_TICKET_SECONDS
 }
+
+# ------------------------------------------- the panel goes away for a while
+#
+# Pressing Update Now on the panel cut a working relayed pair that had carried
+# seventy megabytes, and it did not recover when the panel came back.
+#
+# The panel answered 503 for about ninety seconds while it redeployed. The
+# coordinator treated "the panel did not answer" as "the panel has not said
+# yes": it stopped refreshing both devices, their registry entries expired at
+# the presence TTL, and the pair stopped being introduced to anybody. When the
+# panel returned, one end asked for a relay and was offered one; the offer to
+# the other end found nothing registered and returned in silence. Both
+# machines sat on "connecting" with nothing wrong with either of them.
+#
+# R6 says the data plane outlives the control plane. This is the drill for it:
+# the panel is stopped for longer than the presence TTL AND longer than a
+# ticket lifetime, so both the registry entry and the relay ticket have to
+# survive on what the coordinator already knew.
+scenario_panel_maintenance() {
+    step "a panel that goes away must not interrupt traffic"
+
+    # Sixty-second tickets, so five minutes of outage spans four renewals —
+    # each of which needs the coordinator to mint a ticket without being able
+    # to ask the panel anything.
+    LAB_TICKET_SECONDS=60
+    export LAB_TICKET_SECONDS
+
+    fixture cgnat symmetric
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
+        record "maint/paired" FAIL "the pair never connected, so there is nothing to protect"
+        lab::tail_log alpha-up 20
+        unset LAB_TICKET_SECONDS
+
+        return
+    fi
+    record "maint/paired" PASS "connected over a relay before the panel goes down"
+
+    # The panel goes away. Nothing else changes: both agents keep running,
+    # both networks keep working, the coordinator and relay stay up.
+    lab::panel_stop
+
+    local lost=0 checks=0 deadline=$(( $(date +%s) + 300 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        sleep 20
+        checks=$((checks + 1))
+
+        lab::ping alpha "$BETA_IP" 2 || lost=$((lost + 1))
+    done
+
+    if [ "$lost" -eq 0 ]; then
+        record "maint/during" PASS \
+            "traffic never stopped across 5 minutes with no panel ($checks checks)"
+    else
+        record "maint/during" FAIL \
+            "traffic stopped on $lost of $checks checks while the panel was down"
+        lab::tail_log alpha-up 25
+    fi
+
+    # And it comes back, with nothing restarted anywhere.
+    lab::panel_start
+
+    sleep 30
+
+    if lab::ping alpha "$BETA_IP" 3; then
+        record "maint/after" PASS "still carrying traffic once the panel returned, nothing restarted"
+    else
+        record "maint/after" FAIL \
+            "the pair did not recover after the panel returned"
+        lab::tail_log alpha-up 25
+        lab::tail_log coordinator 25
+    fi
+
+    unset LAB_TICKET_SECONDS
+}

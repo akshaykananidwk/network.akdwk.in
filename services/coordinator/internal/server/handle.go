@@ -56,22 +56,44 @@ func (s *Server) handleHello(ctx context.Context, header disco.Header, sealed []
 
 	publicKey := base64.StdEncoding.EncodeToString(header.Sender[:])
 
-	// The panel decides, every time. Caching the answer would mean a revoked
-	// device kept being introduced until the cache expired.
+	// The panel decides, and an ERROR is not a decision.
+	//
+	// This used to return on any failure, which meant a panel answering 503
+	// for ninety seconds during a deployment stopped every device being
+	// refreshed: entries expired after the presence TTL, the pairs they were
+	// half of stopped being introduced, and a relayed pair carrying seventy
+	// megabytes went quiet and never came back. Neither machine had moved.
+	//
+	// So a failure falls back to the last answer the panel really gave, for
+	// up to a day. A refusal is a decision and is acted on immediately — that
+	// is what the old comment was protecting, and it still holds.
 	result, err := s.opts.Panel.VerifyDevice(ctx, hello.DeviceUID, hello.Token, publicKey)
 	if err != nil {
-		s.opts.Logf("verifying %s failed: %v", hello.DeviceUID, err)
-		return
+		remembered, known := s.lastKnown.recall(header.Sender)
+		if !known {
+			s.opts.Logf("verifying %s failed and nothing is remembered about it: %v",
+				hello.DeviceUID, err)
+
+			return
+		}
+
+		s.opts.Logf("verifying %s failed (%v); using what the panel last said, so traffic continues",
+			hello.DeviceUID, err)
+		result = remembered
 	}
 
 	if !result.Authorized {
 		s.opts.Logf("refused %s: %s", hello.DeviceUID, result.Reason)
 		// Forget it, so an already-present device that has just been revoked
-		// stops being handed to its peers.
+		// stops being handed to its peers — and forget what it was allowed to
+		// do, so a later panel outage cannot resurrect it from the cache.
 		s.reg.Forget(header.Sender)
+		s.lastKnown.forget(header.Sender)
 
 		return
 	}
+
+	s.lastKnown.remember(header.Sender, result)
 
 	entry := &registry.Entry{
 		PublicKey: header.Sender,

@@ -121,6 +121,22 @@ func (s *Server) handleRelayRequest(header disco.Header, sealed []byte, from net
 func (s *Server) offerToPeer(peerKey, selfKey [32]byte, relay *RelayTarget) {
 	peer, ok := s.reg.Get(peerKey)
 	if !ok || !peer.Reflexive.IsValid() {
+		// Said out loud, because this is a pair half-formed.
+		//
+		// One end was offered a relay and bound to it; the other was never
+		// told, so nothing crossed and neither machine could explain why. It
+		// happened after a panel outage dropped the peer out of the registry:
+		// the offer went to one end, this returned in silence, and both
+		// devices sat on "connecting" until a service was restarted.
+		//
+		// The agent that asked will ask again — a relay it cannot use goes
+		// unanswered and that is a failover it retries — so the recovery is
+		// already there. What was missing was any record that half a pair had
+		// been served.
+		s.opts.Logf("offered %x… a relay but could not offer the other end %x…: "+
+			"it is not registered right now, so nothing will flow until it announces again",
+			selfKey[:6], peerKey[:6])
+
 		return
 	}
 

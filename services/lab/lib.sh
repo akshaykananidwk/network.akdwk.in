@@ -271,6 +271,21 @@ lab::panel_start() {
     say "panel on $PANEL_URL (pid $PANEL_PID)"
 }
 
+# lab::panel_stop takes the panel away without touching anything else.
+#
+# For the R6 drill: the coordinator, the relay and both agents keep running,
+# both networks keep working, and only the thing that answers questions about
+# permissions disappears — which is what a deploy, a database restore or a
+# certificate renewal looks like from the coordinator's side.
+lab::panel_stop() {
+    [ -n "${PANEL_PID:-}" ] || return 0
+
+    kill "$PANEL_PID" 2>/dev/null || true
+    wait "$PANEL_PID" 2>/dev/null || true
+    PANEL_PID=""
+    say "panel stopped — the coordinator is now on its own"
+}
+
 # Bound to the wildcard address on purpose: each scenario deletes and
 # rebuilds the bridge, and a socket bound to 10.0.0.1 would go with it.
 lab::coord_start() {

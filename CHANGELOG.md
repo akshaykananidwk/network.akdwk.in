@@ -6,6 +6,31 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.14] — development
+
+**Pressing Update Now cut a working relayed pair, and it did not come back.**
+The panel answered 503 for about ninety seconds while it redeployed. Three
+faults, and R6 — the data plane outlives the control plane — depends on all
+three.
+
+*The coordinator treated "no answer" as "no".* Its comment said "the panel
+decides, every time", which is right about revocation and wrong about errors.
+On any failure it returned, so neither device was refreshed, both registry
+entries expired at the presence TTL, and the pair stopped being introduced to
+anybody. It now falls back to the last answer the panel really gave, for up to
+a day. An explicit refusal is a decision and still forgets the device at once,
+and drops what was remembered about it so an outage cannot resurrect it.
+
+*A half-offered pair was silent.* One end was offered a relay and bound; the
+offer to the other end found nothing registered and returned without a word.
+That is now logged, naming both ends.
+
+*Usage was lost, not delayed.* The code dropped reports the panel refused, on
+the reasoning that the relay's cumulative counter would carry them next time.
+It does — past a mark this coordinator had already advanced, so every byte
+relayed during the outage was never billed to anybody. Undelivered figures are
+held and folded into the next report, cleared only once the panel takes them.
+
 ## [1.9.7-dev.13] — development
 
 **"Already advertised through DESKTOP-EKH1Q30" named two devices at once.** A

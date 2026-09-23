@@ -20,6 +20,12 @@ import (
 type usageLedger struct {
 	mu   sync.Mutex
 	seen map[usageKey]uint64
+	// held is usage the panel could not be told about yet, carried into the
+	// next report. delta() advances the mark whether or not the report is
+	// delivered, so without this a failed report loses those bytes for good —
+	// which a panel deployment did, for every byte relayed while it answered
+	// 503.
+	held map[usageKey]uint64
 }
 
 type usageKey struct {
@@ -28,7 +34,10 @@ type usageKey struct {
 }
 
 func newUsageLedger() *usageLedger {
-	return &usageLedger{seen: make(map[usageKey]uint64)}
+	return &usageLedger{
+		seen: make(map[usageKey]uint64),
+		held: make(map[usageKey]uint64),
+	}
 }
 
 // delta returns how much to add to the panel's counter for one report.
@@ -95,6 +104,9 @@ func (s *Server) handleRelayUsage(body []byte) {
 		}
 	}
 
+	// Anything a previous attempt could not deliver goes with this one.
+	s.usage.addHeld(report.Relay, deltas)
+
 	if len(deltas) == 0 {
 		return
 	}
@@ -103,14 +115,84 @@ func (s *Server) handleRelayUsage(body []byte) {
 	defer cancel()
 
 	if err := s.opts.Panel.ReportRelayUsage(ctx, report.Relay, deltas); err != nil {
-		// Logged and dropped. Retrying would mean holding the deltas, and a
-		// queue of unbilled bytes on a coordinator that might itself restart
-		// is a worse place for them than the relay's own cumulative counter,
-		// which the next report carries anyway.
-		s.opts.Logf("could not report usage for relay %s: %v", report.Relay, err)
+		// Held, not dropped.
+		//
+		// The comment here used to say dropping was safe because the relay's
+		// cumulative counter would carry the bytes in the next report. It
+		// does carry them — but s.usage.delta has already advanced this
+		// coordinator's mark past them, so the next delta starts from the new
+		// figure and those bytes are never billed to anybody. A panel
+		// answering 503 for ninety seconds during a deployment silently lost
+		// every byte relayed in that window.
+		//
+		// They are added to the next attempt instead, and only cleared once
+		// the panel has actually taken them.
+		s.usage.hold(report.Relay, deltas)
+		s.opts.Logf("could not report usage for relay %s: %v (holding %d tenant(s) for the next report)",
+			report.Relay, err, len(deltas))
 
 		return
 	}
 
+	s.usage.delivered(report.Relay)
+
 	s.opts.Logf("reported usage for relay %s: %d tenant(s)", report.Relay, len(deltas))
+}
+
+// heldCap bounds what one relay and tenant may accumulate while the panel is
+// unreachable.
+//
+// A terabyte. Far more than any plausible outage carries, and a ceiling so
+// that a coordinator cut off for a week does not grow without limit or send a
+// number that overflows whatever the panel stores it in.
+const heldCap uint64 = 1 << 40
+
+// hold keeps usage the panel would not take.
+func (l *usageLedger) hold(relay string, deltas map[uint64]uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.held == nil {
+		l.held = make(map[usageKey]uint64)
+	}
+
+	for tenant, bytes := range deltas {
+		key := usageKey{relay: relay, tenant: tenant}
+
+		total := l.held[key] + bytes
+		if total > heldCap {
+			total = heldCap
+		}
+
+		l.held[key] = total
+	}
+}
+
+// addHeld folds anything held for this relay into the deltas about to be sent.
+func (l *usageLedger) addHeld(relay string, deltas map[uint64]uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for key, bytes := range l.held {
+		if key.relay != relay || bytes == 0 {
+			continue
+		}
+
+		deltas[key.tenant] += bytes
+	}
+}
+
+// delivered clears what the panel has now accepted for this relay.
+//
+// Only after a successful report, which is the whole point: the bytes stay
+// owed until somebody has actually taken them.
+func (l *usageLedger) delivered(relay string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for key := range l.held {
+		if key.relay == relay {
+			delete(l.held, key)
+		}
+	}
 }

@@ -52,6 +52,10 @@ type Server struct {
 	// pair survives its ticket expiring. Zero means the production lifetime.
 	ticketLifeOverride time.Duration
 
+	// lastKnown keeps the panel's most recent answer about each device, so a
+	// panel that cannot answer does not stop traffic. See lastknown.go.
+	lastKnown *lastKnown
+
 	verifying *reverifier
 	// talking notices a device whose hellos keep coming with no ping between
 	// them, which is the shape of an agent that never hears our replies. See

@@ -86,9 +86,26 @@ func (s *Server) reverify(key [32]byte) {
 		if err != nil {
 			// Leave the set as it is and try again at the next keepalive. A
 			// panel that cannot be reached is not a revocation.
-			s.opts.Logf("re-verifying %s failed: %v", deviceUID, err)
+			//
+			// The registry entry itself is refreshed from what the panel last
+			// said, because otherwise it expires at the presence TTL and the
+			// device silently stops being introduced to anybody — which is
+			// how a panel deployment killed a working pair.
+			if remembered, known := s.lastKnown.recall(key); known {
+				s.reg.SetPeers(key, peerSet(remembered), remembered.NetworkID,
+					remembered.TenantID, remembered.Region)
+			}
+
+			s.opts.Logf("re-verifying %s failed: %v (keeping what the panel last said)",
+				deviceUID, err)
 
 			return
+		}
+
+		s.lastKnown.remember(key, result)
+
+		if !result.Authorized {
+			s.lastKnown.forget(key)
 		}
 
 		if !result.Authorized {

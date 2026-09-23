@@ -1,13 +1,11 @@
 {
-  "version": "1.9.7-dev.13",
+  "version": "1.9.7-dev.14",
   "released_at": "2026-09-23T09:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Ranges held by deleted devices are freed by a migration, a refusal names the holder by uid and says when it is deleted, and a reinstalled PC can move its predecessor's share to itself without losing the mapped address.",
-  "migrations": [
-    "2026_09_23_170000_release_orphan_routes.php"
-  ],
+  "notes": "A panel that cannot answer no longer stops traffic. The coordinator keeps the last answer the panel really gave, for a day; a half-offered pair is no longer silent; and usage the panel refused is billed on the next report instead of being lost.",
+  "migrations": [],
   "protected": [
     ".env",
     "config/config.php",
