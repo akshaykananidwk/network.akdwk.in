@@ -41,7 +41,25 @@ declare(strict_types=1);
         ]) ?>
     <?php else: ?>
         <div class="table-wrap">
-            <table class="table">
+            <?php
+// How much of the fleet is on the newest agent.
+//
+// A number nobody had before. One machine sat six releases behind for days
+// and the only way to notice was to open each device and compare version
+// strings by eye.
+$fleet = $fleet_updates ?? null;
+?>
+<?php if ($fleet !== null && $fleet['version'] !== ''): ?>
+    <p class="field-hint">
+        <strong><?= (int) $fleet['current'] ?> of <?= (int) $fleet['total'] ?></strong>
+        on agent <?= e($fleet['version']) ?>.
+        <?php if ($fleet['behind'] !== []): ?>
+            <span class="text-danger">Behind: <?= e(implode(', ', array_slice($fleet['behind'], 0, 6))) ?></span>
+        <?php endif; ?>
+    </p>
+<?php endif; ?>
+
+<table class="table">
                 <thead>
                 <tr>
                     <th scope="col">Device</th>

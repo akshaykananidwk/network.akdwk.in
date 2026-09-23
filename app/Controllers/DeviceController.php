@@ -13,6 +13,7 @@ use App\Models\Device;
 use App\Models\DeviceProbe;
 use App\Models\Network;
 use App\Core\ValidationException;
+use App\Services\AgentUpdateStatus;
 use App\Services\AuditService;
 use App\Services\DeviceService;
 use App\Services\IpamService;
@@ -55,6 +56,8 @@ final class DeviceController extends Controller
             'networks'       => Network::where([], 'name', 'ASC', 200),
             'filter_status'  => $status,
             'filter_network' => $networkId,
+            // "3 of 3 on 1.9.7-dev.7", and who is not.
+            'fleet_updates'  => AgentUpdateStatus::fleet(),
         ]);
     }
 
@@ -88,6 +91,10 @@ final class DeviceController extends Controller
             // The most recent answer for each address this device has been
             // asked about, keyed by address.
             'probe_results' => DeviceProbe::latestByTarget((int) $device['id']),
+            // Why this device is or is not being offered a newer agent. The
+            // panel's own answer, not the device's — a device that was told
+            // there is nothing for it has nothing to report.
+            'update_status' => AgentUpdateStatus::forDevice($device),
         ]);
     }
 

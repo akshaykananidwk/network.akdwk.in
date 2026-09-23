@@ -7,6 +7,8 @@ namespace Tests;
 use App\Core\Auth;
 use App\Core\Crypto;
 use App\Core\DB;
+use App\Models\AgentRelease;
+use App\Services\AgentUpdateStatus;
 use App\Core\ForbiddenException;
 use App\Core\LimitExceededException;
 use App\Core\NotFoundException;
@@ -63,6 +65,7 @@ final class DatabaseTests
             self::tenantIsolation();
             self::ipamAllocation();
             self::deviceLifecycle();
+            self::updateStatusNamesTheReason();
             self::splitTunnelGuarantee();
             self::planLimits();
             self::rbacMatrix();
@@ -270,6 +273,68 @@ final class DatabaseTests
      * soft-delete clause, the tenant scope and the table name together, which
      * is the combination that was wrong.
      */
+/**
+     * The panel can say why a device is not being offered an update.
+     *
+     * A machine sat on 1.9.5 through 1.9.6 and six development builds with
+     * working self-update code, and the panel said "up to date" the whole
+     * time — which was true from the device's point of view. It asked, it was
+     * told there was nothing, and it went back to sleep. Everything that could
+     * have explained it lives on the panel's side and none of it was shown.
+     *
+     * Each of these reasons is a different action for whoever is looking.
+     */
+    private static function updateStatusNamesTheReason(): void
+    {
+        TestCase::group('Updates — the panel says why a device is not updating');
+
+        TenantScope::asTenant((int) self::$fixtures['alpha_tenant'], static function (): void {
+            $device = Device::findOrFail((int) self::$fixtures['alpha_device']);
+
+            // Nothing published for this platform at all. This is the state
+            // the field was in: the agent binary is published by
+            // upgrade-edge.sh on the EDGE, and updating the panel publishes
+            // nothing.
+            $status = AgentUpdateStatus::forDevice($device);
+            TestCase::assertSame('nothing published', $status['reason'],
+                'with no release row, the reason is that nothing published one');
+            TestCase::assertContains('upgrade-edge.sh', $status['detail'],
+                'and it names what publishes one');
+
+            // Published, but unsigned: every agent refuses it, silently.
+            $id = AgentRelease::create([
+                'version'         => '9.9.9',
+                'channel'         => 'stable',
+                'platform'        => (string) $device['os'],
+                'arch'            => (string) $device['arch'],
+                'file_path'       => '/tmp/agent.exe',
+                'file_size'       => 1,
+                'sha256'          => str_repeat('a', 64),
+                'signature'       => '',
+                'rollout_percent' => 100,
+                'published_at'    => gmdate('Y-m-d H:i:s'),
+            ]);
+
+            $status = AgentUpdateStatus::forDevice($device);
+            TestCase::assertSame('published unsigned', $status['reason'],
+                'an unsigned release is named as such, not reported as up to date');
+
+            // Signed, and now it is offered.
+            AgentRelease::update($id, ['signature' => str_repeat('b', 64)]);
+
+            $status = AgentUpdateStatus::forDevice($device);
+            TestCase::assert($status['offered'], 'a signed, newer release is offered');
+            TestCase::assertSame('9.9.9', $status['version'], 'and names the version');
+
+            // Held back by a partial rollout.
+            AgentRelease::update($id, ['rollout_percent' => 0]);
+
+            $status = AgentUpdateStatus::forDevice($device);
+            TestCase::assertSame('held back by rollout', $status['reason'],
+                'a rollout that excludes this device says so rather than saying nothing');
+        });
+    }
+
     private static function everyModelMatchesItsTable(): void
     {
         TestCase::group('Database — every model matches the table it was migrated onto');

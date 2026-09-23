@@ -129,7 +129,22 @@ declare(strict_types=1);
                 <p class="field-hint">Updating to <?= e($updateVersion) ?>
                     <span class="text-muted">(<?= e(time_ago($updateChecked)) ?>)</span>.</p>
             <?php else: ?>
-                <p class="field-hint">Up to date as of <?= e(time_ago($updateChecked)) ?>.</p>
+                <p class="field-hint">Checked <?= e(time_ago($updateChecked)) ?>.</p>
+            <?php endif; ?>
+
+            <?php
+            // What the PANEL would offer, which is the half the device cannot
+            // report. A machine that asked and was told there was nothing for
+            // it looks identical to one that is genuinely current, and one of
+            // them sat on 1.9.5 through six releases while the page said it
+            // was up to date.
+            $offer = $update_status ?? null;
+            ?>
+            <?php if ($offer !== null && $offer['reason'] !== 'already current'): ?>
+                <p class="field-hint <?= $offer['offered'] ? '' : 'text-danger' ?>">
+                    <strong><?= e($offer['offered'] ? 'Will update to ' . $offer['version'] : 'Not updating: ' . $offer['reason']) ?>.</strong>
+                    <?= e($offer['detail']) ?>
+                </p>
             <?php endif; ?>
         </dd></div>
         <div><dt>Public endpoint</dt><dd>

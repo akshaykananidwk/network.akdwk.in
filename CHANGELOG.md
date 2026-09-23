@@ -6,6 +6,31 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.7] — development
+
+**Why a device is not updating itself.** One machine sat on 1.9.5 through
+1.9.6 and six development builds with working self-update code, and its page
+said "up to date" the whole time — which was true from the device's point of
+view. It asked, it was told there was nothing for it, and it went back to
+sleep. Everything that could have explained it lives on the panel's side and
+none of it was shown.
+
+Four answers, each a different action:
+
+* **nothing published** — the agent binary is published by
+  `deploy/upgrade-edge.sh` on the EDGE server. Updating the panel does not
+  publish one, so a panel can be six releases ahead of every agent it manages
+  and say nothing.
+* **published unsigned** — every agent correctly refuses an unsigned binary.
+  The publisher logs a warning and carries on; the warning is in a log nobody
+  reads.
+* **held back by rollout** — published at less than 100% and this device is
+  not in the group.
+* **already current.**
+
+The devices list gains a fleet line: how many are on the newest agent, and the
+names of those that are not.
+
 ## [1.9.7-dev.6] — development
 
 **A relayed pair died eight to nine minutes after every bind.** The ticket is
