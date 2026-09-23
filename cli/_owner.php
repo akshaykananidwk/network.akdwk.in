@@ -29,12 +29,20 @@ function akconnect_become_tree_owner(string $root): void
     // Every call checked for first. PHP 8 removes a function listed in
     // disable_functions, so calling one throws — and aaPanel's default list
     // disables putenv, for the CLI as well as for PHP-FPM.
+    //
+    // posix_initgroups is required too, not optional: without it the process
+    // kept root's supplementary groups — group 0 under sudo — while it said
+    // it was running as the web user, and could read root's group-readable
+    // files. And the groups are checked afterwards rather than trusted.
     $became = is_array($account)
         && function_exists('posix_setgid') && function_exists('posix_setuid')
+        && function_exists('posix_initgroups')
         && posix_setgid((int) $account['gid'])
-        && (!function_exists('posix_initgroups') || posix_initgroups($name, (int) $account['gid']))
+        && posix_initgroups($name, (int) $account['gid'])
         && posix_setuid($treeOwner)
-        && posix_geteuid() === $treeOwner;
+        && posix_geteuid() === $treeOwner
+        && (!function_exists('posix_getgroups') || !in_array(0, (array) posix_getgroups(), true)
+            || (int) $account['gid'] === 0);
 
     if (!$became) {
         $command = implode(' ', array_map('escapeshellarg', $_SERVER['argv'] ?? []));

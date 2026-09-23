@@ -100,6 +100,49 @@ underneath it. The site file the script writes denies every directory
 `.htaccess` denies, and a test in the verification suite fails if the two ever
 drift apart.
 
+### Replacing the coordinator's shared secret
+
+```bash
+sudo akconnect-rotate-secret            # the panel <-> coordinator secret
+sudo akconnect-rotate-secret --relay    # and this server's relay secret
+```
+
+The shared secret is what the coordinator and `upgrade-edge.sh` sign every
+call to the panel with. Treat it as a password with root on your devices
+behind it: whoever holds it can publish a Windows installer or an agent
+binary, and the panel signs an uploaded agent and offers it to every device as
+an update. Up to 1.9.7-dev.21 the installer printed it. If it has been seen
+anywhere — a chat, a screenshot, a terminal log — rotate it.
+
+The command changes the panel first, then `/etc/akconnect/coordinator.env` and
+`coordinator.secret.for-panel`, restarts the coordinator, and proves the panel
+accepts the new secret and refuses the old one. It prints neither.
+
+What it breaks: nothing on any agent — none of them holds this secret, and
+none needs a restart, a re-enrolment or a new config. Direct and relayed pairs
+keep carrying traffic. For 10-25 seconds after the restart, a device that has
+to announce itself waits its turn. The upgrade timer is held while it runs.
+
+`--relay` also replaces the secret this server's relay shares with the
+coordinator, which was never printed. It restarts the relay: relayed pairs
+through it pause 15-25 seconds while their agents fetch new tickets, by
+themselves. Relays on other servers (`add-relay.sh`) each have their own
+secret and are not touched.
+
+It ends by listing what was published with the secret — the installer and
+agent the panel serves, and every agent release registered in the last 30 days
+(`--since` to go further back). An agent release NEWER than the panel was not
+built by any edge: withdraw it before a device takes it,
+
+```bash
+sudo -u www-data php /var/www/<domain>/cli/edge-audit.php --withdraw=<version>
+```
+
+and republish from source with `sudo /opt/akconnect/src/deploy/upgrade-edge.sh --force`.
+
+On the production host, where the panel was not installed by
+getting-started.sh: `sudo /opt/akconnect/src/deploy/rotate-secret.sh --panel /www/wwwroot/network.akdwk.in`.
+
 ### Taking that panel down for a test
 
 `akconnect-maintenance on|off|status`, installed by the same script. It is

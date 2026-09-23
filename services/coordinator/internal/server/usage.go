@@ -147,7 +147,14 @@ func (s *Server) handleRelayUsage(body []byte) {
 // number that overflows whatever the panel stores it in.
 const heldCap uint64 = 1 << 40
 
-// hold keeps usage the panel would not take.
+// hold keeps usage the panel would not take: exactly what was sent, which is
+// the whole debt.
+//
+// It replaces what was held rather than adding to it. The deltas that failed
+// already carry everything held before them — addHeld folded it in — so adding
+// counted the old debt a second time, and it doubled on every consecutive
+// failure: ten failed reports of 100 new bytes each held 102,300 bytes for
+// 1,000 relayed, and billed them when the panel came back.
 func (l *usageLedger) hold(relay string, deltas map[uint64]uint64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -159,12 +166,11 @@ func (l *usageLedger) hold(relay string, deltas map[uint64]uint64) {
 	for tenant, bytes := range deltas {
 		key := usageKey{relay: relay, tenant: tenant}
 
-		total := l.held[key] + bytes
-		if total > heldCap {
-			total = heldCap
+		if bytes > heldCap {
+			bytes = heldCap
 		}
 
-		l.held[key] = total
+		l.held[key] = bytes
 	}
 }
 

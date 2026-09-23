@@ -39,6 +39,8 @@ final class ProductionDefectTests
         self::installerGitAsOwner();
         self::cliActsAsTreeOwner();
         self::maintenanceBypassLink();
+        self::secretsStayOffScreens();
+        self::installerRootNeverActsInsideTheWebTree();
     }
 
     // ------------------------------------------------------- the 1.9.6 path
@@ -548,9 +550,16 @@ final class ProductionDefectTests
         // /tmp and running it there, so anything it loads from beside itself
         // is loaded from /tmp — where any local user can put a file for root
         // to run. Nothing may be loaded relative to $0.
+        // Every file it loads comes from the checkout, by $SRC_DIR — never by
+        // a path worked out from $0, in whatever spelling: a two-line HERE=
+        // form, ${0%/*}, dirname -- "$0" all passed the first version of this.
+        preg_match_all('/^\s*(?:\.|source)\s+(\S+)/m', $script, $sourced);
+        $outside = array_filter($sourced[1], static fn (string $path): bool => !str_starts_with($path, '"$SRC_DIR/deploy/'));
         TestCase::assert(
-            preg_match('/^\s*(\.|source)\s+[^\n]*(dirname\s+"?\$0|BASH_SOURCE)/m', $script) !== 1,
-            'upgrade-edge.sh loads nothing from beside itself — it may be running from /tmp'
+            $sourced[1] !== [] && $outside === []
+                && preg_match('/\$\{0[%#]|dirname\s+(--\s+)?"?\$0|BASH_SOURCE/', $script) !== 1,
+            'upgrade-edge.sh loads nothing from beside itself — it may be running from /tmp',
+            $outside === [] ? '' : 'loads: ' . implode(', ', $outside)
         );
         TestCase::assert(
             str_contains($script, 'mktemp -d /tmp/akconnect-upgrade-edge.'),
@@ -755,11 +764,16 @@ final class ProductionDefectTests
         // write the panel's coordinator settings — and passed it. Any path
         // this script creates as root and then names on a `sudo -u` line is
         // the defect, whatever it is for.
-        preg_match_all('/(\w+)="\$\((?:keep_tmp\s+"\$\()?mktemp\b/', $script, $made1);
-        preg_match_all('/\bmake_tmp\s+(\w+)/', $script, $made2);
+        // Code only: a comment that quotes the old form is not a temporary file.
+        $scriptCode = implode("\n", array_filter(
+            explode("\n", $script),
+            static fn (string $line): bool => !preg_match('/^\s*#/', $line)
+        ));
+        preg_match_all('/(\w+)="\$\((?:keep_tmp\s+"\$\()?mktemp\b/', $scriptCode, $made1);
+        preg_match_all('/\bmake_tmp\s+(\w+)/', $scriptCode, $made2);
         $made = array_unique(array_merge($made1[1], $made2[1]));
         $handedOver = [];
-        foreach (explode("\n", $script) as $line) {
+        foreach (explode("\n", $scriptCode) as $line) {
             // Directly, or through the helpers every other-user command
             // now goes through.
             if (preg_match('/\bsudo\s+(-\w+\s+)*-u\b|\bas_user\b|\bas_owner\b/', $line) !== 1) {
@@ -1085,7 +1099,7 @@ final class ProductionDefectTests
                 $line
             );
 
-            if (preg_match('/(^|[;&|(\s])git\s+(-C|clone|fetch|checkout|remote|rev-parse|pull)\b/', $line)
+            if (preg_match('/(^|[;&|(\s])git\s+(-C|-c|clone|fetch|checkout|remote|rev-parse|rev-list|pull|reset|status|archive|show|cat-file|merge-base|ls-files|ls-remote|symbolic-ref|log|config|init|push|add|commit|stash|worktree|update-index|read-tree|write-tree)\b/', $line)
                 && !str_contains($line, 'as_owner') && !str_contains($line, 'git_in')) {
                 $bare[] = trim($line);
             }
@@ -1125,21 +1139,49 @@ final class ProductionDefectTests
             'every command run as another user gets umask 022, and proxy settings by name'
         );
         TestCase::assert(
-            preg_match('/\bsudo\b[^\n]*\benv\s+\$\{?carry|\w+_proxy=\$\{!/', $code) !== 1,
+            preg_match('/\b(sudo|env)\b[^\n]*\b\w*_proxy=|\benv\s+\$\{?carry|\w+_proxy=\$\{!/i', $code) !== 1,
             'no proxy value is ever put on a command line'
         );
 
+        // Every command run as the web user gets umask 022, including the
+        // wrappers this script writes out: sudo's PAM session gives that user
+        // 0002. Judged on logical lines, with quoted text set aside.
+        $joined = preg_replace('/\\\\\n\s*/', ' ', $code);
+        $bare = [];
+        foreach (explode("\n", (string) $joined) as $line) {
+            $plain = (string) preg_replace(["/'[^']*'/", '/"(?:[^"\\\\]|\\\\.)*"/'], ["''", '""'], $line);
+            if (preg_match('/\bsudo\b[^;|&\n]*\s-u\b/', $plain) === 1 && !str_contains($line, 'umask 022')) {
+                $bare[] = trim($line);
+            }
+        }
+        TestCase::assert($bare === [], 'nothing runs as the web user without umask 022',
+            implode(' | ', array_slice($bare, 0, 3)));
+
         // A trap on INT that only cleaned up returned to the script, which
-        // carried on to "AK Connect is installed".
-        TestCase::assert(
-            preg_match("/trap 'exit 130' INT/", $code) === 1 && preg_match("/trap 'exit 143' TERM/", $code) === 1,
-            'an interrupted run stops; it does not clean up and carry on'
-        );
+        // carried on to "AK Connect is installed". The LAST trap naming each
+        // signal is the one in force, and it has to exit.
+        $lastTrap = [];
+        foreach (explode("\n", $code) as $line) {
+            if (preg_match("/^\s*trap\s+('[^']*'|\S+)\s+(.+)$/", $line, $t) === 1) {
+                foreach (preg_split('/\s+/', trim($t[2])) as $signal) {
+                    $lastTrap[$signal] = $t[1];
+                }
+            }
+        }
+        $stops = true;
+        foreach (['INT', 'TERM', 'HUP'] as $signal) {
+            $stops = $stops && isset($lastTrap[$signal]) && str_contains($lastTrap[$signal], 'exit');
+        }
+        TestCase::assert($stops, 'an interrupted run stops; it does not clean up and carry on',
+            $stops ? '' : 'traps in force: ' . json_encode($lastTrap));
 
         // The setup link for an account nobody has taken up, from this
         // release's copy: an older panel's would ignore the option.
+        // Asked for on every run — the helper decides whether the account is
+        // unclaimed — not only on the run that created it, which was the defect.
         TestCase::assert(
-            str_contains($code, '"$SRC_DIR/cli/setup-link.php"') && str_contains($code, '--if-unclaimed'),
+            preg_match('/^SETUP_LINK="\$\(as_user [^\n]*"\$SRC_DIR\/cli\/setup-link\.php"/m', $code) === 1
+                && preg_match('/\[ "\$INSTALLED_NOW" -eq 1 \] \|\| SETUP_LINK_ARGS\+=\(--if-unclaimed\)/', $code) === 1,
             'a re-run issues the setup link an unfinished first run never printed'
         );
 
@@ -1344,6 +1386,11 @@ if (($argv[3] ?? '') === 'cookie') {
     $_COOKIE[App\Updater\MaintenanceMode::cookieName()] = 'a-token-from-the-last-window';
 } elseif (($argv[3] ?? '') === 'session') {
     $_SESSION['maintenance_bypass'] = 'a-token-from-the-last-window';
+} elseif (($argv[3] ?? '') === 'next-page') {
+    // The page after the link: this window's token in the session, the last
+    // window's in the cookie, and no link in the URL.
+    $_COOKIE[App\Updater\MaintenanceMode::cookieName()] = 'a-token-from-the-last-window';
+    $_SESSION['maintenance_bypass'] = (string) ($argv[4] ?? '');
 }
 require $root . '/app/Core/helpers.php';
 App\Core\Config::load($root . '/config/config.php');
@@ -1374,7 +1421,120 @@ PHP;
             'stale cookie: ' . self::firstLine($staleCookie) . '; stale session: ' . self::firstLine($staleSession)
         );
 
+        // And on the next page, with no link: the stale cookie is still sent
+        // first, and used to hide the good token the link put in the session.
+        $nextPage = self::runAs([], [PHP_BINARY, $script, $tree, '', 'next-page', $token]);
+        TestCase::assert(
+            str_contains($nextPage, 'LET-THROUGH'),
+            'and so is every page after it, though the stale cookie is still sent',
+            self::firstLine($nextPage)
+        );
+
         self::removeTree($tree);
+    }
+
+    /**
+     * No secret on a screen, in a log, or on a command line.
+     *
+     * The installer printed the coordinator's shared secret — install-edge.sh's
+     * "put these values into the panel" — and then set it itself; it was pasted
+     * into a chat from there. And several scripts put secrets where ps shows
+     * them to every user on the machine: jq --arg, openssl -macopt, mysql -e.
+     */
+    private static function secretsStayOffScreens(): void
+    {
+        TestCase::group('Defect — no secret is printed or put on a command line');
+
+        $read = static fn (string $f): string => (string) @file_get_contents(APP_ROOT . '/' . $f);
+        $installEdge = $read('deploy/install-edge.sh');
+        $addRelay = $read('deploy/add-relay.sh');
+        $installer = $read('deploy/getting-started.sh');
+        $upgrade = $read('deploy/upgrade-edge.sh');
+        $rotate = $read('deploy/rotate-secret.sh');
+
+        TestCase::assert(
+            !str_contains($installEdge, '$(cat "$ETC_DIR/coordinator.secret.for-panel"')
+                && str_contains($installEdge, '--panel-configured-by-caller')
+                && str_contains($installer, '--panel-configured-by-caller'),
+            'install-edge.sh never prints the shared secret, and prints no manual steps when the installer wires the panel'
+        );
+
+        $done = preg_match('/cat <<DONE(.*?)\nDONE/s', $addRelay, $m) === 1 ? $m[1] : $addRelay;
+        TestCase::assert(!str_contains($done, '$RELAY_SECRET'), 'add-relay.sh does not print the relay secret');
+
+        TestCase::assert(
+            preg_match('/--arg\s+secret/', $installer) !== 1 && str_contains($installer, 'env.AKCONNECT_COORD_SECRET'),
+            'the installer hands the secret to jq in its environment, not its arguments'
+        );
+        TestCase::assert(
+            preg_match('/mysql -e "[^"]*IDENTIFIED BY/s', $installer) !== 1,
+            'the database password goes to mysql on standard input'
+        );
+        TestCase::assert(
+            preg_match('/^[^#\n]*-macopt/m', $upgrade) !== 1 && str_contains($upgrade, 'AKCONNECT_SIGN_KEY="$SECRET" python3'),
+            'upgrade-edge.sh signs with the key in python\'s environment, not on openssl\'s command line'
+        );
+
+        TestCase::assert(
+            $rotate !== '' && str_contains($installer, 'deploy/rotate-secret.sh" /usr/local/bin/akconnect-rotate-secret'),
+            'akconnect-rotate-secret ships and the installer puts it in place'
+        );
+        $exposed = preg_match('/(echo|--arg|-macopt|mysql -e)[^\n]*\$(NEW|OLD)_(SECRET|RELAY)/', $rotate) === 1
+            || preg_match('/ENVIRON\["AKCONNECT_FROM"\]/', $rotate) !== 1;
+        TestCase::assert(!$exposed, 'and it moves secrets by standard input and environment only');
+        TestCase::assert(
+            str_contains($rotate, 'panel_takes "$NEW_SECRET"')
+                && strpos($rotate, 'panel_takes "$NEW_SECRET"') < strpos($rotate, 'replace_line "$COORD_ENV" AKCONNECT_COORDINATOR_SECRET')
+                && strpos($rotate, 'replace_line "$COORD_ENV" AKCONNECT_COORDINATOR_SECRET') < strpos($rotate, 'systemctl restart akconnect-coordinator'),
+            'the panel is changed first, then the files, then the coordinator restarted'
+        );
+        TestCase::assert(
+            str_contains($rotate, 'FOR_PANEL') && str_contains($rotate, 'coordinator.secret.for-panel'),
+            'and coordinator.secret.for-panel is rewritten too, so a re-run of the installer cannot put the old value back'
+        );
+
+        // | grep -q after something that writes in pieces fails at random under
+        // pipefail (SIGPIPE, status 141): an extension, a module or a listener
+        // that is there was reported missing.
+        $racy = [];
+        foreach (glob(APP_ROOT . '/deploy/*.sh') ?: [] as $file) {
+            foreach (explode("\n", (string) file_get_contents($file)) as $n => $line) {
+                if (preg_match('/^\s*#/', $line) !== 1
+                    && preg_match('/(-m|-M|\bss -l\w*|ufw status|mysql [^|]*)\s*2>\/dev\/null\s*\|\s*grep\s+-\w*q/', $line) === 1) {
+                    $racy[] = basename($file) . ':' . ($n + 1);
+                }
+            }
+        }
+        TestCase::assert($racy === [], 'no | grep -q after a command that writes its list in pieces',
+            implode(', ', $racy));
+    }
+
+    /**
+     * Root never changes a mode inside the web user's tree.
+     *
+     * The tree is the web user's to write, so anything in it can be a link the
+     * web user planted, and chmod as root follows it: an index entry that was
+     * a link to /etc/akconnect/coordinator.env was made 0755.
+     */
+    private static function installerRootNeverActsInsideTheWebTree(): void
+    {
+        TestCase::group('Defect — root does not chmod through the web user\'s links');
+
+        $script = (string) @file_get_contents(APP_ROOT . '/deploy/getting-started.sh');
+        $asRoot = [];
+        foreach (explode("\n", $script) as $n => $line) {
+            if (preg_match('/^\s*#/', $line) === 1) {
+                continue;
+            }
+            if (preg_match('/\bchmod\b/', $line) === 1
+                && (str_contains($line, '$PANEL_DIR') || str_contains($line, '$repo/'))
+                && !str_contains($line, 'as_user') && !str_contains($line, 'as_owner')
+                && preg_match('/^\s*(say|warn|die|printf|ok)\b|^\s+sudo chmod o\+rX/', $line) !== 1) {
+                $asRoot[] = ($n + 1) . ': ' . trim($line);
+            }
+        }
+        TestCase::assert($asRoot === [], 'every mode change in the panel tree is made as the web user',
+            implode(' | ', array_slice($asRoot, 0, 3)));
     }
 
     private static function chownTree(string $path, string $user): void

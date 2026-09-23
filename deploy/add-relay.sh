@@ -129,7 +129,12 @@ cat <<DONE
      AKCONNECT_RELAYS and add this one after a comma:
 
        AKCONNECT_RELAYS=<existing>,$NAME:$REGION:$PUBLIC_HOST:9000
-       AKCONNECT_RELAY_SECRET_$ENV_NAME=$RELAY_SECRET
+       AKCONNECT_RELAY_SECRET_$ENV_NAME=<this relay's secret>
+
+     The secret is not printed here. Read it from this machine when you are
+     ready to paste it, straight into that file on the edge, and nowhere else:
+
+       sudo sed -n 's/^AKCONNECT_RELAY_SECRET=//p' $ETC_DIR/relay.env
 
      then:  systemctl restart akconnect-coordinator
 
@@ -137,7 +142,7 @@ cat <<DONE
 
        $NAME        host $PUBLIC_HOST        region $REGION
 
-  The secret above is the only credential this machine holds. It is not the
+  That secret is the only credential this machine holds. It is not the
   coordinator's secret and it is not the panel's: it verifies tickets for this
   relay and nothing else.
 

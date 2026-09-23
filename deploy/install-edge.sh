@@ -11,6 +11,16 @@
 #
 # It is safe to run twice: everything it does is idempotent, and running it
 # again after changing a flag is how you change a setting.
+#
+# It never prints a secret. The one the panel needs is in a root-only file,
+# and this says which; the shared secret used to be printed here, into the
+# terminal's scrollback and whatever captured the run, and from there it was
+# pasted into a chat.
+#
+#   --panel-configured-by-caller   the caller writes the coordinator's settings
+#                                  into the panel itself (getting-started.sh
+#                                  does), so nothing is printed about doing it
+#                                  by hand
 set -uo pipefail
 
 PANEL=""
@@ -22,6 +32,7 @@ BIN_DIR="/usr/local/bin"
 # no. See akconnect_may_configure_apache.
 CONFIGURE_APACHE=""
 ETC_DIR="/etc/akconnect"
+PANEL_BY_CALLER=0
 
 die()  { printf '\n  \033[31m✗ %s\033[0m\n\n' "$*" >&2; exit 1; }
 say()  { printf '  %s\n' "$*"; }
@@ -38,6 +49,7 @@ while [ $# -gt 0 ]; do
         --relay-name) akconnect_need_value --relay-name "$#"; RELAY_NAME="$2"; shift 2 ;;
         --public-host) akconnect_need_value --public-host "$#"; PUBLIC_HOST="$2"; shift 2 ;;
         --region) akconnect_need_value --region "$#"; REGION="$2"; shift 2 ;;
+        --panel-configured-by-caller) PANEL_BY_CALLER=1; shift ;;
         *) die "unknown option: $1" ;;
     esac
 done
@@ -203,6 +215,12 @@ case "$apache_state" in
         say "deploy/upgrade-edge.sh --configure-apache, whenever you want it."
         ;;
     5)
+        if [ "$CONFIGURE_APACHE" = "0" ]; then
+            # Said in as many words: whoever passed it carries /fallback some
+            # other way (getting-started.sh: Caddy), and the paragraph below
+            # would tell them devices cannot connect when they can.
+            say "Apache was not touched (--no-configure-apache)."
+        else
         say "Apache was not touched, because --configure-apache was not given."
         say ""
         say "Devices on networks that pass nothing but 443 will not connect until it is."
@@ -210,6 +228,7 @@ case "$apache_state" in
         say "deploy/upgrade-edge.sh --configure-apache). It edits one virtual host —"
         say "the one whose ServerName is this panel's domain — shows you the file and"
         say "the exact lines first, and asks. deploy/remove-apache-fallback.sh undoes it."
+        fi
         ;;
     *)
         die "Apache is here but would not take the fallback configuration, and everything
@@ -219,6 +238,12 @@ case "$apache_state" in
 esac
 
 step "what to do next"
+
+if [ "$PANEL_BY_CALLER" -eq 1 ]; then
+    say "the panel's coordinator settings are written by the script that ran this"
+
+    exit 0
+fi
 
 cat <<NEXT
 
@@ -230,10 +255,13 @@ cat <<NEXT
     TCP  443            the panel, and the HTTPS fallback on /fallback
     TCP  22             ssh, if it is not already
 
-  Then put these two values into the panel, under Settings → Coordinator:
+  Then put these values into the panel, under Settings → Coordinator:
 
     Public key      $(cat "$ETC_DIR/coordinator.pub" 2>/dev/null)
-    Shared secret   $(cat "$ETC_DIR/coordinator.secret.for-panel" 2>/dev/null)
+    Shared secret   not shown here. Copy it straight from the file into the field:
+                        sudo cat $ETC_DIR/coordinator.secret.for-panel
+                    It is a password: anyone who has it can talk to the panel as
+                    the coordinator. Do not paste it anywhere else.
     Host            $PUBLIC_HOST
     Port            8443
 

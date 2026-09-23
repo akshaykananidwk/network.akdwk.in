@@ -30,28 +30,34 @@ final class MaintenanceMiddleware
             return null;
         }
 
-        $bypass = $request->cookie(MaintenanceMode::cookieName())
-            ?? (is_string(Session::get('maintenance_bypass')) ? (string) Session::get('maintenance_bypass') : null);
+        // Every token the browser offers is tried, not the first one found.
+        //
+        // Each maintenance window has a token of its own. A browser keeps the
+        // last window's — in its session, or in the 1-hour cookie a panel
+        // update sets — and it is stale in the next. When only the first
+        // stored value was tried, a stale cookie hid a good session token, and
+        // the second drill of the day was locked out by the first: the link
+        // opened one page and the next click answered 503.
+        $offered = [
+            $request->cookie(MaintenanceMode::cookieName()),
+            is_string(Session::get('maintenance_bypass')) ? (string) Session::get('maintenance_bypass') : null,
+        ];
 
         // The link `php cli/maintenance.php on` prints: ?maintenance_bypass=<token>.
         // It used to be printed and never read, so the one way in the command
         // offered answered 503 like everything else. A valid token is kept in
         // the session, so the rest of the visit does not need it in the URL.
-        //
-        // Looked at whatever is stored already. Each maintenance window has a
-        // token of its own, and the one a browser kept from the last window —
-        // in its session, or the cookie a panel update sets — is stale in the
-        // next: when a stored value stopped the link being read, the second
-        // drill of the day was locked out by the first.
         $fromLink = $request->query('maintenance_bypass');
         if (is_string($fromLink) && $fromLink !== ''
             && $maintenance->allows('', $fromLink)) {
             Session::set('maintenance_bypass', $fromLink);
-            $bypass = $fromLink;
+            $offered[] = $fromLink;
         }
 
-        if ($maintenance->allows($request->ip(), $bypass)) {
-            return null;
+        foreach ($offered as $bypass) {
+            if ($maintenance->allows($request->ip(), is_string($bypass) ? $bypass : null)) {
+                return null;
+            }
         }
 
         $retryAfter = $maintenance->retryAfter();

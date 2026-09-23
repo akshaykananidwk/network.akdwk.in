@@ -51,7 +51,7 @@ WINTUN_ZIP="${WINTUN_ZIP:-/var/cache/akconnect/wintun.zip}"
 # line reads as 0 and is therefore never handed over to, which is exactly the
 # property wanted: the guard and the revision were added together, so anything
 # lacking the revision also lacks the guard.
-SCRIPT_REVISION=3
+SCRIPT_REVISION=4
 
 # On by default since 1.9.5. --no-timer turns it off for an operator who
 # manages their own scheduling.
@@ -420,11 +420,11 @@ esac
 
 pass "go" "${GO_VERSION:-unknown} at $GO_BIN"
 
-for tool in systemctl curl git openssl python3; do
+for tool in systemctl curl git python3; do
     command -v "$tool" >/dev/null 2>&1 \
         || die "$tool is not installed. Install it with:  apt install $tool"
 done
-pass "tools" "systemctl, curl, git, openssl, python3"
+pass "tools" "systemctl, curl, git, python3"
 
 # src_git <arguments...>: git in the checkout, as whoever owns it.
 #
@@ -502,6 +502,13 @@ if [ -n "$SRC_OWNER" ] && [ "$SRC_OWNER" != "root" ]; then
         fi
         for gitdir in "$WT_GITDIR" "$WT_COMMON"; do
             [ -n "$gitdir" ] && [ -d "$gitdir" ] || continue
+            # Only a git directory that is the owner's own. The common
+            # directory is the main repository's .git: if that is root's (the
+            # default checkout, with a login user's worktree beside it) or a
+            # third user's, its root-owned files are its owner's config, hooks
+            # and objects, not leftovers — and handing them to the worktree's
+            # owner broke the main checkout and gave them its hooks.
+            [ "$(stat -L -c %u "$gitdir" 2>/dev/null)" = "$SRC_UID" ] || continue
             REPAIRED="$(find -H "$gitdir" -uid 0 -print 2>/dev/null | wc -l)"
             if [ "$REPAIRED" -gt 0 ]; then
                 find -H "$gitdir" -uid 0 -exec chown "$SRC_OWNER" {} + 2>/dev/null
@@ -555,10 +562,18 @@ say "panel: $PANEL"
 #
 # A function that returns one value through stdout and another through a global
 # is asking for this. Both values now come from the caller, where they are used.
+#
+# In python, with the key in its environment. It was `openssl dgst -macopt
+# key:$SECRET`, which put the shared secret on openssl's command line — and
+# /proc/<pid>/cmdline is readable by every user on the machine, on a server
+# that on the production host carries thirty other people's websites, once an
+# hour, every hour. A process's environment is readable by its owner only.
 sign() {
-    { printf '%s\n' "$1"; cat "$2"; } \
-        | openssl dgst -sha256 -mac HMAC -macopt "key:$SECRET" -hex \
-        | awk '{print $NF}'
+    AKCONNECT_SIGN_KEY="$SECRET" python3 -c '
+import hashlib, hmac, os, sys
+with open(sys.argv[2], "rb") as body:
+    message = sys.argv[1].encode() + b"\n" + body.read()
+print(hmac.new(os.environ["AKCONNECT_SIGN_KEY"].encode(), message, hashlib.sha256).hexdigest())' "$1" "$2"
 }
 
 # send_signed <method> <path> <body-file|""> <out> [curl args...]
@@ -783,63 +798,98 @@ fi
 
 WANT_BRANCH="${TARGET_BRANCH:-main}"
 
+# What the panel names is data from a web application, and this runs as root.
+# The panel chooses WHICH release is built, never what code: a commit is a full
+# commit id, a branch is a plain branch name, and the commit has to be on that
+# branch at origin (below). Before 1.9.7-dev.22 a commit the branch did not
+# contain was fetched by its id — and GitHub serves any pull request's commits
+# that way, so whoever could write the panel's settings could have had every
+# edge build, and run as root, a stranger's pull request; a value beginning
+# with "-" was read by git as an option.
+if [ -n "$TARGET_COMMIT" ] && ! printf '%s' "$TARGET_COMMIT" | grep -Eq '^([0-9a-f]{40}|[0-9a-f]{64})$'; then
+    die "the panel names '$TARGET_COMMIT' as its commit, which is not a full commit id.
+    Nothing is fetched or built from it. Check Platform → Updates on the panel."
+fi
+case "$WANT_BRANCH" in
+    ""|-*|*..*|*[!A-Za-z0-9._/-]*)
+        die "the panel names '$WANT_BRANCH' as its branch, which is not a branch name.
+    Nothing is fetched or built from it. Check Platform → Updates on the panel." ;;
+esac
+
 # With an explicit refspec. A clone made with --branch (as getting-started.sh
 # makes it) or --depth is single-branch: `git fetch origin <other>` then updates
 # FETCH_HEAD and nothing else, origin/<other> never exists, and every later
 # step failed — while the table printed "source fetched" in green with an
 # empty commit, because nothing checked the ref it had fallen back to.
 #
-# Tags with a forced refspec: `--tags` refuses a tag that has moved on origin
-# ("would clobber existing tag"), and one re-pointed release tag would have
-# failed every edge's fetch every hour until somebody deleted it by hand.
+# No tags, and no pruning: nothing here reads a tag, a tag moved on origin made
+# `--tags` refuse ("would clobber existing tag"), and fetching tags by refspec
+# let a login user's fetch.prune delete every tag of their own, every hour.
+SHALLOW=0
+[ "$(src_git rev-parse --is-shallow-repository 2>/dev/null)" = "true" ] && SHALLOW=1
+
 fetched=0
+BRANCH_GONE=0
 FETCH_SAYS=""
 for attempt in 1 2 3 4; do
-    if FETCH_SAYS="$(src_git fetch --quiet origin \
-            "+refs/heads/$WANT_BRANCH:refs/remotes/origin/$WANT_BRANCH" \
-            "+refs/tags/*:refs/tags/*" 2>&1)"; then
+    if FETCH_SAYS="$(src_git fetch --quiet --no-tags --no-prune origin \
+            "+refs/heads/$WANT_BRANCH:refs/remotes/origin/$WANT_BRANCH" 2>&1)"; then
         fetched=1
         break
     fi
-    # A branch that is not there is not a network fault; waiting will not
-    # bring it back.
-    printf '%s\n' "$FETCH_SAYS" | grep -q "couldn't find remote ref" && break
+    # A branch that is not there is not a network fault, and waiting will not
+    # bring it back. Asked of origin by exit status, not read from git's
+    # message: that is translated, and on an edge whose locale was German
+    # the words this used to look for never appeared.
+    src_git ls-remote --exit-code origin "refs/heads/$WANT_BRANCH" >/dev/null 2>&1
+    if [ $? -eq 2 ]; then
+        BRANCH_GONE=1
+        break
+    fi
     say "fetch failed; retrying in $((attempt * 2))s"
     sleep $((attempt * 2))
 done
 
-# The branch can be gone while the release is not: a release branch is merged
-# and deleted, and the panel's commit is on main. The panel names the commit,
-# so that is what is fetched — by name, which is what it is built from anyway.
-if [ "$fetched" -ne 1 ] && [ -n "$TARGET_COMMIT" ] \
-        && printf '%s\n' "$FETCH_SAYS" | grep -q "couldn't find remote ref"; then
-    say "$WANT_BRANCH is no longer on origin; fetching the panel's commit ${TARGET_COMMIT:0:12} by name"
-    if src_git rev-parse --quiet --verify "$TARGET_COMMIT^{commit}" >/dev/null 2>&1 \
-            || FETCH_SAYS="$(src_git fetch --quiet origin "$TARGET_COMMIT" 2>&1)"; then
-        fetched=1
-    fi
+# Where the panel's commit has to be: its branch, or — when that branch is gone,
+# a release branch merged and deleted — origin's default branch, which the
+# release was merged into.
+TIP="refs/remotes/origin/$WANT_BRANCH"
+TIP_FROM="refs/heads/$WANT_BRANCH"
+if [ "$fetched" -ne 1 ] && [ "$BRANCH_GONE" -eq 1 ] && [ -n "$TARGET_COMMIT" ]; then
+    say "$WANT_BRANCH is no longer on origin; looking for the panel's commit ${TARGET_COMMIT:0:12} on origin's default branch"
+    TIP="refs/akconnect/origin-default"
+    TIP_FROM="HEAD"
+    FETCH_SAYS="$(src_git fetch --quiet --no-tags --no-prune origin "+HEAD:$TIP" 2>&1)" && fetched=1
 fi
 
 [ "$fetched" -eq 1 ] || die "could not fetch $WANT_BRANCH from $(src_git remote get-url origin 2>/dev/null). git said:
 $(printf '%s\n' "$FETCH_SAYS" | sed 's/^/        /')"
 
-# The panel's own commit when it names one — fetched by name if the branch
-# fetch did not bring it, which a shallow clone may not have.
-if [ -n "$TARGET_COMMIT" ] && ! src_git rev-parse --quiet --verify "$TARGET_COMMIT^{commit}" >/dev/null 2>&1; then
-    src_git fetch --quiet origin "$TARGET_COMMIT" >/dev/null 2>&1 || true
+REF=""
+if [ -n "$TARGET_COMMIT" ]; then
+    # A shallow clone may not reach back to it: deepened along the same branch,
+    # never fetched by its id.
+    if ! src_git cat-file -e "$TARGET_COMMIT^{commit}" 2>/dev/null && [ "$SHALLOW" -eq 1 ]; then
+        src_git fetch --quiet --no-tags --no-prune --deepen=1000 origin "+$TIP_FROM:$TIP" >/dev/null 2>&1 || true
+    fi
+
+    if src_git cat-file -e "$TARGET_COMMIT^{commit}" 2>/dev/null; then
+        src_git merge-base --is-ancestor "$TARGET_COMMIT" "$TIP" 2>/dev/null \
+            || die "the panel names commit ${TARGET_COMMIT:0:12}, which is not on ${TIP#refs/remotes/} at $(src_git remote get-url origin 2>/dev/null).
+    Nothing is built from a commit origin's branch does not contain. If the panel was
+    installed from another branch, set it under Platform → Updates."
+        REF="$TARGET_COMMIT"
+    fi
 fi
 
-REF=""
-if [ -n "$TARGET_COMMIT" ] && src_git rev-parse --quiet --verify "$TARGET_COMMIT^{commit}" >/dev/null 2>&1; then
-    REF="$TARGET_COMMIT"
-elif src_git rev-parse --quiet --verify "origin/$WANT_BRANCH^{commit}" >/dev/null 2>&1; then
-    REF="origin/$WANT_BRANCH"
-    [ -n "$TARGET_COMMIT" ] && say "the panel's commit ${TARGET_COMMIT:0:12} is not in the repository; building the tip of $WANT_BRANCH"
-else
-    die "the panel says it is on $WANT_BRANCH${TARGET_COMMIT:+ at ${TARGET_COMMIT:0:12}}, and $(src_git remote get-url origin 2>/dev/null) has neither.
+if [ -z "$REF" ] && [ "$BRANCH_GONE" -ne 1 ] && src_git rev-parse --quiet --verify "$TIP^{commit}" >/dev/null 2>&1; then
+    REF="$TIP"
+    [ -n "$TARGET_COMMIT" ] && say "the panel's commit ${TARGET_COMMIT:0:12} is not on $WANT_BRANCH at origin; building the tip of $WANT_BRANCH"
+fi
+
+[ -n "$REF" ] || die "the panel says it is on $WANT_BRANCH${TARGET_COMMIT:+ at ${TARGET_COMMIT:0:12}}, and $(src_git remote get-url origin 2>/dev/null) has neither.
     A panel that says \"main\" and was never told otherwise is the usual cause:
     check Platform → Updates for the repository and branch it was installed from."
-fi
 
 pass "source fetched" "$(src_git rev-parse --short "$REF") is available locally"
 
@@ -954,7 +1004,7 @@ check_fallback() {
     # shellcheck source=lib-edge-probe.sh
     . "$SRC_DIR/deploy/lib-edge-probe.sh"
 
-    if ss -ltn 2>/dev/null | grep -q '127.0.0.1:9443 '; then
+    if ss -ltn 2>/dev/null | grep '127.0.0.1:9443 ' >/dev/null; then
         pass "relay fallback listener" "127.0.0.1:9443"
     else
         fail "relay fallback listener" "nothing is bound to 127.0.0.1:9443"
@@ -1038,7 +1088,7 @@ report_to_panel() {
 # bind is the failure mode this catches.
 check_listening() {
     local label=$1 port=$2
-    if ss -lun 2>/dev/null | grep -q ":$port " || ss -ltn 2>/dev/null | grep -q ":$port "; then
+    if ss -lun 2>/dev/null | grep ":$port " >/dev/null || ss -ltn 2>/dev/null | grep ":$port " >/dev/null; then
         pass "$label listening" "udp/$port"
     else
         fail "$label listening" "nothing is bound to udp/$port"
@@ -1060,9 +1110,9 @@ check_services() {
     done
 
     COORD_PORT="$(sed -n 's/.*--listen[= ]:\?\([0-9]*\).*/\1/p' \
-        /etc/systemd/system/akconnect-coordinator.service 2>/dev/null | head -1)"
+        "${AKCONNECT_SYSTEMD_DIR:-/etc/systemd/system}/akconnect-coordinator.service" 2>/dev/null | head -1)"
     RELAY_PORT="$(sed -n 's/.*--control[= ]:\?\([0-9]*\).*/\1/p' \
-        /etc/systemd/system/akconnect-relay.service 2>/dev/null | head -1)"
+        "${AKCONNECT_SYSTEMD_DIR:-/etc/systemd/system}/akconnect-relay.service" 2>/dev/null | head -1)"
 
     check_listening "coordinator" "${COORD_PORT:-8443}"
     check_listening "relay" "${RELAY_PORT:-9000}"
@@ -1101,21 +1151,37 @@ running_its_binary() {
 # place. A panel too old to say what it has published never looks current,
 # and gets the full run.
 #
-# Decided here, acted on once the checkout is on the release, below: an edge
-# with nothing to rebuild still checks its services and its fallback, with the
-# release's own libraries, and tells the panel what is running.
+# Decided in parts, because each part is its own piece of work and a run
+# does only the parts that are not done. SERVICES_CURRENT alone is what saves
+# the rebuild and the restart: the installer builds the edge at the panel's
+# release and runs this straight after, and the first version of this script
+# rebuilt and restarted both services because the Windows installers were not
+# published yet — two builds of the same release, back to back, on every new
+# server. Now that run builds the installers and nothing else.
+#
+# Acted on once the checkout is on the release, below: the unit files are
+# compared with the release's own, and an edge with nothing to rebuild still
+# checks its services and its fallback and tells the panel what is running.
 PUBLISHED_SETUP="$(json "$RELEASE_JSON" published_setup)"
 PUBLISHED_AGENT="$(json "$RELEASE_JSON" published_agent)"
 UNITS_DIR="${AKCONNECT_SYSTEMD_DIR:-/etc/systemd/system}"
 
-ALREADY_CURRENT=0
-if [ "$CHECK_ONLY" -ne 1 ] && [ "$FORCE" -ne 1 ] \
+SERVICES_CURRENT=0
+if [ "$FORCE" -ne 1 ] \
         && [ "$CURRENT_COORD" = "$TARGET_VERSION" ] && [ "$CURRENT_RELAY" = "$TARGET_VERSION" ] \
-        && { [ "$SKIP_PACK" -eq 1 ] || { [ "$PUBLISHED_SETUP" = "$TARGET_VERSION" ] \
-                && [ "$PUBLISHED_AGENT" = "$TARGET_VERSION" ]; }; } \
-        && { [ "$INSTALL_TIMER" -ne 1 ] || [ -f "$UNITS_DIR/akconnect-upgrade.timer" ]; } \
         && running_its_binary coordinator && running_its_binary relay; then
-    ALREADY_CURRENT=1
+    SERVICES_CURRENT=1
+fi
+
+PACK_CURRENT=0
+if [ "$SKIP_PACK" -eq 1 ] || { [ "$FORCE" -ne 1 ] && [ "$PUBLISHED_SETUP" = "$TARGET_VERSION" ] \
+        && [ "$PUBLISHED_AGENT" = "$TARGET_VERSION" ]; }; then
+    PACK_CURRENT=1
+fi
+
+TIMER_CURRENT=0
+if [ "$INSTALL_TIMER" -ne 1 ] || [ -f "$UNITS_DIR/akconnect-upgrade.timer" ]; then
+    TIMER_CURRENT=1
 fi
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
@@ -1172,6 +1238,59 @@ if [ "$REPO_VERSION" != "$TARGET_VERSION" ]; then
 fi
 pass "source matches the panel" "$REPO_VERSION at $BUILT_FROM"
 
+# The unit files come with the release, not only the binaries.
+#
+# They carry the flags a version needs, and 1.9.6 is the case that proves it:
+# the relay's HTTPS fallback is switched on by --ws-listen, and an upgrade that
+# replaced the binary and left a 1.9.5 unit behind would install the fallback
+# and never start it. Nobody would notice until a device on a blocked network
+# failed, which is months later and somewhere else.
+UNITS_CURRENT=1
+for svc in coordinator relay; do
+    unit="$SRC_DIR/deploy/systemd/akconnect-$svc.service"
+    [ -f "$unit" ] || continue
+    cmp -s "$unit" "$UNITS_DIR/akconnect-$svc.service" || UNITS_CURRENT=0
+done
+
+# refresh_units installs the release's unit files where they differ.
+refresh_units() {
+    local svc unit changed=0
+    for svc in coordinator relay; do
+        unit="$SRC_DIR/deploy/systemd/akconnect-$svc.service"
+        [ -f "$unit" ] || continue
+
+        if ! cmp -s "$unit" "$UNITS_DIR/akconnect-$svc.service"; then
+            install -D -m 644 "$unit" "$UNITS_DIR/akconnect-$svc.service" \
+                || die "could not install the akconnect-$svc unit"
+            changed=1
+        fi
+    done
+
+    if [ "$changed" -eq 1 ]; then
+        systemctl daemon-reload || die "systemctl daemon-reload failed"
+        pass "unit files" "refreshed from $BUILT_FROM"
+    else
+        pass "unit files" "already current"
+    fi
+}
+
+# restart_services restarts both and gives them a moment before they are
+# judged: a service that is still binding is not a service that failed.
+restart_services() {
+    local svc
+    for svc in coordinator relay; do
+        systemctl restart "akconnect-$svc" || die "systemctl restart akconnect-$svc failed.
+    Look at: journalctl -u akconnect-$svc -n 50"
+    done
+    sleep 3
+}
+
+ALREADY_CURRENT=0
+if [ "$SERVICES_CURRENT" -eq 1 ] && [ "$UNITS_CURRENT" -eq 1 ] \
+        && [ "$PACK_CURRENT" -eq 1 ] && [ "$TIMER_CURRENT" -eq 1 ]; then
+    ALREADY_CURRENT=1
+fi
+
 if [ "$ALREADY_CURRENT" -eq 1 ]; then
     # On the release and running it, so a check that fails below is not "the
     # edge is NOT upgraded": that verdict sends an operator to undo work that
@@ -1197,12 +1316,30 @@ if [ "$ALREADY_CURRENT" -eq 1 ]; then
     exit 0
 fi
 
+# Where anything built in this run goes — the services below, or only the
+# Windows installers when the services are current. Made before either, so
+# the installers' step has it however the services were dealt with.
+BUILD_DIR="$(mktemp -d)"
+keep "$BUILD_DIR"
+
+if [ "$SERVICES_CURRENT" -eq 1 ]; then
+    # Running the release already: not rebuilt, not restarted — unless the
+    # release's unit files differ, which takes a restart and no build.
+    step "the coordinator and the relay"
+    SERVICES_INSTALLED=1
+    pass "services current" "both run $TARGET_VERSION already — not rebuilt"
+
+    if [ "$UNITS_CURRENT" -eq 1 ]; then
+        pass "unit files" "already current — not restarted"
+    else
+        refresh_units
+        restart_services
+    fi
+else
+
 # ----------------------------------------------------------------- the build
 
 step "building the coordinator and the relay"
-
-BUILD_DIR="$(mktemp -d)"
-keep "$BUILD_DIR"
 
 # -buildvcs=false: the version is stamped explicitly, and go build otherwise
 # runs git on the checkout itself — as root, whoever owns it — and a refusal
@@ -1258,40 +1395,10 @@ done
 pass "installed" "$BIN_DIR/akconnect-{coordinator,relay}"
 SERVICES_INSTALLED=1
 
-# The unit files come with the release, not only the binaries.
-#
-# They carry the flags a version needs, and 1.9.6 is the case that proves it:
-# the relay's HTTPS fallback is switched on by --ws-listen, and an upgrade that
-# replaced the binary and left a 1.9.5 unit behind would install the fallback
-# and never start it. Nobody would notice until a device on a blocked network
-# failed, which is months later and somewhere else.
-units_changed=0
-for svc in coordinator relay; do
-    unit="$SRC_DIR/deploy/systemd/akconnect-$svc.service"
-    [ -f "$unit" ] || continue
+refresh_units
+restart_services
 
-    if ! cmp -s "$unit" "/etc/systemd/system/akconnect-$svc.service"; then
-        install -m 644 "$unit" "/etc/systemd/system/akconnect-$svc.service" \
-            || die "could not install the akconnect-$svc unit"
-        units_changed=1
-    fi
-done
-
-if [ "$units_changed" -eq 1 ]; then
-    systemctl daemon-reload || die "systemctl daemon-reload failed"
-    pass "unit files" "refreshed from $BUILT_FROM"
-else
-    pass "unit files" "already current"
 fi
-
-for svc in coordinator relay; do
-    systemctl restart "akconnect-$svc" || die "systemctl restart akconnect-$svc failed.
-    Look at: journalctl -u akconnect-$svc -n 50"
-done
-
-# Given a moment before being judged: a service that is still binding is not
-# a service that failed.
-sleep 3
 
 check_services
 
@@ -1316,6 +1423,8 @@ PACK_URL=""
 
 if [ "$SKIP_PACK" -eq 1 ]; then
     say "skipping the Windows installer (--skip-pack)"
+elif [ "$PACK_CURRENT" -eq 1 ]; then
+    pass "windows installer" "$PANEL already serves the $TARGET_VERSION installers — not rebuilt"
 else
     step "building the Windows installer for $PANEL"
 

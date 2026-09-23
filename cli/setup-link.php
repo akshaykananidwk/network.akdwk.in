@@ -113,7 +113,8 @@ cli_out('');
 cli_out('    account : ' . (string) $user['email']);
 cli_out('    expires : in ' . $minutes . ' minute' . ($minutes === 1 ? '' : 's'));
 cli_out('');
-cli_out('  Issuing another link cancels this one.');
+cli_out('  Do not share this link or paste it anywhere: whoever opens it first sets');
+cli_out('  the password and has the account. Issuing another link cancels this one.');
 cli_out('');
 
 exit(0);

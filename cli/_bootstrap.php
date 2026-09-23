@@ -145,8 +145,28 @@ function cli_lock(string $name): mixed
     // replaced even though it cannot be opened; refusing instead would stop
     // the five-minute worker, every five minutes, on exactly the servers
     // that were already affected.
-    if ($handle === false && is_file($path) && @unlink($path)) {
-        $handle = @fopen($path, 'c');
+    //
+    // Only when nobody holds it. A root run still going — a worker or a backup
+    // started before the update — holds its lock on that file, and deleting it
+    // and locking a new one let a second copy run beside it. Read-only is
+    // enough to ask: the file is 0644, and flock does not need write access.
+    // (One only root can read cannot be asked, and is replaced as before; the
+    // root runs that left these made them under umask 022, so 0644.)
+    if ($handle === false && is_file($path)) {
+        $probe = @fopen($path, 'r');
+        if ($probe !== false) {
+            $free = flock($probe, LOCK_EX | LOCK_NB);
+            if (!$free) {
+                fclose($probe);
+
+                return false;
+            }
+            flock($probe, LOCK_UN);
+            fclose($probe);
+        }
+        if (@unlink($path)) {
+            $handle = @fopen($path, 'c');
+        }
     }
 
     if ($handle === false) {

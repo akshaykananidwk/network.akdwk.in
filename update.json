@@ -1,10 +1,10 @@
 {
-  "version": "1.9.7-dev.21",
-  "released_at": "2026-09-23T16:59:00Z",
+  "version": "1.9.7-dev.22",
+  "released_at": "2026-09-23T17:41:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "The one-command installer was never run twice before it claimed to be safe to run twice. It is now, seven ways, and what that found is fixed: git refusing the panel tree on a re-run, the panel never receiving its coordinator key, upgrade-edge.sh unable to build any getting-started install (so no setup.exe), re-runs making the database password world-readable, and the edge rebuilding and restarting itself every hour.",
+  "notes": "Security release. The installer printed the coordinator's shared secret; nothing prints it now, and akconnect-rotate-secret replaces it everywhere in one step and lists what was published with it. The panel's commit is no longer fetched by id (a leaked secret could have had every edge build a stranger's pull request), the installer no longer chmods through links the web user can plant, and the first install builds the edge once, at the panel's release. The coordinator's last-known-answer fallback now actually runs, a single relay taken out of rotation is offered with its real secret, and failed usage reports no longer multiply the bill.",
   "migrations": [],
   "protected": [
     ".env",

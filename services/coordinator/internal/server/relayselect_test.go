@@ -144,6 +144,31 @@ func TestFailoverWithASingleRelayStillOffersIt(t *testing.T) {
 	}
 }
 
+// The last resort must hand out the relay as configured — with its secret. It
+// used to copy the name, endpoint and region and drop the Secret, so a relay
+// that complaints had taken out of rotation was offered with tickets signed
+// under an empty key, which the relay drops without a reply. The complaints
+// that followed kept it down, and a one-relay install stayed unrelayable.
+func TestTheOnlyRelayMarkedDownIsStillOfferedWithItsSecret(t *testing.T) {
+	s := fleet("only")
+	s.opts.Relays[0].Secret = []byte("the-relay-secret-0123456789abcdef")
+
+	// Two devices complaining is what takes a relay out of rotation.
+	s.health.complain("only", [32]byte{1})
+	s.health.complain("only", [32]byte{2})
+	if s.pickRelay(device(map[string]uint16{"only": 10}), nil, "") != nil {
+		t.Fatalf("precondition: two complaints should have taken the only relay out of rotation")
+	}
+
+	got := s.pickRelayAvoiding(device(map[string]uint16{"only": 10}), nil, "only")
+	if got == nil || got.Name != "only" {
+		t.Fatalf("want the single relay offered as the last resort, got %v", nameOf(got))
+	}
+	if string(got.Secret) != "the-relay-secret-0123456789abcdef" {
+		t.Fatalf("the last resort carries a %d-byte secret, not the relay's own: its tickets cannot verify", len(got.Secret))
+	}
+}
+
 // One device's complaint is a fact about that device's network. Taking a
 // working relay out of service on one report would be a denial of service
 // anyone could trigger.

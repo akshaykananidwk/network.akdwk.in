@@ -236,9 +236,14 @@ akconnect_apache_version() {
 # at all when the module is missing, and does it silently — which would leave
 # everybody believing the fallback was in place until a customer took a laptop
 # somewhere with a strict firewall, months later and in another city.
+#
+# grep reads to the end rather than -q. Under pipefail, -q stopping at the
+# first match can kill apachectl with SIGPIPE while it is still listing
+# modules — a long list on a server with thirty sites — and the pipeline then
+# fails, so a module that is loaded was reported missing, at random.
 akconnect_apache_has_module() {
     local ctl=$1 want=$2
-    "$ctl" -M 2>/dev/null | grep -q "[[:space:]]${want}_module"
+    "$ctl" -M 2>/dev/null | grep "[[:space:]]${want}_module" >/dev/null
 }
 
 # akconnect_apache_fallback installs the proxy configuration for ONE virtual

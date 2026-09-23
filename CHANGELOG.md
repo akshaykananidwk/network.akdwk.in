@@ -6,6 +6,88 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.22] — development
+
+**The installer printed the coordinator's shared secret, and then set it
+itself.** install-edge.sh ended with "put these values into the panel" and the
+secret in plain text — on a getting-started install, just before the installer
+wrote the same value into the panel. It was pasted into a chat from there. Now
+nothing prints it: install-edge.sh says which root-only file holds it, and
+prints no manual steps at all when the installer wires the panel
+(`--panel-configured-by-caller`); add-relay.sh no longer prints a relay's
+secret either. The administrator's one-time setup link says not to share it.
+
+**What the secret opens was worse than it looked.** Whoever holds it can
+upload a Windows installer or an agent binary to the panel, and the panel
+signs an uploaded agent with its own key and offers it to every device as an
+update. So the secret was also taken off every command line it was on (ps
+shows arguments to every user on the machine): jq in the installer, openssl in
+upgrade-edge.sh's hourly signing, and the database password in `mysql -e`.
+
+**`akconnect-rotate-secret`** replaces it everywhere in one step: the panel
+first, then `coordinator.env` and `coordinator.secret.for-panel`, then a
+coordinator restart, then a signed request proving the panel accepts the new
+secret and refuses the old one. Agents are not touched — none of them has ever
+held it — and direct and relayed pairs keep carrying traffic. It holds the
+upgrade timer while it works, and ends by listing what has been published with
+the secret (`cli/edge-audit.php`), marking any agent release newer than the
+panel, which no edge would have built; `--withdraw=<version>` stops one being
+offered. `--relay` also rotates this server's relay secret, which costs
+relayed pairs 15-25 seconds while agents fetch new tickets. The install gate
+rotates both on a real install and checks every file, the panel, the restarts
+and that neither value is printed.
+
+**The first install builds the edge once, at the panel's release.** It built
+the tip of its branch, and upgrade-edge.sh — minutes later — rebuilt at the
+panel's release: two builds on every new server, and on a re-run over an older
+panel two different versions, the second older. The installer now records
+where the panel came from, asks it which release it is on
+(`cli/edge-release.php`), and builds exactly that — from the edge source, or
+from a `git archive` of the panel's commit after checking it is on the panel's
+branch at origin. upgrade-edge.sh builds only what is out of date: services
+that already run the release are not rebuilt or restarted, a changed unit file
+costs a restart and no build, and installers already published are not rebuilt.
+"Already current" also requires the services to be running the binaries on
+disk. The install gate's new `older` sequence is the field case — the previous
+release dies at Caddy, this one builds the panel's release once — and the
+services really run there now, from their own unit files, so "is it running,
+and which binary" is a fact rather than a stub's answer.
+
+**Security fixes from reviewing 1.9.7-dev.21:**
+- upgrade-edge.sh fetched the panel's commit by id when its branch did not have
+  it, and GitHub serves any pull request's commits that way: whoever could write
+  the panel's settings could have had every edge build, and run as root, a
+  stranger's pull request. The commit must now be a full id on the panel's
+  branch at origin (or on origin's default branch, when a release branch was
+  deleted after merging), and a branch or commit that is not one is refused
+  before git sees it.
+- The installer ran chmod as root inside the web user's tree, and chmod follows
+  links: a link planted there could have made `/etc/akconnect/coordinator.env`
+  readable. Every mode change there is now made as the web user.
+- A worktree checkout's common git directory was handed to the worktree's
+  owner even when it was root's.
+
+**Also fixed:** the coordinator's last-known-answer fallback (1.9.7-dev.14) was
+never switched on — a device that had to announce itself during a panel outage
+was simply not answered; a single relay taken out of rotation was offered with
+tickets signed by an empty key, which could leave relayed pairs dead; a failed
+relay-usage report doubled the held bytes on every retry (ten failures billed
+102,400 bytes for 1,100 relayed); `php -m | grep -q`, `apachectl -M | grep -q`
+and `ss | grep -q` under pipefail reported extensions, modules and listeners
+missing at random; a sudo warning ("unable to resolve host") was read as local
+changes; the maintenance bypass link was undone by a stale cookie on the next
+page; a root-held lock was replaced while held; `--root` in two spellings was
+ignored; a legacy domain spelling reached the panel as a hostname; and the
+coordinator settings audit entry now says what changed.
+
+**Known, not fixed here:** a coordinator restart counts live relayed sessions'
+bytes once more (its usage ledger is in memory); the panel still signs any
+agent uploaded under the shared secret, whatever its version — moving that
+signature to the build, or requiring an administrator to approve an uploaded
+release, is the next step.
+
+---
+
 ## [1.9.7-dev.21] — development
 
 **"Safe to run again" was claimed from the first version of the installer and

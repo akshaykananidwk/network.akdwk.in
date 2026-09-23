@@ -62,6 +62,8 @@
 #
 #   sudo services/lab/install-gate.sh                  the working tree
 #   sudo services/lab/install-gate.sh --ref 5592ec6    a commit (a red check)
+#   sudo services/lab/install-gate.sh --legacy-ref 5592ec6
+#                                                      the "previous release" to start from
 #   sudo services/lab/install-gate.sh --only field     one sequence
 #   sudo services/lab/install-gate.sh --keep           leave the evidence
 set -uo pipefail
@@ -70,13 +72,15 @@ LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$LAB/../.." && pwd)"
 
 REF=""
+LEGACY_REF=""
 ONLY=""
 KEEP=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --ref)  REF="${2:?--ref needs a commit}"; shift 2 ;;
-        --only) ONLY="${2:?--only needs a sequence: field, twice, late, interrupt, cycle, legacy or repair}"; shift 2 ;;
+        --legacy-ref) LEGACY_REF="${2:?--legacy-ref needs a commit}"; shift 2 ;;
+        --only) ONLY="${2:?--only needs a sequence: field, twice, late, interrupt, cycle, legacy, older, repair or rotate}"; shift 2 ;;
         --keep) KEEP=1; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
@@ -174,10 +178,28 @@ fi
 snap_git -c push.negotiate=false push -q "$WORK/repo.git" "$COMMIT:refs/heads/gate" 2>/dev/null \
     || die "could not publish the snapshot"
 
-# The release before the one under test, for the sequence that starts from a
-# tree it made: the working tree's own base commit, or the --ref's parent.
-LEGACY="$(snap_git rev-parse --verify "$COMMIT^" 2>/dev/null)"
+# The release before the one under test, for the sequences that start from
+# what it made: the nearest ancestor whose VERSION differs, or --legacy-ref.
+#
+# Not simply the parent. Run on a committed, clean tree the snapshot's parent
+# IS the tree under test, and legacy, older and repair then tested this
+# release against itself and passed for that reason.
+if [ -n "$LEGACY_REF" ]; then
+    LEGACY="$(snap_git rev-parse --verify "$LEGACY_REF^{commit}" 2>/dev/null)" \
+        || die "$LEGACY_REF is not a commit in $REPO"
+else
+    UNDER_TEST_VERSION="$(snap_git show "$COMMIT:VERSION" 2>/dev/null | tr -d '\r\n')"
+    LEGACY=""
+    while read -r candidate; do
+        if [ "$(snap_git show "$candidate:VERSION" 2>/dev/null | tr -d '\r\n')" != "$UNDER_TEST_VERSION" ]; then
+            LEGACY="$candidate"
+            break
+        fi
+    done < <(snap_git rev-list --max-count=200 "$COMMIT^" 2>/dev/null)
+fi
 if [ -n "$LEGACY" ]; then
+    printf '  previous release: %s (%s)\n' "$(snap_git rev-parse --short "$LEGACY")" \
+        "$(snap_git show "$LEGACY:VERSION" 2>/dev/null | tr -d '\r\n')"
     snap_git -c push.negotiate=false push -q "$WORK/repo.git" "$LEGACY:refs/heads/legacy" 2>/dev/null
     git -C "$WORK/repo.git" show "legacy:deploy/getting-started.sh" > "$WORK/legacy-getting-started.sh" 2>/dev/null \
         && chmod 755 "$WORK/legacy-getting-started.sh"
@@ -194,36 +216,105 @@ printf '  testing %s\n' "$what"
 STUBS="$WORK/stubs"
 mkdir -p "$STUBS"
 
+# systemctl: a small service manager for the two services this project runs,
+# and a log of everything else.
+#
+# The coordinator and the relay really run — started from their own unit
+# files, with their EnvironmentFile, as the akconnect user — so "is it up",
+# "which binary is it running" and "is it listening" are facts about real
+# processes. upgrade-edge.sh decides from exactly those whether an edge has
+# to be rebuilt; a stub that said "active" for everything made every edge look
+# like one that needed it, and the double build this release removes could not
+# be seen. Everything else (caddy, php-fpm, mariadb, the timers) is logged and
+# reported up, as a machine that has them would.
 cat > "$STUBS/systemctl" <<'SH'
-#!/bin/sh
+#!/bin/bash
 echo "systemctl $*" >> "$GATE_LOG_DIR/machine.log"
-# Options first or last, in any order, the way systemctl takes them: the verb
-# is the first word that is not an option and the unit is the next.
-verb=""; unit=""; quiet=0
+verb=""; units=(); quiet=0; now=0; prop=""; skip=0
 for a in "$@"; do
+    if [ "$skip" -eq 1 ]; then prop="$a"; skip=0; continue; fi
     case "$a" in
         -q|--quiet) quiet=1 ;;
+        --now) now=1 ;;
+        -p|--property) skip=1 ;;
         -*) ;;
-        *) if [ -z "$verb" ]; then verb="$a"; elif [ -z "$unit" ]; then unit="$a"; fi ;;
+        *) if [ -z "$verb" ]; then verb="$a"; else units+=("${a%.service}"); fi ;;
     esac
 done
+SVC="$GATE_LOG_DIR/svc"
+mkdir -p "$SVC"
+
+managed() { case "$1" in akconnect-coordinator|akconnect-relay) return 0 ;; esac; return 1; }
+pid_of() {
+    local p
+    p="$(cat "$SVC/$1.pid" 2>/dev/null)"
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null && printf '%s\n' "$p"
+}
+start_unit() {
+    local unit=$1 file="/etc/systemd/system/$1.service" envfile cmd
+    [ -f "$file" ] || { echo "Unit $unit.service not found." >&2; return 5; }
+    [ -n "$(pid_of "$unit")" ] && return 0
+    envfile="$(sed -n 's/^EnvironmentFile=-\{0,1\}//p' "$file" | head -1)"
+    cmd="$(awk '/^ExecStart=/ { sub(/^ExecStart=/, ""); line = $0
+               while (line ~ /\\$/) { sub(/\\$/, "", line); if ((getline more) <= 0) break; line = line " " more }
+               print line; exit }' "$file")"
+    (
+        set -a
+        # shellcheck disable=SC1090
+        [ -n "$envfile" ] && . "$envfile"
+        set +a
+        eval "set -- $cmd"
+        exec setsid setpriv --reuid=akconnect --regid=akconnect --clear-groups "$@"
+    ) >> "$SVC/$unit.log" 2>&1 < /dev/null &
+    echo $! > "$SVC/$unit.pid"
+    sleep 0.5
+    [ -n "$(pid_of "$unit")" ] || { echo "Job for $unit.service failed (install gate): $(tail -2 "$SVC/$unit.log")" >&2; return 1; }
+}
+stop_unit() {
+    local p
+    p="$(pid_of "$1")"
+    if [ -n "$p" ]; then
+        kill "$p" 2>/dev/null
+        for _ in $(seq 1 50); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
+    fi
+    rm -f "$SVC/$1.pid"
+}
+
 # The late sequence's injected failure: the relay will not start, the first
 # time install-edge.sh asks — after it has written coordinator.env.
-if [ "$verb" = "enable" ] && [ "$unit" = "akconnect-relay" ] && [ -n "${GATE_FAIL_RELAY_START:-}" ]; then
+if [ "$verb" = "enable" ] && [ "${units[0]:-}" = "akconnect-relay" ] && [ -n "${GATE_FAIL_RELAY_START:-}" ]; then
     echo "Job for akconnect-relay.service failed (install gate)." >&2
     exit 1
 fi
+
+code=0
 case "$verb" in
+    start)   for u in "${units[@]}"; do managed "$u" && { start_unit "$u" || code=1; }; done ;;
+    stop)    for u in "${units[@]}"; do managed "$u" && stop_unit "$u"; done ;;
+    restart) for u in "${units[@]}"; do managed "$u" && { stop_unit "$u"; start_unit "$u" || code=1; }; done ;;
+    enable)  [ "$now" -eq 1 ] && for u in "${units[@]}"; do managed "$u" && { start_unit "$u" || code=1; }; done ;;
+    disable) [ "$now" -eq 1 ] && for u in "${units[@]}"; do managed "$u" && stop_unit "$u"; done ;;
     is-active)
-        # Nothing else is serving here — the installer refuses a machine
-        # that is. Everything the installer itself started is up.
-        case "$unit" in
-            apache2|nginx|httpd) [ "$quiet" -eq 1 ] || echo inactive; exit 3 ;;
-            *)                   [ "$quiet" -eq 1 ] || echo active;   exit 0 ;;
+        u="${units[0]:-}"
+        if managed "$u"; then
+            if [ -n "$(pid_of "$u")" ]; then [ "$quiet" -eq 1 ] || echo active; exit 0; fi
+            [ "$quiet" -eq 1 ] || echo inactive; exit 3
+        fi
+        # Nothing else is serving here — the installer refuses a machine that
+        # is — and no edge upgrade is running: it is a oneshot, and this is not
+        # that moment.
+        case "$u" in
+            apache2|nginx|httpd|akconnect-upgrade) [ "$quiet" -eq 1 ] || echo inactive; exit 3 ;;
+            *) [ "$quiet" -eq 1 ] || echo active; exit 0 ;;
         esac ;;
-    show) echo "Wed 2026-09-23 00:00:00 UTC" ;;
+    show)
+        u="${units[0]:-}"
+        case "$prop" in
+            MainPID) p="$(pid_of "$u")"; echo "${p:-0}" ;;
+            *) echo "Wed 2026-09-23 00:00:00 UTC" ;;
+        esac ;;
 esac
-exit 0
+exit "$code"
 SH
 
 cat > "$STUBS/ufw" <<'SH'
@@ -327,6 +418,22 @@ chmod 755 "$FAILING/php"
 ln -s php "$FAILING/php$PHP_SERIES"
 chmod 755 "$FAILING"
 
+# And the older sequence's: Caddy refuses its configuration — which is where
+# the second field run on a clean server stopped, after the panel had been
+# installed and before the edge was.
+FAILING_CADDY="$WORK/failing-caddy"
+mkdir -p "$FAILING_CADDY"
+CADDY_REAL="$(command -v caddy)"
+cat > "$FAILING_CADDY/caddy" <<SH
+#!/bin/sh
+if [ "\$1" = "validate" ]; then
+    echo "install gate: caddy refuses this configuration, as it did on the field server" >&2
+    exit 1
+fi
+exec "$CADDY_REAL" "\$@"
+SH
+chmod 755 "$FAILING_CADDY/caddy" "$FAILING_CADDY"
+
 # --------------------------------------------------------- one sequence
 
 # run_sequence runs one sequence in a fresh namespace. The body is below, in a
@@ -338,7 +445,7 @@ run_sequence() {
     chmod 755 "$dir"
 
     GATE_SEQ="$seq" GATE_DIR="$dir" GATE_WORK="$WORK" GATE_SCRIPT="$SCRIPT" \
-    GATE_STUBS="$STUBS" GATE_FAILING="$FAILING" GATE_DOMAIN="$DOMAIN" \
+    GATE_STUBS="$STUBS" GATE_FAILING="$FAILING" GATE_FAILING_CADDY="$FAILING_CADDY" GATE_DOMAIN="$DOMAIN" \
     GATE_FAKE_IP="$FAKE_IP" GATE_WEB_USER="$WEB_USER" GATE_PANEL="$PANEL" \
     GATE_SRC="$SRC" GATE_ETC="$ETC" GATE_LOG_DIR="$dir" \
     GATE_LEGACY_SCRIPT="$WORK/legacy-getting-started.sh" \
@@ -354,15 +461,23 @@ $(tail -25 "$dir/sequence.log")"
     fi
 
     while IFS='|' read -r verdict name detail; do
+        [ "$verdict" = "DONE" ] && continue
         if [ "$verdict" = "PASS" ]; then
             ok "$name"
         else
             bad "$name" "$(printf '%b' "$detail")"
         fi
     done < "$dir/results"
+
+    # A sequence that died part-way recorded only the checks it reached, and
+    # used to count as a pass of those.
+    if ! grep -qx 'DONE' "$dir/results"; then
+        bad "the $seq sequence ran to completion" "it exited $code part-way; the end of its log:
+$(tail -25 "$dir/sequence.log")"
+    fi
 }
 
-for seq in field twice late interrupt cycle legacy repair; do
+for seq in field twice late interrupt cycle legacy older repair rotate; do
     [ -n "$ONLY" ] && [ "$ONLY" != "$seq" ] && continue
 
     case "$seq" in
@@ -371,13 +486,16 @@ for seq in field twice late interrupt cycle legacy repair; do
         late)  group "late: the first run dies after the panel is installed, the second must finish it" ;;
         interrupt) group "interrupt: a run stopped part-way stops, and the next one finishes" ;;
         cycle) group "cycle: uninstall, then install again" ;;
-        legacy|repair)
+        rotate) group "rotate: akconnect-rotate-secret, and then with --relay" ;;
+        legacy|older|repair)
             if [ ! -x "$WORK/legacy-getting-started.sh" ]; then
                 group "legacy: skipped — the tree under test has no parent to start from"
                 continue
             fi
             if [ "$seq" = legacy ]; then
                 group "legacy: a tree the previous release made, run again after the branch moved"
+            elif [ "$seq" = older ]; then
+                group "older: the previous release dies at Caddy; this one builds the panel's release, once"
             else
                 group "repair: a panel the previous release installed, run again with this one"
             fi ;;

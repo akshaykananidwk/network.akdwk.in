@@ -227,18 +227,21 @@ func (s *Server) pickRelayAvoiding(self, peer *registry.Entry, avoid string) *Re
 // pickRelayIgnoringHealth is the last resort: the best relay in the fleet
 // even if health has taken it out of rotation, because having no relay to
 // offer is worse than offering one that may be unwell.
+//
+// The relay itself, secret and all. This used to build a new RelayTarget from
+// the name, endpoint and region and leave the Secret out, so every ticket it
+// produced was signed with an empty key and every bind was dropped by the
+// relay without a word. The complaints that followed kept the relay marked
+// down, the next offer came from here again, and on a one-relay install a
+// relay outage of twenty seconds could leave relayed pairs dead for good.
 func (s *Server) pickRelayIgnoringHealth(self, peer *registry.Entry) *RelayTarget {
-	var best *RelayTarget
-
 	for _, relay := range s.opts.Relays {
-		candidate := relay
-
-		if best == nil {
-			best = &RelayTarget{Name: candidate.Name, Endpoint: candidate.Endpoint, Region: candidate.Region}
+		if relay != nil {
+			return relay
 		}
 	}
 
-	return best
+	return nil
 }
 
 // avoid names a relay to exclude from this decision — the one an agent just

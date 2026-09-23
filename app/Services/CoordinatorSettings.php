@@ -187,6 +187,9 @@ final class CoordinatorSettings
             throw new ValidationException($errors);
         }
 
+        // What changed, for the audit entry — as booleans, never the values.
+        $before = self::current();
+
         self::put('host', $host);
         self::put('public_host', $publicHost);
         self::put('port', (string) $port);
@@ -211,8 +214,15 @@ final class CoordinatorSettings
             'host'        => $host,
             'public_host' => $publicHost,
             'port'        => $port,
-            // Never the key material itself, and never a prefix of it.
-            'public_key_changed' => true,
+            // Never the key material itself, and never a prefix of it. Worked
+            // out rather than asserted: this said true on every save, and a
+            // secret rotation left no trace at all — which is the one change
+            // an incident review looks for first.
+            'public_key_changed'    => $publicKey !== (string) ($before['public_key'] ?? ''),
+            'shared_secret_changed' => $sharedSecret !== ''
+                && !hash_equals((string) ($before['shared_secret'] ?? ''), $sharedSecret),
+            'signing_key_changed'   => $signingKey !== ''
+                && !hash_equals((string) ($before['signing_key'] ?? ''), $signingKey),
         ]);
 
         return self::current();

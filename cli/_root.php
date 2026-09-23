@@ -18,11 +18,23 @@ declare(strict_types=1);
  */
 
 foreach (array_slice($argv ?? [], 1) as $argument) {
+    // "--root /path" and a bare "--root" are refused, not skipped: skipped,
+    // the script quietly worked on the tree it is in — issuing a takeover link
+    // for the wrong panel's administrator, or writing another panel's
+    // coordinator settings.
+    if ((string) $argument === '--root') {
+        fwrite(STDERR, "--root needs its value joined to it: --root=/path/to/panel\n");
+        exit(1);
+    }
     if (!str_starts_with((string) $argument, '--root=')) {
         continue;
     }
 
     $given = substr((string) $argument, strlen('--root='));
+    if ($given === '') {
+        fwrite(STDERR, "--root= is empty: --root=/path/to/panel\n");
+        exit(1);
+    }
     $root = realpath($given);
     if ($root === false || !is_file($root . '/app/bootstrap.php')) {
         fwrite(STDERR, 'Not a panel: ' . $given . "\n");

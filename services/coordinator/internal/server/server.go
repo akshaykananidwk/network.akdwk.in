@@ -101,9 +101,16 @@ func New(opts Options) (*Server, error) {
 		reg:                registry.New(opts.PresenceTTL),
 		health:             newRelayHealth(),
 		usage:              newUsageLedger(),
-		verifying:          newReverifier(),
-		talking:            newTalkers(),
-		pending:            make(map[string]panelapi.EndpointReport),
+		// Made here. It was declared, and every method on it is nil-safe —
+		// so when nothing made it, remember did nothing, recall always said
+		// "nothing is remembered", and the fallback 1.9.7-dev.14 described
+		// (a panel that cannot answer does not stop traffic) never ran: a
+		// device that had to announce itself again during a panel outage or a
+		// deploy was simply not answered.
+		lastKnown: newLastKnown(),
+		verifying: newReverifier(),
+		talking:   newTalkers(),
+		pending:   make(map[string]panelapi.EndpointReport),
 	}, nil
 }
 
@@ -203,6 +210,9 @@ func (s *Server) housekeeping(ctx context.Context) {
 			if gone := s.reg.Sweep(); gone > 0 {
 				s.opts.Logf("expired %d device(s); %d still present", gone, s.reg.Len())
 			}
+			// Answers older than a day are dropped, so the memory is bounded
+			// by the devices seen in the last day, not by every device ever.
+			s.lastKnown.sweep()
 			s.flushEndpoints(ctx)
 		}
 	}

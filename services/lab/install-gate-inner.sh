@@ -134,6 +134,7 @@ install() {
     RUN=$((RUN + 1))
     local log="$GATE_DIR/run$RUN.log" path="$BASE_PATH"
     [ "${FAILING:-0}" -eq 1 ] && path="$GATE_FAILING:$BASE_PATH"
+    [ "${FAIL_CADDY:-0}" -eq 1 ] && path="$GATE_FAILING_CADDY:$path"
 
     PATH="$path" AKCONNECT_BRANCH="${BRANCH:-gate}" bash "${SCRIPT:-$GATE_SCRIPT}" \
         --domain "$GATE_DOMAIN" --email gate@example.test --channel edge \
@@ -203,6 +204,38 @@ $foreign"
         fi
     fi
 
+    # The edge is built once in a run, if at all. The installer used to build
+    # the tip of its branch and upgrade-edge.sh, minutes later, the panel's
+    # release: two builds on every new server, of two versions on a re-run
+    # over an older panel. Both print this heading.
+    local builds
+    builds="$(grep -c "── building the coordinator and the relay" "$LAST_LOG" 2>/dev/null)"
+    if [ "${builds:-0}" -le 1 ]; then
+        pass "$label: the edge was built at most once (${builds:-0})"
+    else
+        fail "$label: the edge was built at most once" "built $builds times in one run:
+$(grep -n -E 'building the coordinator|building the panel|services current|^\s+build\s' "$LAST_LOG" | head -6)"
+    fi
+
+    # No secret in anything the operator sees. The coordinator's shared
+    # secret was printed by every install up to 1.9.7-dev.21, and pasted into
+    # a chat from there.
+    local leaked="" name value
+    for name in AKCONNECT_COORDINATOR_SECRET AKCONNECT_COORDINATOR_KEY; do
+        value="$(sed -n "s/^$name=//p" "$GATE_ETC/coordinator.env" 2>/dev/null | head -1)"
+        [ -n "$value" ] && grep -qF -- "$value" "$LAST_LOG" && leaked="$leaked$name "
+    done
+    while IFS='=' read -r name value; do
+        [ -n "$value" ] && grep -qF -- "$value" "$LAST_LOG" && leaked="$leaked$name "
+    done < <(grep -h '^AKCONNECT_RELAY_SECRET' "$GATE_ETC/coordinator.env" "$GATE_ETC/relay.env" 2>/dev/null)
+    value="$(sed -n 's/^DB_PASS=//p' "$GATE_PANEL/config/.env" 2>/dev/null | head -1 | tr -d "\"'")"
+    [ -n "$value" ] && grep -qF -- "$value" "$LAST_LOG" && leaked="${leaked}DB_PASS "
+    if [ -z "$leaked" ]; then
+        pass "$label: no secret appears in what it printed"
+    else
+        fail "$label: no secret appears in what it printed" "printed: $leaked"
+    fi
+
     # Every temporary file the script made is gone, however it exited.
     local left
     left="$(find "$TMPDIR" -mindepth 1 -maxdepth 1 2>/dev/null | head -5)"
@@ -223,19 +256,6 @@ $foreign"
 the_install_works() {
     local label=$1 settings expected_commit
 
-    cat > "$GATE_DIR/probe-settings.php" <<'PHP'
-<?php
-define('APP_ROOT', $argv[1]);
-require APP_ROOT . '/app/bootstrap.php';
-$c = App\Services\CoordinatorSettings::current();
-$u = App\Models\UpdateSetting::current();
-echo json_encode([
-    'host' => $c['host'], 'port' => $c['port'], 'public_key' => $c['public_key'],
-    'shared_secret' => $c['shared_secret'], 'fallback_url' => $c['fallback_url'],
-    'branch' => $u['branch'], 'commit' => (string) $u['current_commit'], 'channel' => $u['channel'],
-]);
-PHP
-    chmod 644 "$GATE_DIR/probe-settings.php"
     settings="$(as_web php "$GATE_DIR/probe-settings.php" "$GATE_PANEL" 2>/dev/null)"
     expected_commit="$(as_web git -C "$GATE_PANEL" rev-parse HEAD 2>/dev/null)"
 
@@ -258,11 +278,11 @@ PHP
     # re-run left the record alone.
     if [ "${SKIP_SOURCE:-0}" -eq 1 ]; then
         :
-    elif [ "$(field branch)" = "${BRANCH:-gate}" ] && [ -n "$expected_commit" ] && [ "$(field commit)" = "$expected_commit" ]; then
+    elif [ "$(field branch)" = "${EXPECT_BRANCH:-${BRANCH:-gate}}" ] && [ -n "$expected_commit" ] && [ "$(field commit)" = "$expected_commit" ]; then
         pass "$label: the panel knows the branch and commit it was installed from"
     else
         fail "$label: the panel knows the branch and commit it was installed from" \
-            "branch '$(field branch)', commit '$(field commit)'; the tree is on ${BRANCH:-gate} at $expected_commit"
+            "branch '$(field branch)', commit '$(field commit)'; the tree is on ${EXPECT_BRANCH:-${BRANCH:-gate}} at $expected_commit"
     fi
 
     if grep -qE "Could not open input file|could not write the settings automatically|would not take its coordinator settings" "$LAST_LOG"; then
@@ -279,9 +299,11 @@ PHP
     [ "${SKIP_SOURCE:-0}" -eq 1 ] && return 0
 
     local row missing=""
+    # "build", or "services current": an edge the installer has just built at
+    # the panel's release is found running it, and is not built again.
     for row in "panel reachable" "source fetched" "checkout is on a branch" \
-               "source matches the panel" "build" "upgrade timer"; do
-        grep -qE "^\s+$row\s+PASS\b" "$LAST_LOG" || missing="$missing$row, "
+               "source matches the panel" "build|services current" "upgrade timer"; do
+        grep -qE "^\s+($row)\s+PASS\b" "$LAST_LOG" || missing="$missing$row, "
     done
     if grep -E "^\s+source fetched\s+PASS" "$LAST_LOG" | grep -vqE "[0-9a-f]{7}"; then
         missing="${missing}source fetched (with no commit), "
@@ -331,11 +353,37 @@ db_exists() {
     [ -n "$(mysql -N -B -e "SHOW DATABASES LIKE 'akconnect'" 2>/dev/null)" ]
 }
 
+# check_database <name>: the panel reaches its database, and a failure shows
+# what THIS migrate said, not the previous one's log.
+check_database() {
+    if panel_reaches_its_database; then
+        pass "$1"
+    else
+        fail "$1" "$(tail_of "$GATE_DIR/migrate.log" 8)"
+    fi
+}
+
 panel_reaches_its_database() {
     # The log is root's to write and PHP runs as the web user: the split
     # intended.
     as_web php "$GATE_PANEL/cli/migrate.php" > "$GATE_DIR/migrate.log" 2>&1
 }
+
+# The panel's own view of its settings, as the web user — written before any
+# sequence runs, because some ask it before an install has been checked.
+cat > "$GATE_DIR/probe-settings.php" <<'PHP'
+<?php
+define('APP_ROOT', $argv[1]);
+require APP_ROOT . '/app/bootstrap.php';
+$c = App\Services\CoordinatorSettings::current();
+$u = App\Models\UpdateSetting::current();
+echo json_encode([
+'host' => $c['host'], 'port' => $c['port'], 'public_key' => $c['public_key'],
+'shared_secret' => $c['shared_secret'], 'fallback_url' => $c['fallback_url'],
+'branch' => $u['branch'], 'commit' => (string) $u['current_commit'], 'channel' => $u['channel'],
+]);
+PHP
+chmod 644 "$GATE_DIR/probe-settings.php"
 
 # ---------------------------------------------------------------- sequences
 
@@ -383,8 +431,7 @@ $(tail_of "$LAST_LOG" 25)" test "$LAST_CODE" -eq 0
 
     the_install_works "run 2"
 
-    check "the panel reaches its database with the credentials it was given" \
-        "$(tail_of "$GATE_DIR/migrate.log" 8)" panel_reaches_its_database
+    check_database "the panel reaches its database with the credentials it was given"
 
     after_every_run "run 2"
     ;;
@@ -456,6 +503,12 @@ $(tail_of "$LAST_LOG" 25)" test "$LAST_CODE" -eq 0
     else
         pass "run 2 issued no new administrator setup link"
     fi
+    if grep -q "The administrator account is in use" "$LAST_LOG"; then
+        pass "run 2 said why: the account is in use"
+    else
+        fail "run 2 said why: the account is in use" \
+            "$(grep -iE 'setup link|setup-link' "$LAST_LOG" | head -3)"
+    fi
 
     check "run 2 left the installed panel alone and said so" \
         "no 'left exactly as it is' in the log" grep -q "left exactly as it is" "$LAST_LOG"
@@ -478,8 +531,7 @@ $(tail_of "$LAST_LOG" 25)" test "$LAST_CODE" -eq 0
         fail "no file became more readable or changed hands" "$(printf '%s\n' "$changed" | head -12)"
     fi
 
-    check "the panel still reaches its database" \
-        "$(tail_of "$GATE_DIR/migrate.log" 8)" panel_reaches_its_database
+    check_database "the panel still reaches its database"
     ;;
 
 cycle)
@@ -574,6 +626,13 @@ repair)
     check "the previous release's install ran to the end" \
         "exit $LAST_CODE; $(tail_of "$LAST_LOG" 8)" test "$LAST_CODE" -eq 0
 
+    # A previous release that recorded the panel's branch (1.9.7-dev.21 and
+    # later) is left as it recorded it: a re-run fills in only what was never
+    # set. One that recorded nothing is given this run's.
+    as_web php "$GATE_DIR/probe-settings.php" "$GATE_PANEL" > "$GATE_DIR/after-legacy.json" 2>/dev/null
+    recorded="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('branch',''))" "$GATE_DIR/after-legacy.json" 2>/dev/null)"
+    [ -n "$recorded" ] && [ "$recorded" != "main" ] && EXPECT_BRANCH="$recorded"
+
     # This release, run again over it. The panel is installed, so it is left
     # alone — and what the previous run never wrote is filled in.
     install
@@ -639,23 +698,35 @@ interrupt)
         --domain "$GATE_DOMAIN" --email gate@example.test --channel edge \
         --unattended > "$log" 2>&1 < /dev/null &
     pid=$!
+    reached=0
     for _ in $(seq 1 1200); do
-        grep -q "── building the coordinator and the relay" "$log" 2>/dev/null && break
+        if grep -q "── building the coordinator and the relay" "$log" 2>/dev/null; then
+            reached=1
+            break
+        fi
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.25
     done
+    # Only at the step it is meant to stop in. A poll that ran out used to
+    # send the signal wherever the run had got to.
     sent=0
-    if kill -TERM "$pid" 2>/dev/null; then sent=1; fi
+    if [ "$reached" -eq 1 ] && kill -TERM "$pid" 2>/dev/null; then sent=1; fi
+    [ "$reached" -eq 1 ] || kill -KILL "$pid" 2>/dev/null
     wait "$pid"
     LAST_CODE=$?
     LAST_LOG="$log"
     sed -i 's/\x1b\[[0-9;]*m//g' "$log"
 
-    check "the run was still going when it was stopped" \
-        "it had already exited; $(tail_of "$log" 4)" test "$sent" -eq 1
-    check "it stopped, and said nothing about being installed" \
-        "exit $LAST_CODE; $(tail_of "$log" 6)" \
-        sh -c "[ $LAST_CODE -ne 0 ] && ! grep -q 'AK Connect is installed' '$log'"
+    check "the run was stopped while it built the edge" \
+        "it never reached that step, or had already exited; $(tail_of "$log" 4)" test "$sent" -eq 1
+    # Stopped by the signal — exit 143 — and at once: nothing after the step
+    # it was in. A trap that cleaned up and returned carried on, and failed a
+    # step later for having deleted its own build; exit 1 and no "installed"
+    # line would have passed that.
+    after_step="$(sed -n '/── building the coordinator and the relay/,$p' "$log" | grep -c '^── ')"
+    check "it stopped there, with the signal's exit status, and went no further" \
+        "exit $LAST_CODE, $((after_step - 1)) step(s) after it; $(tail_of "$log" 6)" \
+        sh -c "[ $LAST_CODE -eq 143 ] && [ $after_step -le 1 ] && ! grep -q 'AK Connect is installed' '$log'"
     after_every_run "stopped run"
 
     install
@@ -665,10 +736,114 @@ $(tail_of "$LAST_LOG" 25)" test "$LAST_CODE" -eq 0
     after_every_run "the next run"
     ;;
 
+older)
+    # The second field run of this installer, exactly: the previous release
+    # installs the panel and dies at Caddy, before the edge. Then this release
+    # runs over it. The panel is left on the previous release — and the edge
+    # must be built at THAT release, once. It used to be built at this
+    # release's, and upgrade-edge.sh then rebuilt it at the panel's minutes
+    # later: two builds, the second one older.
+    SCRIPT="$GATE_LEGACY_SCRIPT" BRANCH=legacy FAIL_CADDY=1 install
+
+    check "the previous release died at Caddy, after installing the panel" \
+        "exit $LAST_CODE; $(tail_of "$LAST_LOG" 6)" \
+        sh -c "[ $LAST_CODE -ne 0 ] && grep -q 'install gate: caddy refuses' '$LAST_LOG' && [ -f '$GATE_PANEL/config/config.php' ] && ! grep -q '── installing the edge services' '$LAST_LOG'"
+    panel_release="$(tr -d '\r\n' < "$GATE_PANEL/VERSION" 2>/dev/null)"
+    after_every_run "the previous release"
+
+    install
+    check "this release finished over it" "exit $LAST_CODE; end of log:
+$(tail_of "$LAST_LOG" 25)" test "$LAST_CODE" -eq 0
+
+    built="$(/usr/local/bin/akconnect-coordinator version 2>/dev/null | awk '{print $NF}')"
+    check "the edge was built at the panel's release ($panel_release), not this one's" \
+        "the coordinator reports '$built'; $(grep -E "panel's release|panel is on" "$LAST_LOG" | head -3)" \
+        test -n "$panel_release" -a "$built" = "$panel_release"
+    check "and upgrade-edge.sh found it running and built nothing" \
+        "$(grep -E '^\s+(services current|build)\s' "$LAST_LOG" | head -3)" \
+        grep -qE "^\s+services current\s+PASS" "$LAST_LOG"
+
+    the_install_works "older"
+    after_every_run "older"
+    ;;
+
+rotate)
+    install
+    check "the install finished" "exit $LAST_CODE; end of log:
+$(tail_of "$LAST_LOG" 25)" test "$LAST_CODE" -eq 0
+
+    env_value() { sed -n "s/^$1=//p" "$2" 2>/dev/null | head -1; }
+    old_secret="$(env_value AKCONNECT_COORDINATOR_SECRET "$GATE_ETC/coordinator.env")"
+    old_key="$(env_value AKCONNECT_COORDINATOR_KEY "$GATE_ETC/coordinator.env")"
+    old_relay="$(env_value AKCONNECT_RELAY_SECRET "$GATE_ETC/relay.env")"
+    coord_pid="$(cat "$GATE_DIR/svc/akconnect-coordinator.pid" 2>/dev/null)"
+    relay_pid="$(cat "$GATE_DIR/svc/akconnect-relay.pid" 2>/dev/null)"
+    mode_before="$(stat -c '%a %U:%G' "$GATE_ETC/coordinator.env")"
+    before_log="$(wc -l < "$GATE_DIR/machine.log")"
+
+    RUN=$((RUN + 1))
+    LAST_LOG="$GATE_DIR/run$RUN.log"
+    PATH="$BASE_PATH" /usr/local/bin/akconnect-rotate-secret --yes > "$LAST_LOG" 2>&1 < /dev/null
+    LAST_CODE=$?
+    sed -i 's/\x1b\[[0-9;]*m//g' "$LAST_LOG"
+
+    new_secret="$(env_value AKCONNECT_COORDINATOR_SECRET "$GATE_ETC/coordinator.env")"
+    check "akconnect-rotate-secret finished" "exit $LAST_CODE; $(tail_of "$LAST_LOG" 12)" test "$LAST_CODE" -eq 0
+    check "the coordinator has a new secret, in both of its files" \
+        "coordinator.env changed: $([ "$new_secret" != "$old_secret" ] && echo yes || echo no); for-panel matches: $([ "$(tr -d '\n' < "$GATE_ETC/coordinator.secret.for-panel")" = "$new_secret" ] && echo yes || echo no)" \
+        sh -c "[ -n '$new_secret' ] && [ '$new_secret' != '$old_secret' ] && [ \"\$(tr -d '\n' < '$GATE_ETC/coordinator.secret.for-panel')\" = '$new_secret' ]"
+    panel_secret="$(as_web php "$GATE_DIR/probe-settings.php" "$GATE_PANEL" 2>/dev/null \
+        | python3 -c "import json,sys; print(json.load(sys.stdin).get('shared_secret',''))" 2>/dev/null)"
+    check "and so does the panel" "the panel holds a different value" test "$panel_secret" = "$new_secret"
+    check "the panel accepts the new secret and refuses the old" "$(grep -E 'accepts|refuses|confirm' "$LAST_LOG" | head -3)" \
+        grep -q "the panel accepts the new secret and refuses the old one" "$LAST_LOG"
+    check "the coordinator's key, the relay's secret and the files' owner and mode are unchanged" \
+        "key same: $([ "$(env_value AKCONNECT_COORDINATOR_KEY "$GATE_ETC/coordinator.env")" = "$old_key" ] && echo yes || echo no); relay same: $([ "$(env_value AKCONNECT_RELAY_SECRET "$GATE_ETC/relay.env")" = "$old_relay" ] && echo yes || echo no); mode $mode_before -> $(stat -c '%a %U:%G' "$GATE_ETC/coordinator.env")" \
+        sh -c "[ \"\$(sed -n 's/^AKCONNECT_COORDINATOR_KEY=//p' '$GATE_ETC/coordinator.env')\" = '$old_key' ] && [ \"\$(sed -n 's/^AKCONNECT_RELAY_SECRET=//p' '$GATE_ETC/relay.env')\" = '$old_relay' ] && [ \"\$(stat -c '%a %U:%G' '$GATE_ETC/coordinator.env')\" = '$mode_before' ]"
+    check "the coordinator restarted, and the relay did not" \
+        "coordinator pid $coord_pid -> $(cat "$GATE_DIR/svc/akconnect-coordinator.pid" 2>/dev/null); relay pid $relay_pid -> $(cat "$GATE_DIR/svc/akconnect-relay.pid" 2>/dev/null)" \
+        sh -c "[ \"\$(cat '$GATE_DIR/svc/akconnect-coordinator.pid')\" != '$coord_pid' ] && [ \"\$(cat '$GATE_DIR/svc/akconnect-relay.pid')\" = '$relay_pid' ] && kill -0 \"\$(cat '$GATE_DIR/svc/akconnect-coordinator.pid')\""
+    check "the upgrade timer was held for it and put back" \
+        "$(tail -n +"$((before_log + 1))" "$GATE_DIR/machine.log" | grep timer)" \
+        sh -c "tail -n +$((before_log + 1)) '$GATE_DIR/machine.log' | grep -q 'stop akconnect-upgrade.timer' && tail -n +$((before_log + 1)) '$GATE_DIR/machine.log' | grep -q 'start akconnect-upgrade.timer'"
+    leaked=""
+    for value in "$old_secret" "$new_secret"; do
+        [ -n "$value" ] && grep -qF -- "$value" "$LAST_LOG" && leaked="yes"
+    done
+    check "neither the old secret nor the new one was printed" "a secret appears in the output" test -z "$leaked"
+    check "and it said what was published with the secret" "$(tail_of "$LAST_LOG" 8)" \
+        grep -q "Served now" "$LAST_LOG"
+
+    # And the relay's, on request.
+    relay_pid="$(cat "$GATE_DIR/svc/akconnect-relay.pid" 2>/dev/null)"
+    RUN=$((RUN + 1))
+    LAST_LOG="$GATE_DIR/run$RUN.log"
+    PATH="$BASE_PATH" /usr/local/bin/akconnect-rotate-secret --yes --relay > "$LAST_LOG" 2>&1 < /dev/null
+    LAST_CODE=$?
+    sed -i 's/\x1b\[[0-9;]*m//g' "$LAST_LOG"
+    new_relay="$(env_value AKCONNECT_RELAY_SECRET "$GATE_ETC/relay.env")"
+    relay_name="$(env_value AKCONNECT_RELAY_NAME "$GATE_ETC/relay.env")"
+    relay_line="AKCONNECT_RELAY_SECRET_$(printf '%s' "$relay_name" | tr '[:lower:]-' '[:upper:]_')"
+    check "--relay finished" "exit $LAST_CODE; $(tail_of "$LAST_LOG" 12)" test "$LAST_CODE" -eq 0
+    check "and gave the relay a new secret, the same on both sides" \
+        "relay.env changed: $([ "$new_relay" != "$old_relay" ] && echo yes || echo no); coordinator's $relay_line matches: $([ "$(env_value "$relay_line" "$GATE_ETC/coordinator.env")" = "$new_relay" ] && echo yes || echo no)" \
+        sh -c "[ -n '$new_relay' ] && [ '$new_relay' != '$old_relay' ] && [ \"\$(sed -n 's/^$relay_line=//p' '$GATE_ETC/coordinator.env')\" = '$new_relay' ]"
+    check "and restarted the relay" "relay pid $relay_pid -> $(cat "$GATE_DIR/svc/akconnect-relay.pid" 2>/dev/null)" \
+        sh -c "[ \"\$(cat '$GATE_DIR/svc/akconnect-relay.pid')\" != '$relay_pid' ] && kill -0 \"\$(cat '$GATE_DIR/svc/akconnect-relay.pid')\""
+    check "without printing it" "the relay secret appears in the output" \
+        sh -c "! grep -qF -- '$new_relay' '$LAST_LOG' && ! grep -qF -- '$old_relay' '$LAST_LOG'"
+
+    after_every_run "after rotating"
+    ;;
+
 *)
     fail "sequence" "unknown sequence $GATE_SEQ"
     ;;
 esac
+
+# The sequence ran to its end. The outer script counts a sequence without this
+# line as one that died part-way, whatever checks it had recorded by then.
+printf 'DONE\n' >> "$GATE_DIR/results"
 
 # Evidence out of the overlay before the namespace takes it away.
 cp -a "$OVL/etc/u" "$GATE_DIR/upper-etc" 2>/dev/null || true

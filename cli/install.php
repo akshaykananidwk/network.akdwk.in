@@ -24,6 +24,24 @@ define('APP_ROOT', dirname(__DIR__));
 // .env and install.lock as root:root 0640. The panel, running as the web
 // user, then could not read its own configuration and answered 500 to every
 // request, while this printed "Installation complete".
+//
+// An answers file is read first, as whoever started this. A root run that
+// becomes the web user can no longer open a file root keeps in /root —
+// `--print-template > install-answers.json` there is the documented way — and
+// it then said "No such answers file" about a file that was right there.
+$answersReadEarly = null;
+foreach (array_slice($argv, 1) as $argument) {
+    if (str_starts_with($argument, '--answers=') && $argument !== '--answers=-') {
+        $path = substr($argument, strlen('--answers='));
+        if ($path !== '' && is_file($path) && is_readable($path)) {
+            $contents = @file_get_contents($path);
+            if (is_string($contents)) {
+                $answersReadEarly = ['path' => $path, 'raw' => $contents];
+            }
+        }
+    }
+}
+
 require __DIR__ . '/_owner.php';
 akconnect_become_tree_owner(APP_ROOT);
 
@@ -121,6 +139,9 @@ if ($answersFile === '-') {
         exit(1);
     }
     $source = 'standard input';
+} elseif ($answersReadEarly !== null && $answersReadEarly['path'] === $answersFile) {
+    $raw = $answersReadEarly['raw'];
+    $source = $answersFile;
 } else {
     if (!is_file($answersFile)) {
         fwrite(STDERR, 'No such answers file: ' . $answersFile . "\n");

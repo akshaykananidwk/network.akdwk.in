@@ -1003,7 +1003,7 @@ fi
 
 # And upgrade-edge.sh has to refresh unit files, or an upgraded relay keeps
 # the flags of whatever version was installed first.
-if grep -q 'install -m 644 "$unit"' "$REPO/deploy/upgrade-edge.sh"; then
+if grep -qE 'install (-D )?-m 644 "\$unit"' "$REPO/deploy/upgrade-edge.sh"; then
     ok "upgrade-edge.sh refreshes the systemd units it ships"
 else
     bad "upgrade-edge.sh does not refresh unit files" \
@@ -1575,6 +1575,11 @@ PARSED="$(. "$REPO/deploy/lib-edge-vhost.sh"; akconnect_vhost_blocks "$PARSEFIX"
 chmod 755 "$WORK"
 git daemon --export-all --base-path="$WORK" --listen=127.0.0.1 --port=9419 \
     --reuseaddr --detach --pid-file="$WORK/gitd.pid" 2>/dev/null
+# Whatever ends this run, the daemon and the stand-in services go with it.
+trap 'kill "$(cat "$WORK/gitd.pid" 2>/dev/null)" $(cat "$WORK"/pids/* 2>/dev/null) "${CAP_PID:-}" "${CAP2_PID:-}" "${CAP3_PID:-}" "${CAP4_PID:-}" 2>/dev/null; rm -rf "$WORK"' EXIT
+sleep 0.3
+kill -0 "$(cat "$WORK/gitd.pid" 2>/dev/null)" 2>/dev/null \
+    || bad "the git daemon did not start on 9419" "is something else holding the port?"
 for _ in $(seq 1 40); do
     (exec 3<>"/dev/tcp/127.0.0.1/9419") 2>/dev/null && break
     sleep 0.25
@@ -1726,17 +1731,20 @@ git clone --quiet --depth 50 --branch main "$GIT_URL" "$MISSING" 2>/dev/null
 
 run_edge missing "$MISSING" 8799 --branch no-such-branch --commit ""
 
-if grep -E "✓.*source fetched|PASS.*source fetched" "$WORK/edge-missing.out" >/dev/null \
-        || grep -E "source fetched" "$WORK/edge-missing.out" | grep -vqE "[0-9a-f]{7}"; then
+# Colour out, and any "source fetched ... PASS" row at all is the failure:
+# the table prints the name before the verdict, so the first version of this
+# pattern could never match.
+if sed 's/\x1b\[[0-9;]*m//g' "$WORK/edge-missing.out" | grep -qE "^\s+source fetched\s+PASS"; then
     bad "a branch that does not exist is reported as fetched" \
         "$(grep -E 'source fetched' "$WORK/edge-missing.out" | head -2)"
 else
     ok "a branch that does not exist is never reported as fetched"
 fi
 
-[ "$EDGE_CODE" -ne 0 ] && grep -q "no-such-branch" "$WORK/edge-missing.out" \
+# The die text, not merely the name: every run prints "target: … on <branch>".
+[ "$EDGE_CODE" -ne 0 ] && grep -qE "could not fetch no-such-branch|no-such-branch.*has neither" "$WORK/edge-missing.out" \
     && ok "and the run fails, naming the branch the panel asked for" \
-    || bad "the run did not fail naming the branch" "exit $EDGE_CODE"
+    || bad "the run did not fail naming the branch" "exit $EDGE_CODE; $(grep -E '✗' "$WORK/edge-missing.out" | head -2)"
 
 group "an edge already on the panel's release"
 
@@ -1863,10 +1871,53 @@ git clone --quiet "$GIT_URL" "$CURRENT2" 2>/dev/null
 EDGE_BIN="$WORK/current-bin" EDGE_ARGS=" " \
     run_edge stale "$CURRENT2" 8801 --commit "$TARGET_SHA" --branch main --published 9.9.8
 
-if grep -q "already current" "$WORK/edge-stale.out"; then
+if sed 's/\x1b\[[0-9;]*m//g' "$WORK/edge-stale.out" | grep -qE "^\s+already current\s"; then
     bad "an installer published for an older release was taken as current"
 else
     ok "an installer published for an older release is not taken as current"
+fi
+
+# And what that costs is the installers, not the services. The first run
+# after an install found the Windows installer unpublished and rebuilt and
+# restarted both services it had just been built with: two builds of the same
+# release on every new server.
+if sed 's/\x1b\[[0-9;]*m//g' "$WORK/edge-stale.out" | grep -qE "^\s+services current\s+PASS" \
+        && ! grep -q "── building the coordinator and the relay" "$WORK/edge-stale.out" \
+        && ! grep -q "unbound variable" "$WORK/edge-stale.out" \
+        && ! grep -q "restart" "$WORK/systemctl.log"; then
+    ok "and the services are not rebuilt or restarted for it — only the installers are built"
+else
+    bad "a missing installer rebuilt or restarted services already on the release" \
+        "$(grep -E 'services current|building the coordinator' "$WORK/edge-stale.out" | head -3); $(grep restart "$WORK/systemctl.log" | head -2)"
+fi
+
+# The release's unit files differ from the installed ones: a restart, to pick
+# them up, and still no build.
+UNITS_SEED="$WORK/units-seed"
+git init --quiet -b main "$UNITS_SEED"
+mkdir -p "$UNITS_SEED/deploy/systemd"
+cp "$REPO"/deploy/lib-edge-*.sh "$UNITS_SEED/deploy/"
+cp "$SCRIPT" "$UNITS_SEED/deploy/upgrade-edge.sh"
+printf '9.9.9-capture\n' > "$UNITS_SEED/VERSION"
+printf '[Service]\nExecStart=/bin/true --release-unit\n' > "$UNITS_SEED/deploy/systemd/akconnect-relay.service"
+git -C "$UNITS_SEED" add -A >/dev/null
+git -C "$UNITS_SEED" -c user.email=g@l -c user.name=gate commit --quiet -m units
+UNITS_SHA="$(git -C "$UNITS_SEED" rev-parse HEAD)"
+git clone --quiet --bare "$UNITS_SEED" "$WORK/units-origin.git"
+git clone --quiet "$WORK/units-origin.git" "$WORK/units-clone" 2>/dev/null
+mkdir -p "$WORK/units-unitdiff"
+: > "$WORK/units-unitdiff/akconnect-upgrade.timer"
+printf '[Service]\nExecStart=/bin/true --installed-unit\n' > "$WORK/units-unitdiff/akconnect-relay.service"
+: > "$WORK/systemctl.log"
+EDGE_BIN="$WORK/current-bin" EDGE_ARGS=" " \
+    run_edge unitdiff "$WORK/units-clone" 8814 --commit "$UNITS_SHA" --branch main --published 9.9.9-capture
+if grep -q "restart akconnect" "$WORK/systemctl.log" \
+        && ! grep -q "── building the coordinator and the relay" "$WORK/edge-unitdiff.out" \
+        && cmp -s "$UNITS_SEED/deploy/systemd/akconnect-relay.service" "$WORK/units-unitdiff/akconnect-relay.service"; then
+    ok "a unit file the release changed is installed and the services restarted, with no build"
+else
+    bad "a changed unit file was not picked up without a rebuild" \
+        "$(grep -E 'unit files|building|services current' "$WORK/edge-unitdiff.out" | head -3); $(grep restart "$WORK/systemctl.log" | head -2)"
 fi
 
 # A check that fails on an edge that IS on the release — here the relay's
@@ -1983,12 +2034,20 @@ fi
 
 # The copy handed to stops early: an option neither copy knows. The directory
 # it ran from is its to remove, whatever point it stops at.
+# Back to the old copy first: the run above left the checkout on the release,
+# whose copy has nothing newer to hand over to.
+git -C "$WORK/ho-clone" checkout --quiet -B main "$HO_SHA~1" 2>/dev/null
+ls -d /tmp/akconnect-upgrade-edge.* 2>/dev/null | sort > "$WORK/ho-tmp-before"
 ( cd "$WORK" && EDGE_RUN="$WORK/ho-clone/deploy/upgrade-edge.sh" EDGE_ARGS="--no-such-option --skip-pack --no-timer --src ho-clone" \
     run_edge handover2 ho-clone 8812 --commit "$HO_SHA" --branch main )
-git -C "$WORK/ho-clone" checkout --quiet -B main HEAD~1 2>/dev/null
 ls -d /tmp/akconnect-upgrade-edge.* 2>/dev/null | sort > "$WORK/ho-tmp-after"
 LEAKED="$(comm -13 "$WORK/ho-tmp-before" "$WORK/ho-tmp-after")"
-if ! grep -q "unknown option: --no-such-option" "$WORK/edge-handover2.out"; then
+# The copy handed to refuses the option at once — it is the release's own, and
+# nobody newer will know it — so "handing over" is the evidence it ran.
+if ! grep -q "handing over" "$WORK/edge-handover2.out"; then
+    bad "the early-stop case never handed over, so it tests nothing" \
+        "$(grep -E 'handing|running the release|✗' "$WORK/edge-handover2.out" | head -3)"
+elif ! grep -q "unknown option: --no-such-option" "$WORK/edge-handover2.out"; then
     bad "an option nobody knows was not refused" "$(tail -3 "$WORK/edge-handover2.out" | tr '\n' ' ')"
 elif [ -n "$LEAKED" ]; then
     bad "a copy handed to that stopped early left itself in /tmp" "$LEAKED"
@@ -2018,9 +2077,19 @@ fi
 group "a release branch deleted after it was merged"
 
 # The panel names a branch origin no longer has, and a commit that is on main.
+# A clone made before the release was merged: it has never had the commit, so
+# finding it is the fetch's doing and not something left lying around.
+GONE_SEED="$WORK/gone-seed"
+git clone --quiet "$WORK/seed" "$GONE_SEED" 2>/dev/null
+git -C "$GONE_SEED" checkout --quiet -B main "$TARGET_SHA~1" 2>/dev/null
+git init --quiet --bare -b main "$WORK/gone-origin.git"
+git -C "$GONE_SEED" push --quiet "$WORK/gone-origin.git" "HEAD:refs/heads/main" 2>/dev/null
 GONE="$WORK/gone"
-git clone --quiet --branch main --single-branch "$GIT_URL" "$GONE" 2>/dev/null
-git -C "$GONE" checkout --quiet -B main HEAD~1 2>/dev/null
+git clone --quiet --branch main --single-branch "$WORK/gone-origin.git" "$GONE" 2>/dev/null
+git -C "$GONE_SEED" push --quiet "$WORK/gone-origin.git" "$TARGET_SHA:refs/heads/main" 2>/dev/null
+if git -C "$GONE" cat-file -e "$TARGET_SHA^{commit}" 2>/dev/null; then
+    bad "the deleted-branch fixture already has the commit" "it tests nothing"
+fi
 
 run_edge gone "$GONE" 8804 --branch release/gone --commit "$TARGET_SHA"
 
@@ -2033,6 +2102,64 @@ fi
 [ "$(git -C "$GONE" rev-parse HEAD 2>/dev/null)" = "$TARGET_SHA" ] \
     && ok "and the checkout is at that commit" \
     || bad "the checkout is at $(git -C "$GONE" rev-parse --short HEAD 2>/dev/null), not the panel's commit"
+
+group "the panel names a commit its branch does not contain"
+
+# The panel's database is written by a web application, and this runs as root.
+# GitHub serves any pull request's commits by id from the upstream URL, and
+# 1.9.7-dev.21 fetched the panel's commit by id when its branch did not bring
+# it — so whoever could write the panel's settings could have had every edge
+# build a stranger's pull request, and hand over to its copy of this script.
+PR_SEED="$WORK/pr-seed"
+git clone --quiet "$WORK/seed" "$PR_SEED" 2>/dev/null
+git -C "$PR_SEED" checkout --quiet -B pr "$TARGET_SHA" 2>/dev/null
+{
+    head -1 "$SCRIPT"
+    printf 'echo PULL-REQUEST-SCRIPT-RAN; touch "%s/PR-RAN"\n' "$WORK"
+    tail -n +2 "$SCRIPT"
+} | sed 's/^SCRIPT_REVISION=.*/SCRIPT_REVISION=99/' > "$PR_SEED/deploy/upgrade-edge.sh"
+git -C "$PR_SEED" -c user.email=g@l -c user.name=gate commit --quiet -am "a pull request"
+PR_SHA="$(git -C "$PR_SEED" rev-parse HEAD)"
+git -C "$PR_SEED" push --quiet "$WORK/origin" "HEAD:refs/pull/1/head" 2>/dev/null
+git -C "$WORK/origin" rev-parse --verify --quiet "refs/pull/1/head" >/dev/null \
+    || bad "the pull request fixture was not published to origin" "the cases below would test nothing"
+
+PR_CLONE="$WORK/pr-clone"
+git clone --quiet "$GIT_URL" "$PR_CLONE" 2>/dev/null
+run_edge pr "$PR_CLONE" 8815 --branch main --commit "$PR_SHA"
+if [ -e "$WORK/PR-RAN" ] || grep -q "PULL-REQUEST-SCRIPT-RAN" "$WORK/edge-pr.out"; then
+    bad "a pull request's copy of this script ran as root" "the panel chose the code, not only the release"
+elif [ "$(git -C "$PR_CLONE" rev-parse HEAD 2>/dev/null)" = "$PR_SHA" ]; then
+    bad "the checkout was put on a commit origin's branch does not contain"
+else
+    ok "a commit that is only a pull request is never fetched, built or run"
+fi
+
+# And one already in the clone — fetched by an older copy, or by hand — is
+# refused by name rather than built.
+git -C "$PR_CLONE" fetch --quiet origin "refs/pull/1/head" 2>/dev/null
+git -C "$PR_CLONE" cat-file -e "$PR_SHA^{commit}" 2>/dev/null \
+    || bad "the pull request's commit could not be put in the clone" "the case below would test nothing"
+git -C "$PR_CLONE" checkout --quiet -B main "$TARGET_SHA~1" 2>/dev/null
+run_edge pr2 "$PR_CLONE" 8816 --branch main --commit "$PR_SHA"
+if [ -e "$WORK/PR-RAN" ] || grep -q "PULL-REQUEST-SCRIPT-RAN" "$WORK/edge-pr2.out"; then
+    bad "a pull request's copy of this script ran as root, once it was in the clone"
+elif [ "$EDGE_CODE" -ne 0 ] && grep -q "which is not on" "$WORK/edge-pr2.out"; then
+    ok "one that is already in the clone is refused, naming the branch it is not on"
+else
+    bad "a commit origin's branch does not contain was not refused" \
+        "exit $EDGE_CODE; $(grep -E '✗|source fetched' "$WORK/edge-pr2.out" | head -2)"
+fi
+
+# A value that git would read as an option is not a commit.
+run_edge inject "$PR_CLONE" 8817 --branch main --commit "--upload-pack=touch $WORK/INJECTED; git-upload-pack"
+if [ -e "$WORK/INJECTED" ]; then
+    bad "a commit from the panel was run as a git option" "--upload-pack ran a command as root"
+elif [ "$EDGE_CODE" -ne 0 ] && grep -q "not a full commit id" "$WORK/edge-inject.out"; then
+    ok "a commit that is not a commit id is refused before git sees it"
+else
+    bad "a malformed commit was not refused" "exit $EDGE_CODE; $(grep '✗' "$WORK/edge-inject.out" | head -2)"
+fi
 
 group "a tag that moved on origin"
 
@@ -2052,9 +2179,11 @@ if grep -E "source fetched" "$WORK/edge-moved.out" | grep -qE "PASS.*[0-9a-f]{7}
 else
     bad "a moved tag stops the fetch" "$(grep -E 'clobber|could not|source fetched' "$WORK/edge-moved.out" | head -3)"
 fi
-[ "$(git -C "$MOVED" rev-parse moved-tag 2>/dev/null)" = "$(git -C "$WORK/seed" rev-parse moved-tag)" ] \
-    && ok "and the tag now says what origin says" \
-    || bad "the local tag still points where it used to"
+# Tags are not fetched at all now — nothing reads them — so the clone's own
+# tag is left as it was, as are any tags its owner made.
+[ "$(git -C "$MOVED" rev-parse moved-tag 2>/dev/null)" != "$(git -C "$WORK/seed" rev-parse moved-tag)" ] \
+    && ok "and the clone's own tags are left alone" \
+    || bad "the fetch moved a tag in the clone" "nothing here reads tags, and a login user's own would be lost"
 
 group "a checkout reached through a symlink, or owned by nobody"
 
