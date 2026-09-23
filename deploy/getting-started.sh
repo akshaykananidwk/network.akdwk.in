@@ -67,11 +67,35 @@ warn() { printf '  %s!%s %s\n' "$YELLOW" "$RESET" "$*"; }
 step() { printf '\n%s── %s%s\n' "$BOLD" "$*" "$RESET"; }
 die()  { printf '\n  %s✗ %s%s\n\n' "$RED" "$*" "$RESET" >&2; exit 1; }
 
+# Every temporary path this script makes, removed however it leaves — a
+# successful finish, a die, a failed command, or the operator pressing ^C.
+#
+# Nothing here should ever hold a secret: the answers the panel installer
+# needs go to it on standard input and are never written down. This exists so
+# that is true of the build directories and scratch files too, and so an
+# interrupted run does not leave them behind.
+AKCONNECT_TMP=""
+
+keep_tmp() {
+    AKCONNECT_TMP="$AKCONNECT_TMP $1"
+    printf '%s\n' "$1"
+}
+
+akconnect_cleanup() {
+    local path
+    for path in $AKCONNECT_TMP; do
+        [ -n "$path" ] && rm -rf "$path"
+    done
+    AKCONNECT_TMP=""
+}
+
+trap akconnect_cleanup EXIT INT TERM HUP
+
 # run_quiet keeps a wall of apt output off the screen but hands all of it over
 # when something fails — the one moment it is worth reading.
 run_quiet() {
     local log
-    log="$(mktemp)"
+    log="$(keep_tmp "$(mktemp)")"
     if "$@" >"$log" 2>&1; then
         rm -f "$log"
 
@@ -234,7 +258,7 @@ do_uninstall() {
     step "firewall"
     if command -v ufw >/dev/null 2>&1; then
         local rule
-        for rule in "8443/udp" "9000/udp" "51900:52400/udp"; do
+        for rule in "8443/udp" "9000/udp" "51820/udp" "51900:52400/udp"; do
             ufw --force delete allow "$rule" >/dev/null 2>&1
         done
         ok "the AK Connect UDP rules are gone (80 and 443 were left alone)"
@@ -534,7 +558,9 @@ DB_PASS=""
 if [ -f "$PANEL_DIR/config/config.php" ]; then
     ok "already installed — the existing database and credentials are untouched"
 else
+    REUSING=0
     if mysql -N -B -e "SHOW DATABASES LIKE '$DB_NAME'" 2>/dev/null | grep -q "$DB_NAME"; then
+        REUSING=1
         TABLES="$(mysql -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='$DB_NAME'" 2>/dev/null)"
         [ "${TABLES:-0}" -gt 0 ] && die "the $DB_NAME database already has ${TABLES} table(s), but there is no
     config/config.php to go with it. That is a half-finished install, and
@@ -544,6 +570,10 @@ else
         mysql -e 'DROP DATABASE $DB_NAME'"
     fi
 
+    # A new password every time this step runs, and ALTER USER below is what
+    # makes that safe: the account is re-pointed at the password the answers
+    # are about to carry, so a re-run after a failure can never leave the
+    # panel holding one the database does not have.
     DB_PASS="$(openssl rand -base64 30 | tr -d '/+=' | cut -c1-28)"
 
     mysql -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -552,7 +582,11 @@ else
               GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$DB_USER'@'localhost';
               FLUSH PRIVILEGES;" 2>/dev/null \
         || die "could not create the database. Is MariaDB running, and does root have socket access?"
-    ok "database $DB_NAME and user $DB_USER created"
+    if [ "$REUSING" -eq 1 ]; then
+        ok "reusing the empty $DB_NAME database; the $DB_USER password has been reset to match"
+    else
+        ok "database $DB_NAME and user $DB_USER created"
+    fi
 fi
 
 # ---------------------------------------------------------------- the panel
@@ -562,15 +596,28 @@ step "installing the panel"
 if [ -f "$PANEL_DIR/config/config.php" ]; then
     ok "config/config.php is already here — skipping the installer"
 else
-    ANSWERS="$(mktemp)"
-    chmod 600 "$ANSWERS"
+
 
     # A password nobody ever sees, because nobody ever uses it: the
     # administrator sets their own through the one-time link printed at the
     # end. A password that is printed is a password that lives in scrollback.
-    THROWAWAY="$(openssl rand -base64 33 | tr -d '\n')"
+    # Stripped of the base64 characters JSON or a shell would have to escape.
+    # It is never typed and never shown, so the only thing it has to be is
+    # long and unguessable.
+    THROWAWAY="$(openssl rand -base64 48 | tr -d '/+=\n' | cut -c1-40)"
 
-    cat > "$ANSWERS" <<JSON
+    # Held in this shell and handed to the installer on standard input.
+    #
+    # It used to be a file: root created it with mktemp at 0600 and the
+    # installer, running as the web user, could not open it. What the
+    # installer then said was "The answers file is not valid JSON", because an
+    # unreadable file reads as the empty string — so a permission fault
+    # reported itself as a syntax one and sent the operator to look at the
+    # JSON. Both halves of that are fixed; this half is the better fix,
+    # because the database password and the administrator's throwaway
+    # password now never touch the disk at all and there is nothing to chown,
+    # nothing to leak and nothing to clean up.
+    ANSWERS_JSON="$(cat <<JSON
 {
   "site_name": "AK Connect",
   "org_name": "AK Computer",
@@ -592,12 +639,14 @@ else
   "drop_existing": false
 }
 JSON
+)"
 
-    if ! sudo -u "$WEB_USER" "$PHP_BIN" "$PANEL_DIR/cli/install.php" --answers="$ANSWERS"; then
-        rm -f "$ANSWERS"
+    if ! printf '%s\n' "$ANSWERS_JSON" \
+        | sudo -u "$WEB_USER" "$PHP_BIN" "$PANEL_DIR/cli/install.php" --answers=-; then
+        ANSWERS_JSON=""
         die "the panel installer failed — the output above says why"
     fi
-    rm -f "$ANSWERS"
+    ANSWERS_JSON=""
     ok "panel installed"
 fi
 
@@ -752,7 +801,7 @@ fi
 step "building the coordinator and the relay"
 
 PANEL_VERSION="$(cat "$SRC_DIR/VERSION" 2>/dev/null | tr -d '\r\n')"
-BUILD_DIR="$(mktemp -d)"
+BUILD_DIR="$(keep_tmp "$(mktemp -d)")"
 
 build_one() {
     local svc=$1
@@ -796,7 +845,7 @@ COORD_SECRET="$(cat "$ETC_DIR/coordinator.secret.for-panel" 2>/dev/null | tr -d 
 # that gets copied wrong, and the symptom — every agent enrolling and then
 # never connecting — looks like a network fault for as long as it takes to
 # check.
-WIRE_PHP="$(mktemp)"
+WIRE_PHP="$(keep_tmp "$(mktemp)")"
 cat > "$WIRE_PHP" <<'PHP'
 <?php
 declare(strict_types=1);
@@ -861,6 +910,10 @@ if command -v ufw >/dev/null 2>&1; then
     ufw allow 8443/udp          >/dev/null 2>&1   # the coordinator: every agent announces here
     ufw allow 9000/udp          >/dev/null 2>&1   # the relay's control port
     ufw allow 51900:52400/udp   >/dev/null 2>&1   # the relay's data ports, pinned in its unit
+    # Opened now, before the hub exists, so that a server installed today does
+    # not need its firewall touched again to gain it. An open UDP port with
+    # nothing listening answers nothing and is not a way in. See docs/HUB.md.
+    ufw allow 51820/udp         >/dev/null 2>&1   # the hub: phones have one peer, and it is here
 
     # SSH last and deliberately: enabling ufw without it locks the operator
     # out of the machine they are installing on.
@@ -870,9 +923,9 @@ if command -v ufw >/dev/null 2>&1; then
     if ! ufw status 2>/dev/null | grep -q "^Status: active"; then
         ufw --force enable >/dev/null 2>&1
     fi
-    ok "80,443/tcp · 8443,9000,51900-52400/udp · ssh on ${SSH_PORT:-22}"
+    ok "80,443/tcp · 8443,9000,51820,51900-52400/udp · ssh on ${SSH_PORT:-22}"
 else
-    warn "ufw is not installed — open 80,443/tcp and 8443,9000,51900-52400/udp yourself"
+    warn "ufw is not installed — open 80,443/tcp and 8443,9000,51820,51900-52400/udp yourself"
 fi
 
 # ------------------------------------------------------------- scheduled work

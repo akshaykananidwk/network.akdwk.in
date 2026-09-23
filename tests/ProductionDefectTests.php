@@ -35,6 +35,7 @@ final class ProductionDefectTests
         self::deployDocument();
         self::edgeUpgradeScript();
         self::httpsFallback();
+        self::unattendedInstallAcrossUsers();
     }
 
     // ------------------------------------------------------- the 1.9.6 path
@@ -634,5 +635,302 @@ final class ProductionDefectTests
             $deploy,
             'Stage 3a names the page that now exists'
         );
+    }
+
+    // --------------------------------------------- the 1.9.7-dev.20 path
+
+    /**
+     * The unattended installer, run by one user against a file another owns.
+     *
+     * The first field run of deploy/getting-started.sh on a clean server
+     * stopped here. The script runs as root, the panel installer runs as the
+     * web user, and the answers — which carry the database password — went
+     * between them in a file root created with mktemp at mode 0600. The web
+     * user could stat it and could not open it.
+     *
+     * What it then said was:
+     *
+     *     PHP Warning: file_get_contents(/tmp/tmp.nY7B7cjZ7T): Failed to
+     *     open stream: Permission denied
+     *     The answers file is not valid JSON.
+     *
+     * Both lines are true. Together they are a lie about which fault this is:
+     * an unreadable file reads as false, false casts to the empty string, and
+     * the empty string is not valid JSON. The operator was sent to look at
+     * the JSON, which was perfect.
+     *
+     * Two things are checked, because there are two fixes and each stands on
+     * its own. The installer must name a permission problem as one. And the
+     * script must not create the situation at all — the answers now go over
+     * standard input, so the secret is never written down, there is nothing
+     * to chown and nothing left behind.
+     */
+    private static function unattendedInstallAcrossUsers(): void
+    {
+        TestCase::group('Defect — the unattended installer, across two users');
+
+        // The script's half, checked statically because it holds whatever the
+        // last edit left and a static check cannot be skipped by an
+        // environment that will not drop privileges.
+        $script = (string) @file_get_contents(APP_ROOT . '/deploy/getting-started.sh');
+
+        TestCase::assert(
+            preg_match('/install\.php[^\n|]*--answers=(?!-)/', $script) !== 1,
+            'the installer script never hands a file path to the panel installer',
+            preg_match('/install\.php[^\n|]*--answers=(?!-)/', $script) === 1
+                ? 'getting-started.sh passes --answers=<path> to a process running as another user, '
+                    . 'which is the defect: use --answers=- and pipe the JSON in'
+                : ''
+        );
+
+        TestCase::assert(
+            str_contains($script, '--answers=-'),
+            'it hands the answers over on standard input instead'
+        );
+
+        TestCase::assert(
+            preg_match('/\btrap\s+\w+\s+EXIT\b/', $script) === 1,
+            'and removes its temporary files however it exits'
+        );
+
+        // The installer's half, run for real: one user writes a file only it
+        // can read, another runs the installer against it.
+        $dropper = self::privilegeDropper();
+        if ($dropper === null) {
+            TestCase::skip(
+                'running the installer as another user',
+                'this needs to be root and to have setpriv or sudo, which is true on a server '
+                . 'and not in every development container. The static checks above still ran.'
+            );
+
+            return;
+        }
+
+        $tree = self::cleanTreeCopy();
+        if ($tree === null) {
+            TestCase::skip('running the installer as another user', 'could not stage a clean copy of the tree');
+
+            return;
+        }
+
+        $answers = $tree . '/answers.json';
+        file_put_contents($answers, json_encode([
+            'app_url' => 'https://example.test', 'db_name' => 'x', 'db_user' => 'y',
+            'admin_name' => 'z', 'admin_email' => 'a@b.test', 'admin_password' => 'not-a-real-password',
+        ]));
+        chmod($answers, 0600);
+
+        $unreadable = self::runAs($dropper, [PHP_BINARY, $tree . '/cli/install.php', '--answers=' . $answers]);
+
+        // "Cannot read", not merely the words "permission denied": PHP's own
+        // warning carries those two words, so an assertion that looked only
+        // for them passed against the exact build that failed in the field.
+        // This looks for the installer having said it, deliberately, itself.
+        $saidIt = stripos($unreadable, 'cannot read') !== false
+            && stripos($unreadable, 'permission denied') !== false;
+
+        TestCase::assert(
+            $saidIt,
+            'a file the installer may not open is reported as a permission problem',
+            $saidIt ? '' : 'it said: ' . self::firstLine($unreadable)
+        );
+
+        TestCase::assert(
+            stripos($unreadable, 'not valid JSON') === false,
+            'and not as a JSON problem, which is what sent the operator to the wrong place',
+            stripos($unreadable, 'not valid JSON') === false ? '' : 'it said: ' . self::firstLine($unreadable)
+        );
+
+        // And the route the script actually takes now gets past the answers
+        // entirely — as far as the requirement checks, which is where a real
+        // install carries on from.
+        $viaStdin = self::runAs(
+            $dropper,
+            [PHP_BINARY, $tree . '/cli/install.php', '--answers=-'],
+            (string) file_get_contents($answers)
+        );
+
+        // A usage message counts as a failure here. An installer that does not
+        // understand --answers=- prints one, and prints neither of the two
+        // phrases below — so testing only for their absence passed against a
+        // build that could not read standard input at all.
+        $readStdin = stripos($viaStdin, 'permission denied') === false
+            && stripos($viaStdin, 'not valid JSON') === false
+            && stripos($viaStdin, 'Usage:') === false;
+
+        TestCase::assert(
+            $readStdin,
+            'the same answers on standard input are read without a permission problem',
+            $readStdin ? '' : 'it said: ' . self::firstLine($viaStdin)
+        );
+
+        TestCase::assert(
+            stripos($viaStdin, 'Checking requirements') !== false,
+            'and the install proceeds past them'
+        );
+
+        self::removeTree($tree);
+    }
+
+    /** The first non-empty line, which is the part worth putting in a failure. */
+    private static function firstLine(string $output): string
+    {
+        foreach (explode("\n", $output) as $line) {
+            if (trim($line) !== '' && !str_starts_with(trim($line), 'PHP Warning')) {
+                return trim($line);
+            }
+        }
+
+        return trim($output) === '' ? '(no output)' : trim(explode("\n", $output)[0]);
+    }
+
+    /**
+     * A command prefix that runs something as a different, unprivileged user.
+     *
+     * Null when this process cannot do that, which is most development
+     * containers — the caller skips rather than pretending.
+     *
+     * @return list<string>|null
+     */
+    private static function privilegeDropper(): ?array
+    {
+        if (!function_exists('posix_geteuid') || posix_geteuid() !== 0) {
+            return null;
+        }
+
+        if (self::which('setpriv') !== null) {
+            return [self::which('setpriv'), '--reuid=65534', '--regid=65534', '--clear-groups'];
+        }
+
+        if (self::which('sudo') !== null) {
+            return [self::which('sudo'), '-n', '-u', 'nobody'];
+        }
+
+        return null;
+    }
+
+    private static function which(string $tool): ?string
+    {
+        foreach (['/usr/bin/', '/bin/', '/usr/sbin/', '/sbin/'] as $directory) {
+            if (is_executable($directory . $tool)) {
+                return $directory . $tool;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Run a command, optionally with something on its standard input, and
+     * return everything it wrote.
+     *
+     * @param list<string> $dropper
+     * @param list<string> $command
+     */
+    private static function runAs(array $dropper, array $command, string $stdin = ''): string
+    {
+        $full = implode(' ', array_map('escapeshellarg', array_merge($dropper, $command)));
+
+        $pipes = [];
+        $process = proc_open(
+            $full,
+            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes
+        );
+
+        if (!is_resource($process)) {
+            return '';
+        }
+
+        fwrite($pipes[0], $stdin);
+        fclose($pipes[0]);
+
+        $out = (string) stream_get_contents($pipes[1]);
+        $err = (string) stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        proc_close($process);
+
+        return $out . $err;
+    }
+
+    /**
+     * A copy of the tree with no config/config.php and no install.lock.
+     *
+     * Without both removed the installer refuses before it ever looks at the
+     * answers, and the check would pass on a panel that still had the bug.
+     * World-readable, because the point is a file the other user CANNOT read
+     * and everything around it being readable is what makes that specific.
+     */
+    private static function cleanTreeCopy(): ?string
+    {
+        $root = sys_get_temp_dir() . '/akconnect-install-' . bin2hex(random_bytes(6));
+        if (!@mkdir($root, 0755, true)) {
+            return null;
+        }
+
+        foreach (['app', 'cli', 'config', 'database', 'install', 'lang'] as $directory) {
+            if (!self::copyTree(APP_ROOT . '/' . $directory, $root . '/' . $directory)) {
+                self::removeTree($root);
+
+                return null;
+            }
+        }
+
+        @unlink($root . '/config/config.php');
+        @unlink($root . '/install/install.lock');
+        @chmod($root, 0755);
+
+        return $root;
+    }
+
+    private static function copyTree(string $from, string $to): bool
+    {
+        if (!is_dir($from)) {
+            return false;
+        }
+        if (!is_dir($to) && !@mkdir($to, 0755, true)) {
+            return false;
+        }
+
+        /** @var iterable<\SplFileInfo> $entries */
+        $entries = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($from, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::SELF_FIRST
+        );
+
+        foreach ($entries as $entry) {
+            $target = $to . '/' . substr($entry->getPathname(), strlen($from) + 1);
+            if ($entry->isDir()) {
+                @mkdir($target, 0755, true);
+
+                continue;
+            }
+            @copy($entry->getPathname(), $target);
+            @chmod($target, 0644);
+        }
+
+        return true;
+    }
+
+    private static function removeTree(string $path): void
+    {
+        if (!is_dir($path)) {
+            @unlink($path);
+
+            return;
+        }
+
+        /** @var iterable<\SplFileInfo> $entries */
+        $entries = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST
+        );
+
+        foreach ($entries as $entry) {
+            $entry->isDir() ? @rmdir($entry->getPathname()) : @unlink($entry->getPathname());
+        }
+
+        @rmdir($path);
     }
 }

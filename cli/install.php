@@ -96,15 +96,79 @@ if ($evidence !== []) {
 }
 
 $answersFile = (string) ($options['answers'] ?? '');
-if ($answersFile === '' || !is_file($answersFile)) {
-    fwrite(STDERR, "Usage: php cli/install.php --answers=<file.json>\n       php cli/install.php --print-template\n");
+if ($answersFile === '') {
+    fwrite(STDERR, "Usage: php cli/install.php --answers=<file.json>\n"
+        . "       php cli/install.php --answers=-          read the answers from standard input\n"
+        . "       php cli/install.php --print-template\n");
     exit(1);
 }
 
-$answers = json_decode((string) file_get_contents($answersFile), true);
+// Standard input, so a caller with secrets to hand over never has to write
+// them to a file at all. deploy/getting-started.sh uses this: it runs as root
+// and the installer runs as the web user, and the obvious way to bridge that
+// — a file only root can read — is how a real install failed in the field.
+if ($answersFile === '-') {
+    $raw = stream_get_contents(STDIN);
+    if ($raw === false || trim((string) $raw) === '') {
+        fwrite(STDERR, "No answers arrived on standard input.\n");
+        exit(1);
+    }
+    $source = 'standard input';
+} else {
+    if (!is_file($answersFile)) {
+        fwrite(STDERR, 'No such answers file: ' . $answersFile . "\n");
+        exit(1);
+    }
+
+    // Asked before reading, and said as itself.
+    //
+    // Reading an unreadable file returns false, false casts to the empty
+    // string, and the empty string is not valid JSON — so a permission
+    // problem reported itself as "The answers file is not valid JSON", which
+    // is true and useless. The operator went looking at the JSON. It is a
+    // different fault with a different fix and it now says so.
+    if (!is_readable($answersFile)) {
+        fwrite(STDERR, 'Cannot read ' . $answersFile . ': permission denied'
+            . ' (running as ' . currentUserName() . ").\n"
+            . "The file exists but this user may not open it. Either hand the answers over on\n"
+            . "standard input — php cli/install.php --answers=- — or make the file readable by\n"
+            . "the user the installer runs as.\n");
+        exit(1);
+    }
+
+    $raw = @file_get_contents($answersFile);
+    if ($raw === false) {
+        $error = error_get_last();
+        fwrite(STDERR, 'Cannot read ' . $answersFile . ': '
+            . ($error['message'] ?? 'unknown error') . "\n");
+        exit(1);
+    }
+    $source = $answersFile;
+}
+
+$answers = json_decode((string) $raw, true);
 if (!is_array($answers)) {
-    fwrite(STDERR, "The answers file is not valid JSON.\n");
+    fwrite(STDERR, 'The answers read from ' . $source . ' are not valid JSON: '
+        . json_last_error_msg() . "\n");
     exit(1);
+}
+
+/**
+ * Who this process is, for a permission message that would otherwise leave
+ * the reader guessing which user could not open the file.
+ */
+function currentUserName(): string
+{
+    if (function_exists('posix_geteuid')) {
+        $uid = posix_geteuid();
+        $info = function_exists('posix_getpwuid') ? posix_getpwuid($uid) : false;
+
+        return is_array($info) && isset($info['name']) ? (string) $info['name'] : 'uid ' . $uid;
+    }
+
+    $user = getenv('USER');
+
+    return $user !== false && $user !== '' ? $user : 'this user';
 }
 
 function out(string $message): void

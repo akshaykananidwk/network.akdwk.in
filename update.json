@@ -1,10 +1,10 @@
 {
-  "version": "1.9.7-dev.19",
-  "released_at": "2026-09-23T18:30:00Z",
+  "version": "1.9.7-dev.20",
+  "released_at": "2026-09-23T20:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Pressing Update Now cost a relayed pair about eighteen seconds and then four minutes of flapping. It now costs three seconds. The agent no longer announces itself over two paths at once, a few seconds of server restart is no longer read as a network that blocks UDP, and WireGuard is told to use a moved endpoint immediately instead of noticing fifteen seconds later.",
+  "notes": "The one-command install failed on a clean server: root wrote the answers to a file only root could read, and the installer, running as the web user, reported a permission fault as bad JSON. The answers now go over standard input and never touch the disk.",
   "migrations": [],
   "protected": [
     ".env",

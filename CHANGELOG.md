@@ -6,6 +6,61 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.20] — development
+
+**The one-command install stopped at "installing the panel" on a clean
+server.** The script runs as root, the panel installer runs as the web user,
+and the answers between them — which carry the database password — went in a
+file root created with `mktemp` at mode 0600. The web user could see it and
+could not open it.
+
+```
+PHP Warning: file_get_contents(/tmp/tmp.nY7B7cjZ7T): Failed to open stream:
+Permission denied
+The answers file is not valid JSON.
+```
+
+Both lines are true, and together they point at the wrong thing. An
+unreadable file reads as `false`, `false` casts to the empty string, and the
+empty string is not valid JSON — so a permission fault reported itself as a
+syntax one and sent the operator to inspect a file that was perfect.
+
+Two fixes, because they are two faults.
+
+*The answers go over standard input now.* `cli/install.php --answers=-` reads
+them from the pipe, so the database password and the administrator's
+throwaway password are never written to disk at all — there is nothing to
+chown, nothing to leak and nothing to clean up. The script also removes every
+temporary path it makes on any exit, including an interrupt.
+
+*And the installer names a permission problem as one*, with the user it is
+running as and the two ways out of it. `is_readable` is asked before the file
+is read, a missing file and an unreadable one say different things, and an
+actual JSON error now quotes what the parser objected to.
+
+A check in the verification suite covers both: one user writes a 0600 file,
+another runs the installer against it, and the same answers then go in on
+standard input. It also refuses a script that hands a file path to an
+installer running as somebody else. All seven assertions fail against the
+build that failed in the field — including the two that a weaker version of
+this test would have passed, because PHP's own warning contains the words
+"permission denied" and a usage message contains neither phrase being looked
+for.
+
+Also: `51820/udp` is opened for the hub. Nothing listens on it yet — it is
+opened now so a server installed today does not need its firewall touched
+again to gain it. See `docs/HUB.md`.
+
+**Re-running is safe and picks up where it stopped.** Packages, Go, the
+clones and the database are all left as they are; the empty `akconnect`
+database is reused and the `akconnect` account's password is reset to the one
+the new configuration will carry, which is what makes a re-run after a failure
+unable to leave the panel holding a password the database does not have. It
+now says `reusing the empty akconnect database` rather than claiming to have
+created it.
+
+---
+
 ## [1.9.7-dev.19] — development
 
 **An edge upgrade cost every relayed pair eighteen seconds and then four
