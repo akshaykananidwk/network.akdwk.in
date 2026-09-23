@@ -118,10 +118,62 @@ final class DocumentationTests
             TestCase::assert($exists, $file . ' is present', $exists ? '' : $purpose);
         }
 
+        self::manifestAgreesWithTheChangelog();
+
         // .gitignore must keep the credential files out of the repository.
         $gitignore = is_file(APP_ROOT . '/.gitignore') ? (string) file_get_contents(APP_ROOT . '/.gitignore') : '';
         foreach (['/config/config.php', '/config/.env', '/storage/', '/uploads/', 'install.lock'] as $pattern) {
             TestCase::assertContains($pattern, $gitignore, '.gitignore excludes ' . $pattern);
+        }
+    }
+
+    /**
+     * The release manifest names the release this tree is.
+     *
+     * The panel reads update.json AFTER it has downloaded the tag, and acts on
+     * what it says: the version it reports afterwards, and which migrations it
+     * runs. A manifest left at the previous release installs the new code,
+     * reports the old version, and runs none of the new migrations.
+     *
+     * It happened on 1.9.6, and it would have installed the HTTPS fallback
+     * without the column the panel needs to show it — the feature present and
+     * invisible, on the release whose whole point is a path the panel has to
+     * be able to name.
+     *
+     * The tag cannot be checked from here: it does not exist until after this
+     * commit. The changelog can, and it is edited by the same hand in the same
+     * release, so disagreeing with it is the shape the mistake takes.
+     */
+    private static function manifestAgreesWithTheChangelog(): void
+    {
+        $manifest = json_decode((string) @file_get_contents(APP_ROOT . '/update.json'), true);
+        TestCase::assert(is_array($manifest), 'update.json is valid JSON');
+
+        $version = (string) ($manifest['version'] ?? '');
+        TestCase::assert(
+            preg_match('/^\d+\.\d+\.\d+$/', $version) === 1,
+            'update.json names a three-part version'
+        );
+
+        $changelog = (string) @file_get_contents(APP_ROOT . '/CHANGELOG.md');
+        TestCase::assert(
+            preg_match('/^## \[(\d+\.\d+\.\d+)\]/m', $changelog, $newest) === 1,
+            'CHANGELOG.md has a newest release heading'
+        );
+
+        TestCase::assertSame(
+            $newest[1],
+            $version,
+            'update.json names the release CHANGELOG.md documents at the top'
+        );
+
+        // And every migration it names is really in the tree, because one that
+        // is not stops the update part-way through on a customer\'s panel.
+        foreach ((array) ($manifest['migrations'] ?? []) as $migration) {
+            TestCase::assert(
+                is_file(APP_ROOT . '/database/migrations/' . $migration),
+                'update.json migration ' . $migration . ' exists'
+            );
         }
     }
 }
