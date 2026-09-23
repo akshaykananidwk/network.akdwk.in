@@ -14,6 +14,7 @@ left the machine, which is what this is for.
 
     capture-panel.py <port> <capture-file> [--secret HEX]
                      [--version V] [--commit SHA] [--branch NAME]
+                     [--published V]
 
 It answers every request with a plausible /api/v1/edge/release body so the
 script under test carries on, and appends one JSON object per request to the
@@ -114,6 +115,13 @@ def main() -> int:
         flag = "--" + field
         if flag in sys.argv:
             RELEASE[field] = sys.argv[sys.argv.index(flag) + 1]
+
+    # Which installers the panel says it already serves. Absent unless asked
+    # for, which is what a panel older than the field reports.
+    if "--published" in sys.argv:
+        published = sys.argv[sys.argv.index("--published") + 1]
+        RELEASE["published_setup"] = published
+        RELEASE["published_agent"] = published
 
     open(CAPTURE, "w", encoding="utf-8").close()
 

@@ -20,6 +20,13 @@ if (PHP_SAPI !== 'cli') {
 
 define('APP_ROOT', dirname(__DIR__));
 
+// Run as root on a tree the web user owns, the installer wrote config.php,
+// .env and install.lock as root:root 0640. The panel, running as the web
+// user, then could not read its own configuration and answered 500 to every
+// request, while this printed "Installation complete".
+require __DIR__ . '/_owner.php';
+akconnect_become_tree_owner(APP_ROOT);
+
 require APP_ROOT . '/app/Core/Autoloader.php';
 $autoloader = new App\Core\Autoloader();
 $autoloader->addNamespace('App', APP_ROOT . '/app');
@@ -366,11 +373,16 @@ if ($recovery !== null) {
     out('');
 }
 
-out('  Add this to cron:');
+$worker = function_exists('posix_getpwuid') ? (string) (posix_getpwuid((int) @fileowner(APP_ROOT))['name'] ?? '') : '';
+out('  The five-minute worker runs as the user that owns the panel\'s files'
+    . ($worker !== '' ? ' (' . $worker . ')' : '') . ', never as root:');
+out('    crontab -u ' . ($worker !== '' ? $worker : '<that user>') . ' -e');
 out('    ' . $installer->crontabLine());
+out('  A server set up by deploy/getting-started.sh already has it, as akconnect-worker.timer —');
+out('  do not add it a second time.');
 out('');
-out('  Then remove the installer:');
-out('    rm -rf ' . APP_ROOT . '/install');
+out('  Leave the install/ folder where it is. It locks itself, and deleting it takes');
+out('  the lock with it — which is how a production panel once served this wizard again.');
 out('');
 
 exit(0);

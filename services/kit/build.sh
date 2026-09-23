@@ -23,7 +23,7 @@ build() {
     (
         cd "$ROOT/services/$module"
         GOTOOLCHAIN=local GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
-            go build -trimpath -ldflags "-s -w -X main.version=$VERSION" \
+            go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=$VERSION" \
             -o "$OUT/$name" "./cmd/$binary"
     )
 }

@@ -51,7 +51,42 @@ address and a one-time link for setting the administrator password.
 
 It is safe to run again: nothing it creates is recreated, the database is not
 touched, and the coordinator's keypair is never regenerated — doing that would
-orphan every device already enrolled.
+orphan every device already enrolled. That is tested rather than asserted:
+`sudo services/lab/install-gate.sh` runs it after a first run that died before
+the panel was installed and after one that died after it, twice in a row,
+stopped part-way with a signal, through `--uninstall` and back, and over trees
+and panels the previous release left — each time in its own namespaces with a
+private database — and checks that nothing was loosened, regenerated or left
+behind. The release gate runs it.
+
+What a re-run does and does not change:
+
+- **The panel is left as it is** once installed — its code, its configuration
+  and the commit it records. The panel updates itself; a re-run does not.
+- **Its coordinator settings are written again** if they differ, which is what
+  repairs a panel an earlier release installed (before 1.9.7-dev.21 that step
+  never worked, and the panel had no coordinator key).
+- **The release channel** is written when you give one — `--channel`, or typed
+  at the prompt — and on the first run that gets that far. Pressing Enter at the
+  prompt of a later run leaves whatever the panel is set to.
+- **A setup link** is printed when the administrator account has not been taken
+  up yet — never signed in to, still on the password the installer gave it —
+  for example after a first run that died after creating it. Once somebody has
+  signed in, a re-run prints no link; `cli/setup-link.php` makes one on demand.
+
+Every git command it runs, it runs as the owner of the repository — the panel
+tree as the web user, the edge source as root. Nothing in it writes a
+`safe.directory`, and none is needed. If a `git config --global --add
+safe.directory …` was added by hand to get past a failed re-run, remove it:
+
+```bash
+sudo git config --file /root/.gitconfig --unset safe.directory /var/www/<your domain>
+```
+
+`--file /root/.gitconfig`, because that is where it went: the installer runs
+under `sudo`, which gives root's home, so the workaround was written into
+root's configuration. The same command without `sudo` edits your own, finds
+nothing, and says nothing.
 
 **It refuses to run on a shared machine.** It installs a web server, claims 80
 and 443 and opens firewall rules; on a box already serving somebody, each of
@@ -543,11 +578,17 @@ Create the network and the first join code:
 2. **Join code → Issue.** Copy it.
 
 Then rebuild the Windows pack so its runbook and binaries match what is
-deployed:
+deployed. `upgrade-edge.sh` does this, builds it outside every source tree, and
+publishes it on the panel — so that is the command:
 
 ```bash
-./services/kit/build-windows-pack.sh "$(cat VERSION)"
+sudo /opt/akconnect/src/deploy/upgrade-edge.sh
 ```
+
+Do not run `build-windows-pack.sh` by hand inside the panel's own directory.
+It writes its output beside itself, and run as root there it leaves 25 MB of
+root-owned files inside a tree the panel cannot then clean, which go into
+every backup it takes.
 
 **Expect:** a pack around 14 MB, containing `akconnect-setup.exe`.
 
@@ -665,6 +706,69 @@ It ends in one of two ways and nothing else:
 ```
   FAIL — the edge is NOT upgraded. 1 step(s) failed.
 ```
+
+When there is nothing to rebuild, it says so, and does only what an idle edge
+still needs: it checks the HTTPS fallback (configuring Apache if you passed
+`--configure-apache`) and tells the panel what is running, so the relay's
+version and "Last heard" on Platform → Coordinator stay current.
+
+```
+  already current   PASS   coordinator, relay and installers are all 1.9.7-dev.21 — nothing rebuilt, nothing restarted
+```
+
+Before 1.9.7-dev.21 there was no such case. The hourly timer rebuilt both
+services, restarted them and re-published the Windows installer on every tick,
+whether or not the panel had moved — a few seconds' outage for every relayed
+pair, once an hour, and within an hour of a real upgrade the "previous"
+binaries in `/var/backups/akconnect` were the current ones. `--force` rebuilds
+and restarts anyway.
+
+### Who owns `/opt/akconnect/src`
+
+Every git command runs as whoever owns the checkout — root, if root cloned it;
+your login user, if you did. That is git's own rule (it refuses a repository
+belonging to someone else, with "detected dubious ownership"), and it is
+followed rather than switched off: nothing here writes a `safe.directory`.
+
+**One case needs a person, once.** Up to 1.9.7-dev.20 the script ran git as
+root whatever owned the checkout, and threw git's answer away: on a checkout
+your login user cloned, the hourly timer failed every hour with `no git
+checkout at /opt/akconnect/src`. The copy already on such a machine is that
+old copy, and it fails at its preflight — before it fetches, so before it can
+hand over to the fixed one. On an edge like that, run it once by hand:
+
+```bash
+sudo /opt/akconnect/src/deploy/upgrade-edge.sh
+```
+
+(`sudo` from the owning user works with the old copy, because git trusts
+`SUDO_UID`.) From then on the timer runs the fixed copy. An edge whose
+checkout root cloned — which is every one `deploy/getting-started.sh` set up —
+never had the problem.
+
+### Files the panel cannot write
+
+The panel updates itself in place as the web server user (`www` on aaPanel,
+`www-data` on Ubuntu), so every file in its tree has to be that user's. Up to
+1.9.7-dev.20, any `php cli/…` command typed as root — `update.php`,
+`backup.php`, `maintenance.php`, a root cron line for `worker.php` — left
+root-owned files behind: logs the panel then silently could not write to for
+the rest of the day, backups it reported as missing, a lock that switched
+locking off, a maintenance flag that locked out the address it had allowed. An
+update that met one of them rolled back with `ROLLBACK INCOMPLETE`.
+
+From 1.9.7-dev.21 every panel CLI run as root becomes the owner of the panel's
+files before it touches anything, and says so. What earlier root runs left
+behind is not repaired by that. On a panel that has had them, once:
+
+```bash
+chown -R www:www /www/wwwroot/network.akdwk.in   # aaPanel: the web user is www
+```
+
+The whole tree, not only `storage/`: an update run as root left every file it
+added — anywhere in `app/`, `cli/`, `database/` — as root's, and an install run
+as root left `config/config.php` itself root's. `deploy/getting-started.sh`
+does this on every run of its own servers.
 
 ### The HTTPS fallback, and the one time you have to ask for it
 

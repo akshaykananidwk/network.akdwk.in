@@ -10,6 +10,8 @@ declare(strict_types=1);
  *   php cli/setup-link.php                       the super administrator
  *   php cli/setup-link.php --email=me@example.com
  *   php cli/setup-link.php --minutes=120
+ *   php cli/setup-link.php --if-unclaimed        only for an account nobody has taken up (else exit 3)
+ *   php cli/setup-link.php --root=/var/www/panel another panel (see _root.php)
  *
  * Why this exists
  * ---------------
@@ -26,6 +28,8 @@ declare(strict_types=1);
  * remedy.
  */
 
+// --root=<panel>: see _root.php.
+require __DIR__ . '/_root.php';
 require __DIR__ . '/_bootstrap.php';
 
 use App\Core\Config;
@@ -47,12 +51,12 @@ $email = strtolower(trim((string) ($options['email'] ?? '')));
 // installer made rather than whichever was added most recently.
 $user = $email !== ''
     ? DB::selectOne(
-        'SELECT id, email, name FROM ' . DB::table('users')
+        'SELECT id, email, name, last_login_at, password_changed_at, created_at FROM ' . DB::table('users')
         . " WHERE email = :e AND deleted_at IS NULL AND status = 'active' LIMIT 1",
         ['e' => $email]
     )
     : DB::selectOne(
-        'SELECT id, email, name FROM ' . DB::table('users')
+        'SELECT id, email, name, last_login_at, password_changed_at, created_at FROM ' . DB::table('users')
         . " WHERE role = 'super_admin' AND deleted_at IS NULL AND status = 'active'"
         . ' ORDER BY id ASC LIMIT 1'
     );
@@ -62,6 +66,26 @@ if ($user === null) {
         ? "No active user with that address.\n"
         : "No active super administrator on this panel.\n");
     exit(1);
+}
+
+// --if-unclaimed: only for an account nobody has taken up — never signed in
+// to, and still on the password it was created with.
+//
+// What a re-run of the installer asks for. A panel whose first run died after
+// creating the administrator — at the edge build, at Caddy — was finished by a
+// second run that issued no link, because it had not created the account
+// itself, and the account was left with a random password nobody had seen.
+// An account somebody has signed in to, or set a password on, is in use, and
+// a fresh two-hour takeover link for it printed into a terminal, or into a
+// log, is not wanted: exit 3, and nothing on standard output.
+if (isset($options['if-unclaimed'])) {
+    $changed = (string) ($user['password_changed_at'] ?? '');
+    $claimed = ($user['last_login_at'] ?? null) !== null
+        || ($changed !== '' && strcmp($changed, (string) ($user['created_at'] ?? '')) > 0);
+    if ($claimed) {
+        fwrite(STDERR, (string) $user['email'] . " has been signed in to or given a password; no link issued.\n");
+        exit(3);
+    }
 }
 
 $base = rtrim((string) Config::get('app.url', ''), '/');

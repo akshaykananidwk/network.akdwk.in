@@ -71,8 +71,11 @@ something; see DEPLOY.md for that case, and for what each step does.
    ```
 
 3. Open `https://your-domain/install` and follow the six steps.
-4. Add the cron line the installer prints (see [Scheduler](#scheduler)).
-5. Delete the installer: `rm -rf install`.
+4. Add the cron line the installer prints (see [Scheduler](#scheduler)) to
+   the crontab of the user that owns the panel's files — `www` on aaPanel,
+   `www-data` on a stock Ubuntu Apache or nginx — never root's.
+5. Leave `install/` where it is. It locks itself; deleting it deletes the lock
+   too, and the next update restores the wizard without one (DEPLOY.md, 1f).
 
 The installer checks the server before it touches anything, and every failing
 row tells you what to do about it. `mod_rewrite` is tested with a real
@@ -186,7 +189,11 @@ Then enable *Require a signed manifest* under System → Updates.
 ## Scheduler
 
 One cron line runs everything: update checks, the offline-device sweep,
-scheduled backups, retention pruning, queued jobs and alerts.
+scheduled backups, retention pruning, queued jobs and alerts. It goes in the
+crontab of the user that owns the panel's files (`crontab -u www -e` on
+aaPanel), never root's: a root worker writes logs, locks and backups the panel
+then cannot use. From 1.9.7-dev.21 a root run switches to that user by itself
+and says so, but the crontab line is still the place to get it right.
 
 ```cron
 */5 * * * * /usr/bin/php /path/to/cli/worker.php >> /path/to/storage/logs/cron.log 2>&1

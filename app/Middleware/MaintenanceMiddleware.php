@@ -33,6 +33,23 @@ final class MaintenanceMiddleware
         $bypass = $request->cookie(MaintenanceMode::cookieName())
             ?? (is_string(Session::get('maintenance_bypass')) ? (string) Session::get('maintenance_bypass') : null);
 
+        // The link `php cli/maintenance.php on` prints: ?maintenance_bypass=<token>.
+        // It used to be printed and never read, so the one way in the command
+        // offered answered 503 like everything else. A valid token is kept in
+        // the session, so the rest of the visit does not need it in the URL.
+        //
+        // Looked at whatever is stored already. Each maintenance window has a
+        // token of its own, and the one a browser kept from the last window —
+        // in its session, or the cookie a panel update sets — is stale in the
+        // next: when a stored value stopped the link being read, the second
+        // drill of the day was locked out by the first.
+        $fromLink = $request->query('maintenance_bypass');
+        if (is_string($fromLink) && $fromLink !== ''
+            && $maintenance->allows('', $fromLink)) {
+            Session::set('maintenance_bypass', $fromLink);
+            $bypass = $fromLink;
+        }
+
         if ($maintenance->allows($request->ip(), $bypass)) {
             return null;
         }

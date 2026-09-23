@@ -36,6 +36,9 @@ final class ProductionDefectTests
         self::edgeUpgradeScript();
         self::httpsFallback();
         self::unattendedInstallAcrossUsers();
+        self::installerGitAsOwner();
+        self::cliActsAsTreeOwner();
+        self::maintenanceBypassLink();
     }
 
     // ------------------------------------------------------- the 1.9.6 path
@@ -540,15 +543,87 @@ final class ProductionDefectTests
             $script,
             'an EXIT trap has the last word on the verdict'
         );
+
+        // A copy up to revision 2 hands over by writing this script into
+        // /tmp and running it there, so anything it loads from beside itself
+        // is loaded from /tmp — where any local user can put a file for root
+        // to run. Nothing may be loaded relative to $0.
+        TestCase::assert(
+            preg_match('/^\s*(\.|source)\s+[^\n]*(dirname\s+"?\$0|BASH_SOURCE)/m', $script) !== 1,
+            'upgrade-edge.sh loads nothing from beside itself — it may be running from /tmp'
+        );
+        TestCase::assert(
+            str_contains($script, 'mktemp -d /tmp/akconnect-upgrade-edge.'),
+            'and the copy it hands over to gets a directory of its own'
+        );
+        // Run by bash, not executed: a /tmp mounted noexec refused the exec,
+        // and a failed exec ends bash with no summary at all.
+        TestCase::assert(
+            preg_match('/exec bash "\$THEIRS"/', $script) === 1 && preg_match('/exec "\$THEIRS"/', $script) !== 1,
+            'and hands over through bash, so a noexec /tmp cannot stop it'
+        );
+        TestCase::assert(
+            preg_match('/^export GOFLAGS=.*-buildvcs=false/m', $script) === 1,
+            'every go build it starts, an older release\'s pack builder included, skips VCS stamping'
+        );
         TestCase::assertContains(
             'REACHED_END',
             $script,
             'and success is claimed only from the last line'
         );
+        // Three places, each a deliberate end: the --check report, the
+        // "already current" exit (1.9.7-dev.21 — a run that finds nothing to
+        // do records that as a PASS and stops, instead of rebuilding and
+        // restarting both services every hour), and the last line. Every one
+        // must be immediately followed by an exit or be the end of the file;
+        // one that is not would let the script carry on after claiming it
+        // had finished.
+        $ends = [];
+        foreach (explode("\n", $script) as $n => $line) {
+            if (trim($line) === 'REACHED_END=1') {
+                $ends[] = $n;
+            }
+        }
+        $lines = explode("\n", $script);
+        $deliberate = array_filter($ends, static function (int $n) use ($lines): bool {
+            $rest = array_values(array_filter(
+                array_slice($lines, $n + 1),
+                static fn (string $l): bool => trim($l) !== '' && !str_starts_with(trim($l), '#')
+            ));
+
+            // `exit 0` and nothing else. `fi` was accepted too, and let
+            // through exactly what this exists to stop: the "already
+            // current" block with its exit deleted falls through to a
+            // rebuild with REACHED_END already set, and still counted as
+            // three deliberate ends.
+            return $rest === [] || trim($rest[0]) === 'exit 0';
+        });
         TestCase::assert(
-            substr_count($script, 'REACHED_END=1') === 2,
-            'which is set in exactly two places: the --check path and the end',
-            substr_count($script, 'REACHED_END=1') . ' occurrence(s)'
+            count($ends) === 3 && count($deliberate) === 3
+                && str_contains($script, 'pass "already current"'),
+            'which is set in exactly three places, each a deliberate end: --check, already current, and the last line',
+            count($ends) === 3 && count($deliberate) === 3
+                ? '' : count($ends) . ' occurrence(s), ' . count($deliberate) . ' followed by an exit or the end'
+        );
+
+        // SCRIPT_REVISION is how a copy on an edge decides to hand over to a
+        // newer one. It sat at 2 through eight changes that mattered, so the
+        // hand-over did nothing for any of them — and the gate, which forces
+        // its "old" copy below whatever HEAD says, could not notice. The
+        // script's fingerprint is recorded beside the revision it was
+        // reviewed at; any edit makes this fail until somebody decides,
+        // deliberately, whether a running edge needs the new copy (raise the
+        // revision) or not (record the new fingerprint at the same one).
+        $revision = preg_match('/^SCRIPT_REVISION=(\d+)$/m', $script, $m) === 1 ? (int) $m[1] : -1;
+        $fingerprint = hash('sha256', (string) preg_replace('/^SCRIPT_REVISION=\d+\n/m', '', $script));
+        $recorded = trim((string) @file_get_contents(APP_ROOT . '/deploy/upgrade-edge.revision'));
+        $expected = $revision . ' ' . $fingerprint;
+
+        TestCase::assert(
+            $recorded === $expected,
+            'upgrade-edge.sh has not changed since its SCRIPT_REVISION was last decided',
+            $recorded === $expected ? '' : 'it has. If a running edge needs this copy, raise SCRIPT_REVISION first. Then record it:'
+                . "\n  echo '" . $expected . "' > deploy/upgrade-edge.revision"
         );
         TestCase::assertContains(
             'STOPPED_BECAUSE',
@@ -673,6 +748,35 @@ final class ProductionDefectTests
         // last edit left and a static check cannot be skipped by an
         // environment that will not drop privileges.
         $script = (string) @file_get_contents(APP_ROOT . '/deploy/getting-started.sh');
+
+        // The class, not the instance. The first version of this check looked
+        // for exactly the answers file, and the same defect was sitting forty
+        // lines further down — a root-made mktemp file run as the web user to
+        // write the panel's coordinator settings — and passed it. Any path
+        // this script creates as root and then names on a `sudo -u` line is
+        // the defect, whatever it is for.
+        preg_match_all('/(\w+)="\$\((?:keep_tmp\s+"\$\()?mktemp\b/', $script, $made1);
+        preg_match_all('/\bmake_tmp\s+(\w+)/', $script, $made2);
+        $made = array_unique(array_merge($made1[1], $made2[1]));
+        $handedOver = [];
+        foreach (explode("\n", $script) as $line) {
+            // Directly, or through the helpers every other-user command
+            // now goes through.
+            if (preg_match('/\bsudo\s+(-\w+\s+)*-u\b|\bas_user\b|\bas_owner\b/', $line) !== 1) {
+                continue;
+            }
+            foreach ($made as $name) {
+                if (preg_match('/\$\{?' . preg_quote($name, '/') . '\b/', $line) === 1) {
+                    $handedOver[] = $name;
+                }
+            }
+        }
+        TestCase::assert(
+            $handedOver === [],
+            'nothing root creates with mktemp is handed to a process running as another user',
+            $handedOver === [] ? '' : 'handed over: $' . implode(', $', array_unique($handedOver))
+                . ' — the other user cannot open a file mktemp made for root'
+        );
 
         TestCase::assert(
             preg_match('/install\.php[^\n|]*--answers=(?!-)/', $script) !== 1,
@@ -932,5 +1036,357 @@ final class ProductionDefectTests
         }
 
         @rmdir($path);
+    }
+
+    /**
+     * Every git command the installer runs, runs as the repository's owner.
+     *
+     * The second field run of deploy/getting-started.sh stopped at
+     *
+     *     fatal: detected dubious ownership in repository at '/var/www/nb.akdwk.in'
+     *
+     * The first run had died after handing the panel tree to the web user; the
+     * re-run did git on it as root, and git refused — correctly. The operator
+     * got past it with a GLOBAL safe.directory, which tells git to stop
+     * checking for every repository on the machine.
+     *
+     * services/lab/install-gate.sh proves the fix end to end, but it needs
+     * root and namespaces. This is the part that can be checked anywhere, in
+     * the fast suite: that the script has no path to git that bypasses the
+     * owner rule, never writes a safe.directory, and no longer runs the
+     * blanket chmod that made the database password world-readable on every
+     * re-run.
+     */
+    private static function installerGitAsOwner(): void
+    {
+        TestCase::group('Defect — the installer runs git as the repository owner');
+
+        $script = (string) @file_get_contents(APP_ROOT . '/deploy/getting-started.sh');
+
+        // Code only: comments explain the defect by quoting it.
+        $code = implode("\n", array_filter(
+            explode("\n", $script),
+            static fn (string $line): bool => !preg_match('/^\s*#/', $line)
+        ));
+
+        $bare = [];
+        foreach (explode("\n", $code) as $number => $line) {
+            // A git command that is not inside as_owner / git_in. The only
+            // direct `git` allowed is the one as_owner itself runs.
+            // Messages quote git in words ("is not a git checkout"), and a
+            // message is not a command — but a message can RUN git, inside a
+            // $(…): `ok "edge source ($(git -C … rev-parse …))"` was exactly
+            // that, and an earlier version of this check skipped every line
+            // that began with ok. So quoted text is dropped only where it
+            // holds no command substitution, and what is left is searched.
+            $line = (string) preg_replace_callback(
+                '/"(?:[^"\\\\]|\\\\.)*"/',
+                static fn (array $q): string => str_contains($q[0], '$(') ? $q[0] : '""',
+                $line
+            );
+
+            if (preg_match('/(^|[;&|(\s])git\s+(-C|clone|fetch|checkout|remote|rev-parse|pull)\b/', $line)
+                && !str_contains($line, 'as_owner') && !str_contains($line, 'git_in')) {
+                $bare[] = trim($line);
+            }
+        }
+
+        TestCase::assert(
+            $bare === [],
+            'no git command in the installer bypasses the owner rule',
+            $bare === [] ? '' : 'run as root, whoever owns the tree: ' . implode(' | ', array_slice($bare, 0, 3))
+        );
+
+        // The trap removes what was registered with it — and registration
+        // inside a command substitution happens in a subshell, where the
+        // trap's list is a copy. The first version did exactly that for every
+        // temporary path, and the trap removed none of them.
+        TestCase::assert(
+            preg_match('/\$\(\s*(keep_tmp|make_tmp)\b/', $code) !== 1,
+            'temporary paths are registered in the installer\'s own shell, not a subshell\'s copy'
+        );
+
+        TestCase::assert(
+            !preg_match('/safe\.directory/', $code),
+            'it never writes a safe.directory — the workaround, not the fix'
+        );
+
+        TestCase::assert(
+            str_contains($code, 'as_user "$owner" "$@"'),
+            'a repository that is not root\'s is operated on as its owner'
+        );
+
+        // Through one helper, which sets what sudo's own session would not:
+        // pam_umask gives the web user 0002 on Ubuntu, and the checkout came
+        // out group-writable. And proxies by name only — env VAR=value put a
+        // proxy password on sudo's command line, which auth.log records.
+        TestCase::assert(
+            str_contains($code, "umask 022 && exec \"\$@\"") && str_contains($code, '--preserve-env='),
+            'every command run as another user gets umask 022, and proxy settings by name'
+        );
+        TestCase::assert(
+            preg_match('/\bsudo\b[^\n]*\benv\s+\$\{?carry|\w+_proxy=\$\{!/', $code) !== 1,
+            'no proxy value is ever put on a command line'
+        );
+
+        // A trap on INT that only cleaned up returned to the script, which
+        // carried on to "AK Connect is installed".
+        TestCase::assert(
+            preg_match("/trap 'exit 130' INT/", $code) === 1 && preg_match("/trap 'exit 143' TERM/", $code) === 1,
+            'an interrupted run stops; it does not clean up and carry on'
+        );
+
+        // The setup link for an account nobody has taken up, from this
+        // release's copy: an older panel's would ignore the option.
+        TestCase::assert(
+            str_contains($code, '"$SRC_DIR/cli/setup-link.php"') && str_contains($code, '--if-unclaimed'),
+            'a re-run issues the setup link an unfinished first run never printed'
+        );
+
+        TestCase::assert(
+            !preg_match('/find\s+"\$PANEL_DIR"[^\n]*-exec\s+chmod/', $code),
+            'no blanket chmod over the panel tree, which made config/.env world-readable on every re-run'
+        );
+
+        // A recursive chmod over the tree may only take bits away: go-w
+        // repairs what sudo's pam_umask left group-writable; anything that
+        // adds or sets a mode is the defect above again.
+        preg_match_all('/chmod\s+-R\s+(\S+)\s+"\$PANEL_DIR"/', $code, $recursive);
+        $adding = array_filter($recursive[1], static fn (string $mode): bool => preg_match('/^[ugoa]*-[rwxX]+$/', $mode) !== 1);
+        TestCase::assert(
+            $recursive[1] !== [] && $adding === [],
+            'a recursive chmod over the panel only ever removes permissions (and one removes group/other write)',
+            $adding === [] ? '' : 'adds or sets: ' . implode(', ', $adding)
+        );
+
+        TestCase::assert(
+            preg_match('/chmod 640 "\$PANEL_DIR\/\$secret"/', $code) === 1
+                && str_contains($code, 'config/.env'),
+            'and the installer\'s secrets are put back to 0640 on every run'
+        );
+
+        TestCase::assert(
+            is_file(APP_ROOT . '/services/lab/install-gate.sh')
+                && str_contains((string) @file_get_contents(APP_ROOT . '/services/lab/release.sh'), 'install-gate.sh'),
+            'the end-to-end install gate ships and the release gate runs it'
+        );
+
+        // A re-run leaves an installed panel at its own version, so a helper
+        // that is new in this release is not in that panel's tree. The first
+        // wiring step ran "$PANEL_DIR/cli/edge-settings.php" and died with
+        // "Could not open input file" over a panel an earlier release had
+        // installed — the one panel a re-run exists to repair.
+        TestCase::assert(
+            str_contains($code, '"$SRC_DIR/cli/edge-settings.php" --root="$PANEL_DIR"')
+                && !str_contains($code, '"$PANEL_DIR/cli/edge-settings.php"'),
+            'the installer writes the panel\'s settings with its own release\'s helper, aimed at the panel'
+        );
+
+        $bootstrap = (string) @file_get_contents(APP_ROOT . '/cli/_bootstrap.php');
+        TestCase::assert(
+            str_contains($bootstrap, "if (!defined('APP_ROOT'))"),
+            'and the CLI bootstrap honours the panel root that helper names'
+        );
+
+        $out = [];
+        $status = 0;
+        exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(APP_ROOT . '/cli/edge-settings.php')
+            . ' --root=' . escapeshellarg(sys_get_temp_dir() . '/no-panel-here-' . getmypid()) . ' </dev/null 2>&1', $out, $status);
+        TestCase::assert(
+            $status === 1 && str_contains(implode("\n", $out), 'Not a panel'),
+            'a --root that is not a panel is refused by name, before anything is read or written'
+        );
+    }
+
+    /**
+     * A panel CLI run as root acts as the owner of the panel's files.
+     *
+     * The panel's own updater never runs git, so it cannot hit "dubious
+     * ownership" — but it has the same fault in file form. It replaces files
+     * in place as the web user, and every documented CLI command
+     * (`php cli/update.php --apply`, `php cli/maintenance.php on`,
+     * `php cli/backup.php`, a cron line for cli/worker.php) ran as whoever typed
+     * it: root, on a server. Root left root-owned files in the tree, and the
+     * next update from the panel failed on one of them and rolled back over a
+     * file it had never changed. A root maintenance flag was worse: the panel
+     * then reported "maintenance is ON" while its own write had failed.
+     */
+    private static function cliActsAsTreeOwner(): void
+    {
+        TestCase::group('Defect — a panel CLI run as root acts as the owner of the files');
+
+        $owner = (string) @file_get_contents(APP_ROOT . '/cli/_owner.php');
+        TestCase::assert(
+            str_contains($owner, 'posix_setuid') && str_contains($owner, 'fileowner($root)'),
+            'cli/_owner.php holds the rule: become the owner of the tree, or refuse'
+        );
+
+        // Both entry points, and before anything that could write: the
+        // bootstrap before the application loads, the installer before it
+        // writes config.php — which, as root, it used to write as root:root
+        // 0640, leaving a panel that answered 500 to every request.
+        foreach (['cli/_bootstrap.php' => "require APP_ROOT . '/app/bootstrap.php'",
+                  'cli/install.php' => '$installer = new Installer'] as $file => $firstWrite) {
+            $code = (string) @file_get_contents(APP_ROOT . '/' . $file);
+            $call = strpos($code, 'akconnect_become_tree_owner(APP_ROOT)');
+            $write = strpos($code, $firstWrite);
+            TestCase::assert(
+                $call !== false && $write !== false && $call < $write,
+                $file . ' becomes the owner before it loads or writes anything'
+            );
+        }
+
+        $dropper = self::privilegeDropper();
+        if ($dropper === null || !is_file(APP_ROOT . '/config/config.php')) {
+            TestCase::skip(
+                'running a CLI as root against a tree the web user owns',
+                'this needs root, a second user and an installed config/config.php to copy'
+            );
+
+            return;
+        }
+
+        $tree = self::cleanTreeCopy();
+        if ($tree === null) {
+            TestCase::skip('running a CLI as root against a tree the web user owns', 'could not stage a copy');
+
+            return;
+        }
+
+        @copy(APP_ROOT . '/config/config.php', $tree . '/config/config.php');
+        @mkdir($tree . '/storage/logs', 0755, true);
+        @mkdir($tree . '/storage/tmp', 0755, true);
+        self::chownTree($tree, 'nobody');
+
+        $out = self::runAs([], [PHP_BINARY, $tree . '/cli/maintenance.php', 'on', 'owner test']);
+        $flag = $tree . '/storage/maintenance.flag';
+        $owner = is_file($flag) && function_exists('posix_getpwuid')
+            ? (string) (posix_getpwuid((int) fileowner($flag))['name'] ?? '')
+            : '';
+
+        TestCase::assert(
+            $owner === 'nobody',
+            'what it writes belongs to the owner of the tree, not to root',
+            $owner === 'nobody' ? '' : 'storage/maintenance.flag is owned by ' . ($owner ?: 'nothing') . '; it said: ' . self::firstLine($out)
+        );
+
+        $foreign = [];
+        foreach (new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($tree, \FilesystemIterator::SKIP_DOTS)) as $entry) {
+            if ((posix_getpwuid((int) fileowner($entry->getPathname()))['name'] ?? '') !== 'nobody') {
+                $foreign[] = substr($entry->getPathname(), strlen($tree) + 1);
+            }
+        }
+        TestCase::assert(
+            $foreign === [],
+            'and nothing anywhere in the tree is left root\'s',
+            $foreign === [] ? '' : 'root-owned: ' . implode(', ', array_slice($foreign, 0, 4))
+        );
+
+        TestCase::assert(
+            str_contains($out, 'running as nobody'),
+            'and it says so, rather than doing it silently'
+        );
+
+        self::runAs([], [PHP_BINARY, $tree . '/cli/maintenance.php', 'off']);
+        self::removeTree($tree);
+    }
+
+    /**
+     * The bypass link `cli/maintenance.php on` prints really lets you in.
+     *
+     * It printed `?maintenance_bypass=<token>` from the first version, and
+     * nothing in the application read that parameter: the one way in the
+     * command offered answered 503 like everything else.
+     */
+    private static function maintenanceBypassLink(): void
+    {
+        TestCase::group('Defect — the maintenance bypass link is honoured');
+
+        if (!is_file(APP_ROOT . '/config/config.php')) {
+            TestCase::skip('the maintenance bypass link', 'needs an installed config/config.php to copy');
+
+            return;
+        }
+
+        // A copy, so the running panel is never put into maintenance by a
+        // test — and never left in it by one that fails half-way.
+        $tree = self::cleanTreeCopy();
+        if ($tree === null) {
+            TestCase::skip('the maintenance bypass link', 'could not stage a copy');
+
+            return;
+        }
+        @copy(APP_ROOT . '/config/config.php', $tree . '/config/config.php');
+        @mkdir($tree . '/storage/logs', 0755, true);
+        @mkdir($tree . '/storage/tmp', 0755, true);
+
+        $on = self::runAs([], [PHP_BINARY, $tree . '/cli/maintenance.php', 'on', 'bypass test']);
+        $token = preg_match('/maintenance_bypass=([A-Za-z0-9_\-]+)/', $on, $m) === 1 ? $m[1] : '';
+
+        TestCase::assert($token !== '', 'cli/maintenance.php prints a bypass link', $token !== '' ? '' : self::firstLine($on));
+
+        $probe = <<<'PHP'
+<?php
+$root = $argv[1];
+$_SERVER['REMOTE_ADDR'] = '203.0.113.99';
+$_SERVER['REQUEST_METHOD'] = 'GET';
+$_SERVER['REQUEST_URI'] = '/dashboard';
+$_GET = $argv[2] === '' ? [] : ['maintenance_bypass' => $argv[2]];
+$_COOKIE = [];
+$_SESSION = [];
+define('APP_ROOT', $root);
+require $root . '/app/Core/Autoloader.php';
+$a = new App\Core\Autoloader();
+$a->addNamespace('App', $root . '/app');
+$a->register();
+// What a browser keeps from an earlier maintenance window.
+if (($argv[3] ?? '') === 'cookie') {
+    $_COOKIE[App\Updater\MaintenanceMode::cookieName()] = 'a-token-from-the-last-window';
+} elseif (($argv[3] ?? '') === 'session') {
+    $_SESSION['maintenance_bypass'] = 'a-token-from-the-last-window';
+}
+require $root . '/app/Core/helpers.php';
+App\Core\Config::load($root . '/config/config.php');
+App\Core\View::configure($root . '/app/Views');
+App\Core\Lang::configure($root . '/lang', 'en');
+$result = App\Middleware\MaintenanceMiddleware::handle(App\Core\Request::capture());
+echo $result === null ? 'LET-THROUGH' : 'BLOCKED';
+PHP;
+        $script = $tree . '/probe.php';
+        file_put_contents($script, $probe);
+
+        $without = self::runAs([], [PHP_BINARY, $script, $tree, '']);
+        $with = self::runAs([], [PHP_BINARY, $script, $tree, $token]);
+        $wrong = self::runAs([], [PHP_BINARY, $script, $tree, 'not-the-token']);
+
+        TestCase::assert(str_contains($without, 'BLOCKED'), 'without the link a visitor gets the maintenance page', str_contains($without, 'BLOCKED') ? '' : self::firstLine($without));
+        TestCase::assert(str_contains($with, 'LET-THROUGH'), 'with the printed link they are let through', str_contains($with, 'LET-THROUGH') ? '' : self::firstLine($with));
+        TestCase::assert(str_contains($wrong, 'BLOCKED'), 'and a wrong token is not', str_contains($wrong, 'BLOCKED') ? '' : self::firstLine($wrong));
+
+        // The second drill of the day. The browser still holds the first
+        // window's token — in its session, or in the cookie a panel update
+        // sets — and a stored value used to stop the link being read at all.
+        $staleCookie = self::runAs([], [PHP_BINARY, $script, $tree, $token, 'cookie']);
+        $staleSession = self::runAs([], [PHP_BINARY, $script, $tree, $token, 'session']);
+        TestCase::assert(
+            str_contains($staleCookie, 'LET-THROUGH') && str_contains($staleSession, 'LET-THROUGH'),
+            'and a browser still holding the last window\'s token is let through by this one\'s link',
+            'stale cookie: ' . self::firstLine($staleCookie) . '; stale session: ' . self::firstLine($staleSession)
+        );
+
+        self::removeTree($tree);
+    }
+
+    private static function chownTree(string $path, string $user): void
+    {
+        @chown($path, $user);
+        @chgrp($path, $user === 'nobody' ? 'nogroup' : $user);
+        foreach (new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::SELF_FIRST
+        ) as $entry) {
+            @chown($entry->getPathname(), $user);
+            @chgrp($entry->getPathname(), $user === 'nobody' ? 'nogroup' : $user);
+        }
     }
 }

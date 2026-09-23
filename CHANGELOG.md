@@ -6,6 +6,178 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.21] — development
+
+**"Safe to run again" was claimed from the first version of the installer and
+never exercised.** The second field re-run on a clean server stopped at
+
+```
+fatal: detected dubious ownership in repository at '/var/www/nb.akdwk.in'
+✗ could not fetch release/1.9.7 into /var/www/nb.akdwk.in
+```
+
+The first run had died after handing the panel tree to the web user; the
+re-run did git on it as root, and git refused — correctly. It is now run for
+real: `services/lab/install-gate.sh` installs in its own mount, network and
+PID namespaces, with overlays over the system and a private MariaDB, five
+ways — a first run that dies where the field run died and a second that must
+finish; a clean install and the same command again, with the panel updating
+itself in between; `--uninstall` and back; the previous release's half-finished
+tree picked up after the branch moved; and a panel the previous release
+installed completely, repaired by this one. It asserts what an install is
+for, not only its exit code. The release gate runs it. Against 1.9.7-dev.20 it
+fails the field sequence with the field's own message.
+
+The literal test asked for — install, then install again — passes on the git
+defect. A first run that succeeds writes `config/config.php`, and a second run
+that finds it never touches the panel's git. The failure needs a first run
+that died after the chown, so that is the first sequence.
+
+**The fix is to be the owner, not to tell git to look away.** Every git command
+in the installer runs as whoever owns the repository — the panel tree as the
+web user, cloned as the web user from its first byte, the edge source as root.
+Nothing writes a `safe.directory`; one added by hand to get past the failure
+should be removed (`DEPLOY.md` has the command, and it needs `sudo`, because
+that is whose configuration it went into). When git fails, the installer
+prints what git said.
+
+**What running it for real found, beyond the reported defect.** An audit of
+the installer, the edge scripts and the panel's updater — every finding
+reproduced before it was believed, 39 confirmed and none refuted, then 11 gaps from a completeness pass — and the gate between
+them turned up:
+
+- *The panel never received its coordinator's key.* The step that writes it
+  was a PHP file root created with `mktemp` and ran as the web user — the
+  0600 answers-file defect of dev.20, forty lines further down, reported as a
+  warning. The panel kept the installer's random secret and a loopback
+  coordinator address. It is now `cli/edge-settings.php`, reading JSON on
+  standard input, and a failure stops the install. (The old step also put the
+  shared secret on sudo's command line, which Ubuntu logs to auth.log.) The
+  installer runs its own release's copy, from the edge source, with
+  `--root=<panel>` — a re-run leaves an installed panel at its own version,
+  and a panel dev.20 installed has no such script; calling the panel's copy
+  died on exactly the servers that needed repairing, which the gate's repair
+  sequence showed.
+- *`upgrade-edge.sh` could not build any install this script had made.* The
+  panel said branch "main" — the seed — with no commit; the edge source is a
+  single-branch clone; the fetch made no `origin/main`; and the table printed
+  `source fetched  PASS` with an empty commit. So its timer was never
+  installed and `/download/setup.exe` was never published: dev.18's fix,
+  undone one step later. The installer now records where the panel came from,
+  and `upgrade-edge.sh` fetches by explicit refspec and fails, naming the
+  branch, instead of passing.
+- *Every re-run made the database password world-readable.* A blanket
+  `chmod 644` over the tree reached `config/.env` (0640, `DB_PASS`) and
+  `install.lock`, and 0750 backup directories — full dumps, copies of every
+  key — became 0755. It also took `+x` off 24 tracked scripts, so git counted
+  them as edited and the next checkout refused. Gone, and the damage an
+  earlier run did is repaired on the next.
+- *The hourly timer rebuilt and restarted the coordinator and relay every
+  hour*, whether or not anything had changed — a few seconds' outage for every
+  relayed pair, hourly, and rollback copies that held the current build. It
+  now says `already current` and stops.
+- *The temporary-file trap added in dev.20 removed nothing.* Paths were
+  registered inside `$( … )` — a subshell — so the trap's own list stayed
+  empty. It went unseen because each caller also deleted its own file.
+- A re-run also reissued the administrator's two-hour takeover link, moved a
+  panel set to stable back onto edge, rebuilt the edge from the branch tip
+  whatever the panel was running, and a mistyped domain was answered with
+  advice to `DROP DATABASE`. An uninstall left the upgrade timer enabled,
+  pointing at a script it had deleted.
+
+**`upgrade-edge.sh` (SCRIPT_REVISION 3).** git runs as the checkout's owner, and
+what earlier root runs left inside a login user's clone is given back to them
+first; its errors are git's, not "no git checkout". Builds no longer ask git
+for VCS stamps (`-buildvcs=false`), which failed as "would not compile" on a
+checkout git refused. The timer builds from the checkout it was installed
+from. A recorded fingerprint now fails a test whenever the script changes
+without somebody deciding whether its revision must rise — it had sat at 2
+through eight changes that mattered. **One limit:** on an edge whose checkout a
+login user cloned, the copy already there dies at its preflight before it can
+hand over, so that edge needs one run by hand. `DEPLOY.md` says so.
+
+**The panel's updater never runs git**, so it cannot hit "dubious ownership" —
+but it had the same fault in file form. Every documented `php cli/…` command
+ran as whoever typed it: root, on a server. Root left files the web-user
+updater then could not replace — `ROLLBACK INCOMPLETE` over a file it never
+changed — backups reported missing and pruned without being deleted, a
+maintenance flag that locked out the address it allowed, logs the panel
+silently stopped writing for the rest of the day, and a lock file that
+switched locking off (a lock that could not be opened was treated as taken).
+Every panel CLI, the installer included, now becomes the owner of the panel's
+files before it touches anything, and says so. A stale root-owned lock is
+replaced rather than ignored. The bypass link `cli/maintenance.php` printed is
+now honoured — nothing had ever read it. README no longer tells anyone to
+`rm -rf install`.
+
+**A second review, of this release before it shipped** — 23 findings, 21
+reproduced — found, and the gates now catch:
+
+- *The first hand-over in the field would have run a file from `/tmp` as root.*
+  Raising `SCRIPT_REVISION` to 3 makes every revision-2 edge hand over to this
+  copy, and revision 2 writes that copy straight into `/tmp`; this copy loaded
+  `lib-edge-args.sh` from beside itself — `/tmp/lib-edge-args.sh`, which any
+  local user can create. It now loads nothing from beside itself, and hands
+  over in turn from a directory of its own. The edge gate plants the file and
+  checks it is never run.
+- *`already current` did too little.* `--configure-apache` on a current edge
+  said "Nothing to do"; the hourly run stopped checking the HTTPS fallback and
+  stopped reporting to the panel, so a relay version the panel had missed
+  stayed "behind". An idle edge now still checks its fallback and reports;
+  only the rebuild and the restart are skipped. With `--skip-pack` it no longer
+  claims the installers are current.
+- *A release branch deleted after merging stopped every edge on it*, although
+  the panel's commit was on main: the panel's commit is fetched by name. A tag
+  moved on origin stopped every fetch ("would clobber existing tag"): tags are
+  now taken as origin has them.
+- A checkout reached through a symlink was run as the link's owner, root; one
+  whose owner has no account failed with `sudo: unknown user UNKNOWN` and now
+  says what to run; a worktree's own git directory was never given back. The
+  release's pack builder, when the panel is behind, was an older one without
+  `-buildvcs=false`: `GOFLAGS` now carries it for every build.
+- *The installer:* its checkout of the panel came out group-writable (sudo's
+  PAM session gives the web user umask 0002 on Ubuntu); a proxy password went on
+  sudo's command line and into auth.log; ^C cleaned up and then carried on to
+  "AK Connect is installed"; a channel typed at the prompt of a re-run was
+  thrown away while the summary said it was set; a server installed with a
+  capitalised domain could never be re-run; and a first run that died after
+  creating the administrator left an account nobody could sign in to, because
+  the re-run that finished the job printed no setup link. Each is fixed, and
+  the install gate has two new sequences — a first run that dies after the
+  panel is installed, and a run stopped with a signal — and checks that no file
+  in the panel is writable by anyone but its owner.
+- *The panel's CLI:* becoming the tree's owner called `putenv()`, which
+  aaPanel's default `disable_functions` removes — every root-run CLI would have
+  died on the production host. The maintenance bypass link was ignored in a
+  browser that still held the previous window's token, so the second drill of a
+  day was locked out by the first. A test that was meant to stop `already
+  current` falling through into a rebuild accepted `fi` as an ending and would
+  not have. And the install gate wrote root-owned objects into the developer's
+  own `.git`; it writes its snapshot to a directory of its own.
+
+**And a third pass, over those fixes.** "Already current" now means the two
+services are running the binaries on disk — a run stopped between installing
+and restarting used to look current every hour after, and told the panel the
+new version while the old relay served — and it checks them as a full run
+does, on the checkout moved to the release; a check that fails there no longer
+says "the edge is NOT upgraded". The hand-over survives a `noexec` /tmp, a
+relative `--src`, a failure part-way (it left its copy in /tmp), and an option
+only the newer copy knows (`--force`, on an edge still carrying the previous
+script, was refused before it could hand over). A warning sudo prints — "unable
+to resolve host" — was read as git's answer and made a clean checkout "have
+local changes". `go env -w GOFLAGS` is kept rather than replaced.
+
+**Known and not fixed here:** the update gate (`dogfood.sh`) still runs the
+updater as root, so the updater's handling of an unwritable file — PRECHECK
+does not look at the files it will replace, and rollback misreports them —
+is fixed at its cause but not tested as the web user; `install-edge.sh` and
+`add-relay.sh` re-runs with changed flags report changes they did not apply;
+each panel update reopens `config/` to 0755 (the files inside stay 0640/0600);
+and `services/agent` does not vet on a clean clone, because the setup payload
+embeds a tray binary that is built, not tracked.
+
+---
+
 ## [1.9.7-dev.20] — development
 
 **The one-command install stopped at "installing the panel" on a clean

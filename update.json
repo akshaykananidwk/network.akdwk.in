@@ -1,10 +1,10 @@
 {
-  "version": "1.9.7-dev.20",
-  "released_at": "2026-09-23T20:00:00Z",
+  "version": "1.9.7-dev.21",
+  "released_at": "2026-09-23T16:59:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "The one-command install failed on a clean server: root wrote the answers to a file only root could read, and the installer, running as the web user, reported a permission fault as bad JSON. The answers now go over standard input and never touch the disk.",
+  "notes": "The one-command installer was never run twice before it claimed to be safe to run twice. It is now, seven ways, and what that found is fixed: git refusing the panel tree on a re-run, the panel never receiving its coordinator key, upgrade-edge.sh unable to build any getting-started install (so no setup.exe), re-runs making the database password world-readable, and the edge rebuilding and restarting itself every hour.",
   "migrations": [],
   "protected": [
     ".env",

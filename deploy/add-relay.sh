@@ -72,7 +72,7 @@ step "building"
 command -v go >/dev/null 2>&1 || export PATH="/usr/local/go/bin:$PATH"
 command -v go >/dev/null 2>&1 || die "Go is not installed and is not at /usr/local/go/bin."
 
-( cd "$SRC_DIR/services/relay" && go build -trimpath -o "$BIN_DIR/akconnect-relay" ./cmd/akconnect-relay ) \
+( cd "$SRC_DIR/services/relay" && go build -trimpath -buildvcs=false -o "$BIN_DIR/akconnect-relay" ./cmd/akconnect-relay ) \
     || die "the relay would not build"
 
 say "installed $BIN_DIR/akconnect-relay"

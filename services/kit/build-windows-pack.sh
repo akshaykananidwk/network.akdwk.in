@@ -76,10 +76,10 @@ echo "  building the agent"
 (
     cd "$ROOT/services/agent"
     GOTOOLCHAIN=local GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-        go build -trimpath -ldflags "-s -w -X main.version=$VERSION" \
+        go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=$VERSION" \
         -o "$STAGE/akconnect-agent.exe" ./cmd/akconnect-agent
     GOTOOLCHAIN=local GOOS=windows GOARCH=arm64 CGO_ENABLED=0 \
-        go build -trimpath -ldflags "-s -w -X main.version=$VERSION" \
+        go build -trimpath -buildvcs=false -ldflags "-s -w -X main.version=$VERSION" \
         -o "$STAGE/arm64/akconnect-agent.exe" ./cmd/akconnect-agent
 )
 
@@ -89,10 +89,10 @@ echo "  building the tray icon"
 (
     cd "$ROOT/services/agent"
     GOTOOLCHAIN=local GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-        go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$VERSION $BRAND_FLAGS" \
+        go build -trimpath -buildvcs=false -ldflags "-s -w -H=windowsgui -X main.version=$VERSION $BRAND_FLAGS" \
         -o "$STAGE/akconnect-tray.exe" ./cmd/akconnect-tray
     GOTOOLCHAIN=local GOOS=windows GOARCH=arm64 CGO_ENABLED=0 \
-        go build -trimpath -ldflags "-s -w -H=windowsgui -X main.version=$VERSION $BRAND_FLAGS" \
+        go build -trimpath -buildvcs=false -ldflags "-s -w -H=windowsgui -X main.version=$VERSION $BRAND_FLAGS" \
         -o "$STAGE/arm64/akconnect-tray.exe" ./cmd/akconnect-tray
 ) || die "could not build the tray icon"
 
@@ -130,7 +130,7 @@ cp "$STAGE/akconnect-tray.exe"  "$PAYLOAD/akconnect-tray.exe"
     # windowsgui: double-clicking the installer must not open a console
     # window. Everything a customer sees is a dialog.
     GOTOOLCHAIN=local GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-        go build -trimpath \
+        go build -trimpath -buildvcs=false \
         -ldflags "-s -w -H=windowsgui -X main.version=$VERSION -X main.defaultPanel=$PANEL_URL $BRAND_FLAGS" \
         -o "$STAGE/akconnect-setup.exe" ./cmd/akconnect-setup
 ) || die "could not build the installer"
@@ -142,7 +142,7 @@ cp "$STAGE/arm64/akconnect-tray.exe"  "$PAYLOAD/akconnect-tray.exe"
 (
     cd "$ROOT/services/agent"
     GOTOOLCHAIN=local GOOS=windows GOARCH=arm64 CGO_ENABLED=0 \
-        go build -trimpath \
+        go build -trimpath -buildvcs=false \
         -ldflags "-s -w -H=windowsgui -X main.version=$VERSION -X main.defaultPanel=$PANEL_URL $BRAND_FLAGS" \
         -o "$STAGE/arm64/akconnect-setup.exe" ./cmd/akconnect-setup
 ) || die "could not build the arm64 installer"

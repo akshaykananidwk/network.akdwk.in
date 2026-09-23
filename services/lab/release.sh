@@ -4,7 +4,9 @@
 #
 # Five gates, in the order that fails cheapest first:
 #
-#   0. the edge script — does upgrade-edge.sh fail honestly when it fails,
+#   0. the edge script — does upgrade-edge.sh fail honestly when it fails;
+#      the one-command installer — run after a failed first run, run twice,
+#      uninstalled and run again, in namespaces with a private database;
 #      and the agent's self-update: a real swap, and two refusals
 #   1. the test suites — PHP and Go, including -race
 #   2. the web gate — Apache + PHP-FPM + MariaDB, installed through the
@@ -112,6 +114,7 @@ windows_pack() {
 # printing "All steps passed", which is the class of defect every other gate
 # here exists to find.
 run_gate "the edge script fails honestly"  "$LAB/edge-script-gate.sh"
+run_gate "the installer is safe to run again" "$LAB/install-gate.sh"
 run_gate "Windows pack builds and is stamped" windows_pack
 run_gate "the agent replaces itself, and refuses when it should" "$LAB/selfupdate-gate.sh"
 run_gate "web gate (Apache + PHP-FPM)" web_gate

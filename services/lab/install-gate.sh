@@ -1,0 +1,398 @@
+#!/usr/bin/env bash
+#
+# Is deploy/getting-started.sh really safe to run again?
+#
+# Its header said so from the first version. Nothing had ever run it twice.
+# The first two field runs on a clean server each stopped on something a
+# second run would have found:
+#
+#   1.9.7-dev.17  the answers went between root and the web user in a file only
+#                 root could read, and the installer called that "not valid JSON"
+#   1.9.7-dev.20  the first run died after chowning the panel tree to the web
+#                 user; the re-run did git as root on it and git refused —
+#                 "detected dubious ownership in repository"
+#
+# So this runs it, for real, several times over:
+#
+#   field    the first run dies at "installing the panel", after the
+#            permissions step — exactly where the field run stopped — and
+#            the second run must finish. This is the one that was red.
+#   twice    a clean install, then the same command again. It must finish,
+#            and it must not have changed anything it promised to leave
+#            alone: the coordinator's keypair, the panel's configuration,
+#            the mode of a single file.
+#   late     the first run dies after the panel is installed and the
+#            coordinator's files are written — the relay will not start — and
+#            the second must finish: enable both services, print the setup
+#            link nobody has seen, write the settings the first never reached.
+#   interrupt  a run is sent SIGTERM part-way. It must stop — not carry on
+#            to "AK Connect is installed" — and the next run must finish.
+#   cycle    --uninstall, then install again.
+#   repair   the previous release's installer runs to the end — leaving, before
+#            1.9.7-dev.21, a panel with no coordinator key on branch "main" —
+#            and this release's must fill in what it never wrote.
+#   legacy   the previous release's installer dies half-way, as it did on the
+#            field server; the branch moves on; this release's installer must
+#            pick up the tree the old one left — root-cloned, chowned, and with
+#            the execute bits its blanket chmod took off.
+#
+# And it asserts what an install is for, not only that the script exited 0:
+# the panel holds the coordinator's key and secret, knows the branch and
+# commit it was installed from, and upgrade-edge.sh — run by the installer
+# against that panel — fetches, checks out and builds the release. Two
+# releases passed an exit-code check with a panel that had none of those.
+#
+# "Twice in a row on a clean tree" alone would NOT have caught the dev.20
+# defect. A first run that succeeds writes config/config.php, and a second
+# run that finds it never touches the panel's git at all. The field defect
+# needs a first run that failed after the chown — hence the first sequence.
+#
+# Everything real that can be real is: git, PHP, the panel installer, MariaDB,
+# sudo, file ownership, Go builds, Caddy's own validator. What cannot run in a
+# container is stubbed and logged — systemctl, ufw, apt — along with the two
+# network facts a server has and a namespace does not: that the domain
+# resolves to this machine, and that GitHub answers.
+#
+# Isolation: each sequence runs in its own mount, network and PID namespace,
+# with overlays on /etc /var /opt /root /run and /usr/local and a private
+# MariaDB on loopback; the PID namespace means that server, and everything
+# else a sequence started, dies with it. Nothing the installer writes survives
+# the namespace — which matters, because this machine's own lab database is
+# also called akconnect, and --uninstall drops a database by that name.
+#
+#   sudo services/lab/install-gate.sh                  the working tree
+#   sudo services/lab/install-gate.sh --ref 5592ec6    a commit (a red check)
+#   sudo services/lab/install-gate.sh --only field     one sequence
+#   sudo services/lab/install-gate.sh --keep           leave the evidence
+set -uo pipefail
+
+LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$LAB/../.." && pwd)"
+
+REF=""
+ONLY=""
+KEEP=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --ref)  REF="${2:?--ref needs a commit}"; shift 2 ;;
+        --only) ONLY="${2:?--only needs a sequence: field, twice, late, interrupt, cycle, legacy or repair}"; shift 2 ;;
+        --keep) KEEP=1; shift ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+done
+
+DOMAIN="gate.akconnect.test"
+FAKE_IP="203.0.113.10"   # TEST-NET-3: documentation only, never routable
+WEB_USER="www-data"
+PANEL="/var/www/$DOMAIN"
+SRC="/opt/akconnect/src"
+ETC="/etc/akconnect"
+
+PASS=0
+FAIL=0
+
+ok()    { printf '  \033[32m✓\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
+bad()   { printf '  \033[31m✗\033[0m %s\n' "$1"; [ $# -gt 1 ] && [ -n "$2" ] && printf '%s\n' "$2" | sed 's/^/      /'; FAIL=$((FAIL + 1)); }
+group() { printf '\n\033[1m── %s\033[0m\n' "$1"; }
+die()   { printf '\n  \033[31m✗ %s\033[0m\n\n' "$*" >&2; exit 2; }
+
+# ---------------------------------------------------------------- preflight
+
+[ "$(id -u)" -eq 0 ] || die "run as root: the namespaces, the overlays and sudo -u $WEB_USER all need it"
+
+for tool in unshare setpriv sudo git php mariadbd mariadb-install-db mysqladmin caddy python3 ip; do
+    command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
+done
+id "$WEB_USER" >/dev/null 2>&1 || die "there is no $WEB_USER user to install as"
+
+# A machine-wide safe.directory would make git on another user's tree succeed
+# for reasons that have nothing to do with the script — exactly the global
+# workaround the field operator had to use. A gate that passed because of it
+# would be passing on the defect.
+for scope in --system --global; do
+    if git config "$scope" --get-all safe.directory >/dev/null 2>&1; then
+        die "git has a $scope safe.directory set on this machine ($(git config "$scope" --get-all safe.directory | tr '\n' ' ')).
+    It would hide exactly the defect this gate exists to catch. Remove it, or run
+    this somewhere clean."
+    fi
+done
+
+WORK="$(mktemp -d)"
+chmod 755 "$WORK"   # the web user runs a stub from here
+if [ "$KEEP" -eq 1 ]; then
+    trap 'echo; echo "  evidence kept in $WORK"' EXIT
+else
+    trap 'rm -rf "$WORK"' EXIT
+fi
+
+SCRIPT="$WORK/getting-started.sh"
+
+# ------------------------------------------------ the tree under test, as git
+
+# The installer clones what it installs, so what it clones has to be the code
+# under test: a snapshot of the working tree — untracked files included,
+# ignored ones not — or the commit given with --ref. Served over git:// from
+# inside the namespace, because the installer clones as two different users,
+# and a local path would put git's ownership rules between the CLIENT and the
+# source repository too, which a server cloning from GitHub never has.
+group "the tree under test"
+
+git init -q --bare "$WORK/repo.git" || die "could not make a bare repository"
+
+# snap_git: git in the developer's repository, writing nothing into it.
+#
+# The snapshot's blobs, tree and commit go into this run's own object
+# directory, with the repository's objects borrowed read-only. This runs as
+# root under sudo, and git lets root write into the invoking user's repository
+# (it trusts SUDO_UID) — which left root-owned object directories in their
+# .git, and their next `git add` of a file that hashed into one failed with
+# "insufficient permission". The same defect this release fixes in
+# upgrade-edge.sh, in the tool that tests it.
+REPO_OBJECTS="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir)/objects"
+mkdir -p "$WORK/objects"
+snap_git() {
+    GIT_OBJECT_DIRECTORY="$WORK/objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$REPO_OBJECTS" \
+        git -C "$REPO" "$@"
+}
+
+if [ -n "$REF" ]; then
+    COMMIT="$(snap_git rev-parse --verify "$REF^{commit}" 2>/dev/null)" \
+        || die "$REF is not a commit in $REPO"
+    what="commit $(snap_git rev-parse --short "$COMMIT")"
+else
+    export GIT_INDEX_FILE="$WORK/index"
+    snap_git read-tree HEAD
+    snap_git add -A
+    tree="$(snap_git write-tree)"
+    unset GIT_INDEX_FILE
+    COMMIT="$(snap_git commit-tree "$tree" -p HEAD -m 'install gate: the working tree')" \
+        || die "could not snapshot the working tree"
+    what="the working tree, on top of $(snap_git rev-parse --short HEAD)"
+fi
+
+snap_git -c push.negotiate=false push -q "$WORK/repo.git" "$COMMIT:refs/heads/gate" 2>/dev/null \
+    || die "could not publish the snapshot"
+
+# The release before the one under test, for the sequence that starts from a
+# tree it made: the working tree's own base commit, or the --ref's parent.
+LEGACY="$(snap_git rev-parse --verify "$COMMIT^" 2>/dev/null)"
+if [ -n "$LEGACY" ]; then
+    snap_git -c push.negotiate=false push -q "$WORK/repo.git" "$LEGACY:refs/heads/legacy" 2>/dev/null
+    git -C "$WORK/repo.git" show "legacy:deploy/getting-started.sh" > "$WORK/legacy-getting-started.sh" 2>/dev/null \
+        && chmod 755 "$WORK/legacy-getting-started.sh"
+fi
+git -C "$WORK/repo.git" show "gate:deploy/getting-started.sh" > "$SCRIPT" \
+    || die "the snapshot has no deploy/getting-started.sh"
+chmod 755 "$SCRIPT"
+printf '  testing %s\n' "$what"
+
+# ------------------------------------------------------------------- stubs
+
+# Only what cannot run in a namespace. Each one logs every call, so the
+# evidence shows what the installer asked of the machine.
+STUBS="$WORK/stubs"
+mkdir -p "$STUBS"
+
+cat > "$STUBS/systemctl" <<'SH'
+#!/bin/sh
+echo "systemctl $*" >> "$GATE_LOG_DIR/machine.log"
+# Options first or last, in any order, the way systemctl takes them: the verb
+# is the first word that is not an option and the unit is the next.
+verb=""; unit=""; quiet=0
+for a in "$@"; do
+    case "$a" in
+        -q|--quiet) quiet=1 ;;
+        -*) ;;
+        *) if [ -z "$verb" ]; then verb="$a"; elif [ -z "$unit" ]; then unit="$a"; fi ;;
+    esac
+done
+# The late sequence's injected failure: the relay will not start, the first
+# time install-edge.sh asks — after it has written coordinator.env.
+if [ "$verb" = "enable" ] && [ "$unit" = "akconnect-relay" ] && [ -n "${GATE_FAIL_RELAY_START:-}" ]; then
+    echo "Job for akconnect-relay.service failed (install gate)." >&2
+    exit 1
+fi
+case "$verb" in
+    is-active)
+        # Nothing else is serving here — the installer refuses a machine
+        # that is. Everything the installer itself started is up.
+        case "$unit" in
+            apache2|nginx|httpd) [ "$quiet" -eq 1 ] || echo inactive; exit 3 ;;
+            *)                   [ "$quiet" -eq 1 ] || echo active;   exit 0 ;;
+        esac ;;
+    show) echo "Wed 2026-09-23 00:00:00 UTC" ;;
+esac
+exit 0
+SH
+
+cat > "$STUBS/ufw" <<'SH'
+#!/bin/sh
+echo "ufw $*" >> "$GATE_LOG_DIR/machine.log"
+[ "$1" = "status" ] && echo "Status: active"
+exit 0
+SH
+
+cat > "$STUBS/apt-get" <<'SH'
+#!/bin/sh
+echo "apt-get $*" >> "$GATE_LOG_DIR/machine.log"
+exit 0
+SH
+
+cat > "$STUBS/apt-cache" <<'SH'
+#!/bin/sh
+# The PHP the machine really has, named the way Ubuntu's archive names it.
+case "$*" in
+    *fpm*) printf 'php%s-fpm - server-side, HTML-embedded scripting language (FPM-CGI binary)\n' \
+               "$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;')" ;;
+esac
+exit 0
+SH
+
+# curl: the installer asks the internet three things. GitHub is reachable, and
+# this machine's public address is the documentation address the domain
+# "resolves" to. And the panel's own address is the panel: requests for it are
+# handed to the installed panel, served by PHP's built-in server as the web
+# user, started the first time something asks. That is what lets
+# upgrade-edge.sh reach the panel it was installed beside, authenticate with
+# the secret the installer wired in, and go on to build the release — the
+# path that failed on every install until 1.9.7-dev.21, and that a gate which
+# stopped at "panel reachable" could never see.
+cat > "$STUBS/curl" <<'SH'
+#!/bin/bash
+url=""; code=0
+for a in "$@"; do
+    case "$a" in http://*|https://*) url="$a" ;; *http_code*) code=1 ;; esac
+done
+echo "curl $url" >> "$GATE_LOG_DIR/machine.log"
+case "$url" in
+    https://github.com|https://github.com/) exit 0 ;;
+    https://api.ipify.org*) echo "$GATE_FAKE_IP"; exit 0 ;;
+    "https://$GATE_DOMAIN"*)
+        if [ -f "$GATE_PANEL/config/config.php" ]; then
+            if ! (exec 3<>/dev/tcp/127.0.0.1/8088) 2>/dev/null; then
+                setsid setpriv --reuid="$(id -u "$GATE_WEB_USER")" --regid="$(id -g "$GATE_WEB_USER")" --clear-groups \
+                    php -S 127.0.0.1:8088 -t "$GATE_PANEL" "$GATE_PANEL/tests/dev-server.php" \
+                    >> "$GATE_LOG_DIR/panel-http.log" 2>&1 < /dev/null &
+                for _ in $(seq 1 40); do
+                    (exec 3<>/dev/tcp/127.0.0.1/8088) 2>/dev/null && break
+                    sleep 0.25
+                done
+            fi
+            args=()
+            for a in "$@"; do
+                case "$a" in "https://$GATE_DOMAIN"*) a="http://127.0.0.1:8088${a#"https://$GATE_DOMAIN"}" ;; esac
+                args+=("$a")
+            done
+            exec /usr/bin/curl "${args[@]}"
+        fi ;;
+esac
+[ "$code" -eq 1 ] && printf '000'
+exit 7
+SH
+
+cat > "$STUBS/getent" <<'SH'
+#!/bin/sh
+if [ "$1" = "ahostsv4" ] && [ "$2" = "$GATE_DOMAIN" ]; then
+    printf '%s       STREAM %s\n' "$GATE_FAKE_IP" "$GATE_DOMAIN"
+    exit 0
+fi
+exec /usr/bin/getent "$@"
+SH
+
+chmod 755 "$STUBS"/*
+
+# The failure injection for the field sequence: the panel installer dies, and
+# only the panel installer. Everything before it in the script has run for
+# real by then — the clone, the chown, the database — which is the state the
+# field server was left in. Named for every way the script finds PHP, because
+# it prefers phpX.Y when that exists, and a stub it did not find would inject
+# nothing and let the sequence pass for the wrong reason.
+FAILING="$WORK/failing-php"
+mkdir -p "$FAILING"
+PHP_REAL="$(command -v php)"
+PHP_SERIES="$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;')"
+cat > "$FAILING/php" <<SH
+#!/bin/sh
+for a in "\$@"; do
+    case "\$a" in
+        */cli/install.php)
+            echo "install gate: the panel installer fails here, as it did on the field server" >&2
+            exit 1 ;;
+    esac
+done
+exec "$PHP_REAL" "\$@"
+SH
+chmod 755 "$FAILING/php"
+ln -s php "$FAILING/php$PHP_SERIES"
+chmod 755 "$FAILING"
+
+# --------------------------------------------------------- one sequence
+
+# run_sequence runs one sequence in a fresh namespace. The body is below, in a
+# file of its own so it can be read; it writes one line per check to results.
+run_sequence() {
+    local seq=$1
+    local dir="$WORK/$seq"
+    mkdir -p "$dir/tmp"
+    chmod 755 "$dir"
+
+    GATE_SEQ="$seq" GATE_DIR="$dir" GATE_WORK="$WORK" GATE_SCRIPT="$SCRIPT" \
+    GATE_STUBS="$STUBS" GATE_FAILING="$FAILING" GATE_DOMAIN="$DOMAIN" \
+    GATE_FAKE_IP="$FAKE_IP" GATE_WEB_USER="$WEB_USER" GATE_PANEL="$PANEL" \
+    GATE_SRC="$SRC" GATE_ETC="$ETC" GATE_LOG_DIR="$dir" \
+    GATE_LEGACY_SCRIPT="$WORK/legacy-getting-started.sh" \
+        unshare --mount --net --pid --fork --mount-proc --propagation private \
+        bash "$LAB/install-gate-inner.sh" > "$dir/sequence.log" 2>&1
+    local code=$?
+
+    if [ ! -s "$dir/results" ]; then
+        bad "the $seq sequence ran to completion" "it exited $code before recording anything; the end of its log:
+$(tail -25 "$dir/sequence.log")"
+
+        return
+    fi
+
+    while IFS='|' read -r verdict name detail; do
+        if [ "$verdict" = "PASS" ]; then
+            ok "$name"
+        else
+            bad "$name" "$(printf '%b' "$detail")"
+        fi
+    done < "$dir/results"
+}
+
+for seq in field twice late interrupt cycle legacy repair; do
+    [ -n "$ONLY" ] && [ "$ONLY" != "$seq" ] && continue
+
+    case "$seq" in
+        field) group "field: the first run dies after the chown, the second must finish" ;;
+        twice) group "twice: a clean install, then the same command again" ;;
+        late)  group "late: the first run dies after the panel is installed, the second must finish it" ;;
+        interrupt) group "interrupt: a run stopped part-way stops, and the next one finishes" ;;
+        cycle) group "cycle: uninstall, then install again" ;;
+        legacy|repair)
+            if [ ! -x "$WORK/legacy-getting-started.sh" ]; then
+                group "legacy: skipped — the tree under test has no parent to start from"
+                continue
+            fi
+            if [ "$seq" = legacy ]; then
+                group "legacy: a tree the previous release made, run again after the branch moved"
+            else
+                group "repair: a panel the previous release installed, run again with this one"
+            fi ;;
+    esac
+
+    run_sequence "$seq"
+done
+
+printf '\n'
+if [ "$FAIL" -eq 0 ]; then
+    printf '  \033[32m%d checks, all passed.\033[0m The installer is safe to run again.\n\n' "$PASS"
+    exit 0
+fi
+
+printf '  \033[31m%d of %d checks FAILED.\033[0m\n' "$FAIL" "$((PASS + FAIL))"
+[ "$KEEP" -eq 1 ] || printf '  Re-run with --keep to look at the logs and the overlays.\n'
+printf '\n'
+exit 1

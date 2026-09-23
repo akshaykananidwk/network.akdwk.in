@@ -67,6 +67,14 @@ final class EdgeRelease
             'repo'      => (string) ($update['repo_name'] ?? ''),
             'branch'    => (string) ($update['branch'] ?? 'main'),
             'panel_url' => rtrim((string) Config::get('app.url', ''), '/'),
+            // Which release's installers this panel is already serving, so
+            // an edge that is on the right version can tell "nothing to do"
+            // from "the installer was never published" without rebuilding
+            // and restarting to find out. An edge older than this ignores
+            // the fields; one newer than the panel sees them missing and does
+            // the full run, as it always did.
+            'published_setup' => (string) (self::current('windows-setup')['version'] ?? ''),
+            'published_agent' => (string) (self::current('windows-agent')['version'] ?? ''),
         ];
     }
 

@@ -33,6 +33,14 @@
 # existing one alone. Running it twice does not reinstall the panel, does not
 # regenerate the coordinator's keypair — which would orphan every enrolled
 # device — and does not touch the database.
+#
+# That sentence was here from the first version and nothing had ever run the
+# script twice; the first two field re-runs each failed on something a second
+# run would have found. It is now exercised by services/lab/install-gate.sh:
+# a first run that dies half-way and a second that must finish, a clean run
+# followed by the same command again with nothing loosened or regenerated,
+# and --uninstall followed by a reinstall. If this script changes, that gate is
+# what says whether this paragraph is still true.
 set -uo pipefail
 
 REPO_URL="${AKCONNECT_REPO_URL:-https://github.com/akshaykananidwk/network.akdwk.in.git}"
@@ -50,6 +58,11 @@ ADMIN_EMAIL=""
 CHANNEL=""
 UNATTENDED=0
 UNINSTALL=0
+# Whether --channel was given, as opposed to the question's default being
+# taken: only the first may change a panel that is already installed.
+CHANNEL_GIVEN=0
+# Whether this run installed the panel, as opposed to finding it installed.
+INSTALLED_NOW=0
 ASSUME_YES=0
 
 # --------------------------------------------------------------------- output
@@ -76,9 +89,22 @@ die()  { printf '\n  %s✗ %s%s\n\n' "$RED" "$*" "$RESET" >&2; exit 1; }
 # interrupted run does not leave them behind.
 AKCONNECT_TMP=""
 
-keep_tmp() {
-    AKCONNECT_TMP="$AKCONNECT_TMP $1"
-    printf '%s\n' "$1"
+# make_tmp <variable> [mktemp options] — a temporary path, registered for the
+# trap, in the variable named.
+#
+# It sets the variable itself rather than printing the path, and that is the
+# whole of it. The first version printed it and was always called as
+# path="$(keep_tmp "$(mktemp)")" — inside a command substitution, which is a
+# subshell, so the path was added to the subshell's copy of the list and the
+# trap in this shell never saw one of them. Every temporary file the trap was
+# said to guarantee removing, it removed none of. The install gate found it,
+# once a step stopped deleting its own.
+make_tmp() {
+    local __make_tmp_var=$1 __make_tmp_path
+    shift
+    __make_tmp_path="$(mktemp "$@")" || die "could not create a temporary file"
+    AKCONNECT_TMP="$AKCONNECT_TMP $__make_tmp_path"
+    printf -v "$__make_tmp_var" '%s' "$__make_tmp_path"
 }
 
 akconnect_cleanup() {
@@ -89,13 +115,21 @@ akconnect_cleanup() {
     AKCONNECT_TMP=""
 }
 
-trap akconnect_cleanup EXIT INT TERM HUP
+# The signals end the run; the EXIT trap then cleans up. A trap on INT that
+# only cleaned up would return to the script, which carried on: ^C during the
+# edge upgrade killed the upgrade, and the installer went on to write its state
+# file and print "AK Connect is installed" — having just deleted the build
+# directory it was still using.
+trap akconnect_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # run_quiet keeps a wall of apt output off the screen but hands all of it over
 # when something fails — the one moment it is worth reading.
 run_quiet() {
     local log
-    log="$(keep_tmp "$(mktemp)")"
+    make_tmp log
     if "$@" >"$log" 2>&1; then
         rm -f "$log"
 
@@ -114,6 +148,26 @@ run_quiet() {
 # This script is run as `curl … | bash`, so stdin is the script itself. A read
 # without this takes the next line of the script as the answer and installs a
 # panel on a domain called something like `set -uo pipefail`.
+# ask_into <variable> <prompt> <default>: ask, set the variable, and set
+# ANSWERED=1 if something was typed rather than the default accepted.
+ANSWERED=0
+ask_into() {
+    local __ask_var=$1 prompt=$2 default=$3 reply=''
+    ANSWERED=0
+
+    # The terminal, not standard input: under curl | bash, standard input is
+    # this script. /dev/tty can exist and still not open (no controlling
+    # terminal), which is the same as having none.
+    if [ "$UNATTENDED" -ne 1 ] && { exec 3<>/dev/tty; } 2>/dev/null; then
+        printf '  %s [%s]: ' "$prompt" "$default" >&3
+        IFS= read -r reply <&3 || reply=''
+        exec 3>&-
+    fi
+
+    [ -n "$reply" ] && ANSWERED=1
+    printf -v "$__ask_var" '%s' "${reply:-$default}"
+}
+
 ask() {
     local prompt=$1 default=${2:-} reply=''
 
@@ -123,7 +177,9 @@ ask() {
         return 0
     fi
 
-    if [ ! -e /dev/tty ]; then
+    # Opened rather than tested for: /dev/tty can exist with no controlling
+    # terminal behind it.
+    if ! { exec 3<>/dev/tty; } 2>/dev/null; then
         [ -n "$default" ] || die "no terminal to ask '$prompt' on, and no default. Pass it as an option."
         printf '%s\n' "$default"
 
@@ -131,11 +187,12 @@ ask() {
     fi
 
     if [ -n "$default" ]; then
-        printf '  %s [%s]: ' "$prompt" "$default" > /dev/tty
+        printf '  %s [%s]: ' "$prompt" "$default" >&3
     else
-        printf '  %s: ' "$prompt" > /dev/tty
+        printf '  %s: ' "$prompt" >&3
     fi
-    IFS= read -r reply < /dev/tty || reply=''
+    IFS= read -r reply <&3 || reply=''
+    exec 3>&-
 
     printf '%s\n' "${reply:-$default}"
 }
@@ -170,7 +227,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --domain)     DOMAIN="${2:-}"; shift 2 || die "--domain needs a value" ;;
         --email)      ADMIN_EMAIL="${2:-}"; shift 2 || die "--email needs a value" ;;
-        --channel)    CHANNEL="${2:-}"; shift 2 || die "--channel needs a value" ;;
+        --channel)    CHANNEL="${2:-}"; CHANNEL_GIVEN=1; shift 2 || die "--channel needs a value" ;;
         --branch)     BRANCH="${2:-}"; shift 2 || die "--branch needs a value" ;;
         --unattended) UNATTENDED=1; shift ;;
         --uninstall)  UNINSTALL=1; shift ;;
@@ -182,10 +239,24 @@ done
 
 [ "$(id -u)" -eq 0 ] || die "run this as root:  curl -fsSL … | sudo bash"
 
+# Stated rather than inherited. The panel tree has to be readable by the web
+# server's own user, and an operator whose shell runs with umask 027 or 077
+# would otherwise get a checkout Caddy cannot serve. Nothing secret is created
+# under it: mktemp makes 0600 files whatever the umask, and install-edge.sh
+# sets 077 around the keys it writes.
+umask 022
+
 # ------------------------------------------------------------------ uninstall
 
 # read_state recovers what an earlier run recorded, so --uninstall knows which
 # domain and directories it is undoing without being told again.
+# One spelling for a domain: no scheme, no path, no spaces, no trailing dot,
+# lower case. Typed with capitals or a trailing dot it resolves the same, and
+# would otherwise name a second directory under /var/www and a second panel.
+normalise_domain() {
+    printf '%s' "$1" | tr -d ' ' | sed 's#^https\?://##; s#/.*##; s#\.$##' | tr '[:upper:]' '[:lower:]'
+}
+
 read_state() {
     [ -f "$STATE_FILE" ] || return 1
     # shellcheck disable=SC1090
@@ -197,13 +268,18 @@ read_state() {
 do_uninstall() {
     printf '\n%sAK Connect — uninstall%s\n' "$BOLD" "$RESET"
 
+    local panel_dir=""
     if read_state; then
+        # The installation's own spelling and directory, as it recorded them.
         DOMAIN="${AKCONNECT_DOMAIN:-$DOMAIN}"
+        panel_dir="${AKCONNECT_PANEL_DIR:-}"
+    else
+        [ -n "$DOMAIN" ] || DOMAIN="$(ask 'Domain to remove' '')"
+        DOMAIN="$(normalise_domain "$DOMAIN")"
     fi
-    [ -n "$DOMAIN" ] || DOMAIN="$(ask 'Domain to remove' '')"
     [ -n "$DOMAIN" ] || die "nothing to remove: no domain given and no $STATE_FILE"
 
-    local panel_dir="/var/www/$DOMAIN"
+    [ -n "$panel_dir" ] || panel_dir="/var/www/$DOMAIN"
 
     printf '\n'
     say "This removes, permanently:"
@@ -221,14 +297,17 @@ do_uninstall() {
 
     step "stopping services"
     local unit
-    for unit in akconnect-coordinator akconnect-relay akconnect-edge-upgrade.timer \
-                akconnect-edge-upgrade.service akconnect-worker.timer akconnect-worker.service; do
+    # By pattern, not by a list. The list named akconnect-edge-upgrade.timer,
+    # and upgrade-edge.sh installs akconnect-upgrade.timer — so an uninstall
+    # left an hourly root job enabled, pointing at a script it had just
+    # deleted, ready to fire in the middle of the next install.
+    local path
+    for path in /etc/systemd/system/akconnect-*.timer /etc/systemd/system/akconnect-*.service; do
+        [ -e "$path" ] || continue
+        unit="$(basename "$path")"
         systemctl disable --now "$unit" >/dev/null 2>&1
-        rm -f "/etc/systemd/system/$unit"
+        rm -f "$path"
     done
-    # The unit files without a suffix, which the loop above named bare.
-    rm -f /etc/systemd/system/akconnect-coordinator.service \
-          /etc/systemd/system/akconnect-relay.service
     systemctl daemon-reload >/dev/null 2>&1
     ok "services stopped and unit files removed"
 
@@ -343,7 +422,32 @@ PUBLIC_IP="$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
 
 [ -n "$DOMAIN" ]      || DOMAIN="$(ask 'Domain for the panel (e.g. nb.akdwk.in)' '')"
 [ -n "$DOMAIN" ]      || die "a domain is required: Let's Encrypt issues certificates for names, not addresses"
-DOMAIN="$(printf '%s' "$DOMAIN" | tr -d ' ' | sed 's#^https\?://##; s#/.*##')"
+# One spelling. A domain typed with capitals or a trailing dot resolves the
+# same, and without this it would name a second directory under /var/www and
+# a second panel beside the first.
+DOMAIN="$(normalise_domain "$DOMAIN")"
+
+# A re-run is a re-run of the installation that is here, not a second one.
+#
+# Compared as one spelling, and then the installation's own spelling is used.
+# Releases before 1.9.7-dev.21 did not lowercase the domain, so an install
+# typed as NB.akdwk.in has its panel in /var/www/NB.akdwk.in and a Caddy site
+# of that name; this run's lowercased name would have made a second of each.
+PREVIOUS_CHANNEL=""
+SETTINGS_WRITTEN_BEFORE=0
+if [ -f "$STATE_FILE" ]; then
+    INSTALLED_DOMAIN="$(sed -n 's/^AKCONNECT_DOMAIN=//p' "$STATE_FILE" | head -1)"
+    PREVIOUS_CHANNEL="$(sed -n 's/^AKCONNECT_CHANNEL=//p' "$STATE_FILE" | head -1)"
+    grep -qx 'AKCONNECT_SETTINGS_WRITTEN=1' "$STATE_FILE" && SETTINGS_WRITTEN_BEFORE=1
+    if [ -n "$INSTALLED_DOMAIN" ] && [ "$(normalise_domain "$INSTALLED_DOMAIN")" != "$DOMAIN" ]; then
+        die "this server already has AK Connect installed for $INSTALLED_DOMAIN, not $DOMAIN.
+
+    Running it again is for the installation that is here: pass --domain $INSTALLED_DOMAIN.
+    To move to a new name, uninstall first (it removes the database and every device
+    enrolled on it) and install again."
+    fi
+    [ -n "$INSTALLED_DOMAIN" ] && DOMAIN="$INSTALLED_DOMAIN"
+fi
 
 [ -n "$ADMIN_EMAIL" ] || ADMIN_EMAIL="$(ask 'Administrator email' '')"
 [ -n "$ADMIN_EMAIL" ] || die "an administrator email is required"
@@ -352,7 +456,13 @@ case "$ADMIN_EMAIL" in
     *) die "'$ADMIN_EMAIL' does not look like an email address" ;;
 esac
 
-[ -n "$CHANNEL" ] || CHANNEL="$(ask 'Release channel — stable, beta or edge' 'edge')"
+# Asked into the variable, not through $( ), so that an answer can be told
+# from a default accepted: on a re-run, a channel typed here is applied just as
+# --channel is, and Enter leaves the panel's own setting alone.
+if [ -z "$CHANNEL" ]; then
+    ask_into CHANNEL 'Release channel — stable, beta or edge' "${PREVIOUS_CHANNEL:-edge}"
+    [ "$ANSWERED" -eq 1 ] && CHANNEL_GIVEN=1
+fi
 case "$CHANNEL" in
     stable|beta|edge) ;;
     *) die "channel must be stable, beta or edge — not '$CHANNEL'" ;;
@@ -500,26 +610,139 @@ step "fetching the code"
 
 mkdir -p "$(dirname "$SRC_DIR")"
 
+# as_owner <path> <command...> runs a command as whoever owns <path>.
+#
+# Every git command in this script goes through it, because that is git's own
+# rule: it refuses a repository that belongs to someone else, and says
+# "detected dubious ownership". The panel tree is the web user's — it has to
+# be, the panel updates itself in place — and this script runs as root. The
+# first version ran git as root on it anyway, and the first field re-run
+# stopped there. The fix is to be the owner, not to tell git to look away:
+# no safe.directory, global or otherwise, is ever written.
+as_owner() {
+    local path=$1 owner
+    shift
+    owner="$(stat -c %U "$path" 2>/dev/null)"
+
+    if [ -z "$owner" ] || [ "$owner" = "root" ]; then
+        "$@"
+
+        return
+    fi
+
+    as_user "$owner" "$@"
+}
+
+# as_user <user> <command...>: every command this script runs as somebody else
+# goes through here.
+#
+#   umask 022, set inside the command. sudo's PAM session applies pam_umask,
+#   and on Ubuntu (USERGROUPS_ENAB yes) that gives the web user 0002 whatever
+#   this script's umask is — the panel's checkout, .git included, came out
+#   group-writable.
+#
+#   -H, so git and PHP read that user's configuration and not root's.
+#
+#   Proxy settings preserved by NAME. sudo drops the environment, and a server
+#   behind a proxy would fetch as root and fail as the web user. They used to
+#   be passed as env VAR=value arguments, which put a proxy's password on
+#   sudo's command line — logged to auth.log, and in ps for every local user
+#   to read for as long as git ran.
+as_user() {
+    local user=$1 keep=() var
+    shift
+    for var in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY all_proxy ALL_PROXY; do
+        [ -n "${!var:-}" ] && keep+=("$var")
+    done
+
+    local IFS=,
+    sudo -H ${keep[@]+"--preserve-env=${keep[*]}"} -u "$user" -- \
+        /bin/sh -c 'umask 022 && exec "$@"' as_user "$@"
+}
+
+# git_in <repository> <what it is doing> <git arguments...>
+#
+# git, as the repository's owner, and when it fails the message is git's own.
+# The previous version sent git's output to /dev/null and said "could not
+# fetch", which is true and does not say why; the field operator only saw the
+# reason because an earlier command in the same function happened not to be
+# redirected.
+git_in() {
+    local repo=$1 doing=$2 out
+    shift 2
+
+    if ! out="$(as_owner "$repo" git -C "$repo" "$@" 2>&1)"; then
+        die "could not $doing in $repo. git said:
+$(printf '%s\n' "$out" | sed 's/^/        /')"
+    fi
+}
+
+# restore_git_modes <repository> gives back the executable bit git recorded.
+#
+# Versions up to 1.9.7-dev.20 ran chmod 644 over every file in the panel
+# tree, which took +x off the tracked scripts. git then counts each of them
+# as locally modified, and the next checkout that moves one of them refuses
+# with "Your local changes would be overwritten" — changes nobody made. A
+# tree any of those versions touched is repaired here, before git is asked to
+# move it. Only the bit git itself recorded; nothing is loosened.
+restore_git_modes() {
+    local repo=$1 entry mode path
+
+    while IFS= read -r -d '' entry; do
+        mode="${entry%% *}"
+        path="${entry#*$'\t'}"
+        if [ "$mode" = "100755" ] && [ -f "$repo/$path" ] && [ ! -x "$repo/$path" ]; then
+            chmod 755 "$repo/$path"
+        fi
+    done < <(as_owner "$repo" git -C "$repo" ls-files -s -z 2>/dev/null)
+}
+
+# clone_or_update <directory> <owner>
 clone_or_update() {
-    local target=$1
+    local target=$1 owner=$2
 
     if [ -d "$target/.git" ]; then
-        git -C "$target" remote set-url origin "$REPO_URL"
-        git -C "$target" fetch --depth 50 origin "$BRANCH" >/dev/null 2>&1 \
-            || die "could not fetch $BRANCH into $target"
-        git -C "$target" checkout -q -B "$BRANCH" "origin/$BRANCH" \
-            || die "could not check out $BRANCH in $target"
+        # The tree is this script's, and it is <owner>'s before git touches
+        # it. Whatever an earlier run left in it — including files an older
+        # version of this script wrote as root — git refuses a repository
+        # that is not the caller's, and a checkout as <owner> cannot replace
+        # a file <owner> does not own.
+        [ "$owner" = "root" ] || chown -R "$owner:$owner" "$target"
+
+        restore_git_modes "$target"
+
+        git_in "$target" "point it at $REPO_URL" remote set-url origin "$REPO_URL"
+        git_in "$target" "fetch $BRANCH" fetch -q --depth 50 origin "$BRANCH"
+
+        # FETCH_HEAD, not origin/$BRANCH. The clone is single-branch, so a
+        # fetch of any other ref — a tag, or the next release branch — updates
+        # FETCH_HEAD and nothing else, and origin/<that> never exists. A tag is
+        # checked out as what it is, a fixed commit, rather than as a branch
+        # that happens to share its name.
+        if grep -q "tag '" "$target/.git/FETCH_HEAD" 2>/dev/null; then
+            git_in "$target" "check out $BRANCH" checkout -q --detach FETCH_HEAD
+        else
+            git_in "$target" "check out $BRANCH" checkout -q -B "$BRANCH" FETCH_HEAD
+        fi
 
         return 0
     fi
 
-    [ -e "$target" ] && die "$target exists but is not a git checkout. Move it aside first."
-    git clone --depth 50 --branch "$BRANCH" "$REPO_URL" "$target" >/dev/null 2>&1 \
-        || die "could not clone $REPO_URL at $BRANCH"
+    if [ -e "$target" ] && [ -n "$(ls -A "$target" 2>/dev/null)" ]; then
+        die "$target exists and is not empty, but is not a git checkout. Move it aside first."
+    fi
+
+    # Created first and handed over, so the clone is <owner>'s from its first
+    # byte. Cloning as root and chowning afterwards is what left a tree git
+    # would not touch again, and a chown that did not happen — because the run
+    # died in between — would have left one the panel could not update.
+    mkdir -p "$target"
+    chown "$owner:$owner" "$target"
+    git_in "$target" "clone $REPO_URL at $BRANCH" clone -q --depth 50 --branch "$BRANCH" "$REPO_URL" "$target"
 }
 
-clone_or_update "$SRC_DIR"
-ok "edge source in $SRC_DIR ($(git -C "$SRC_DIR" rev-parse --short HEAD))"
+clone_or_update "$SRC_DIR" root
+ok "edge source in $SRC_DIR ($(as_owner "$SRC_DIR" git -C "$SRC_DIR" rev-parse --short HEAD))"
 
 # The panel gets its own checkout.
 #
@@ -528,27 +751,56 @@ ok "edge source in $SRC_DIR ($(git -C "$SRC_DIR" rev-parse --short HEAD))"
 # panel reports it is on. One shared directory would have the panel's updater
 # and the edge build fighting over the same working tree.
 if [ ! -d "$PANEL_DIR" ]; then
-    clone_or_update "$PANEL_DIR"
-    ok "panel in $PANEL_DIR"
+    clone_or_update "$PANEL_DIR" "$WEB_USER"
+    ok "panel in $PANEL_DIR, cloned as $WEB_USER"
 elif [ -f "$PANEL_DIR/config/config.php" ]; then
     ok "panel already installed in $PANEL_DIR — left exactly as it is"
 else
-    clone_or_update "$PANEL_DIR"
-    ok "panel refreshed in $PANEL_DIR"
+    clone_or_update "$PANEL_DIR" "$WEB_USER"
+    ok "panel refreshed in $PANEL_DIR, as $WEB_USER"
 fi
 
 step "permissions"
 
+# The directories the panel writes into at run time, which git does not carry.
 for directory in storage storage/logs storage/cache storage/backups storage/updates storage/tmp uploads config install; do
     mkdir -p "$PANEL_DIR/$directory"
 done
 chown -R "$WEB_USER:$WEB_USER" "$PANEL_DIR"
-# The checkout is readable by the web user and writable only where it has to
-# be: the updater replaces application files, so the tree is its own.
-find "$PANEL_DIR" -type d -exec chmod 755 {} +
-find "$PANEL_DIR" -type f -exec chmod 644 {} +
+
+# No blanket chmod that ADDS a permission. The modes are the ones git gave the
+# files when the web user cloned them, under the umask 022 as_user sets.
+#
+# One that only takes away is safe, and needed: nothing in the panel should be
+# writable by anyone but its owner. Up to 1.9.7-dev.20 the web user's commands
+# ran through sudo's PAM session, whose pam_umask gives www-data 0002 on
+# Ubuntu, so the checkout, .git, the logs and the locks came out group-
+# writable. This repairs a tree that left, and never adds a bit anywhere.
+chmod -R go-w "$PANEL_DIR"
+#
+# There used to be one — find -exec chmod 644 over the whole tree, on every
+# run. On a first run it ran before the installer, so it only touched what git
+# had put there. On every run after that it also reached what the installer
+# writes at 0640: config/.env, which carries the database password, and
+# install/install.lock. Both became world-readable, every time the script was
+# re-run, which is exactly when somebody is trying to fix something. The
+# install gate's second run is what caught it: 640 -> 644, on both.
+#
+# The secrets are put back where the installer leaves them instead, on every
+# run — which also repairs a tree an earlier version of this script loosened.
 chmod 700 "$PANEL_DIR/config"
-ok "$PANEL_DIR belongs to $WEB_USER"
+[ -f "$PANEL_DIR/config/config.php" ] && chmod 600 "$PANEL_DIR/config/config.php"
+for secret in config/.env install/install.lock; do
+    [ -f "$PANEL_DIR/$secret" ] && chmod 640 "$PANEL_DIR/$secret"
+done
+# Each backup, and each update's rollback journal, is a directory the panel
+# makes at 0750: a full database dump, and a copy of config.php with every key
+# the panel holds. The old blanket chmod made them 0755 on every re-run.
+for holder in storage/backups storage/updates; do
+    [ -d "$PANEL_DIR/$holder" ] \
+        && find "$PANEL_DIR/$holder" -mindepth 1 -maxdepth 1 -type d -exec chmod 750 {} +
+done
+ok "$PANEL_DIR belongs to $WEB_USER, and its secrets are not readable by anyone else"
 
 # --------------------------------------------------------------- the database
 
@@ -566,7 +818,9 @@ else
     config/config.php to go with it. That is a half-finished install, and
     guessing which half is not something a script should do.
 
-    Either restore the panel's config/config.php, or drop the database:
+    If a panel is running on this machine under another name, this is its
+    database — look in /var/www before doing anything. Otherwise restore
+    the panel's config/config.php, or, only if nothing uses it, drop it:
         mysql -e 'DROP DATABASE $DB_NAME'"
     fi
 
@@ -642,11 +896,12 @@ JSON
 )"
 
     if ! printf '%s\n' "$ANSWERS_JSON" \
-        | sudo -u "$WEB_USER" "$PHP_BIN" "$PANEL_DIR/cli/install.php" --answers=-; then
+        | as_user "$WEB_USER" "$PHP_BIN" "$PANEL_DIR/cli/install.php" --answers=-; then
         ANSWERS_JSON=""
         die "the panel installer failed — the output above says why"
     fi
     ANSWERS_JSON=""
+    INSTALLED_NOW=1
     ok "panel installed"
 fi
 
@@ -655,10 +910,13 @@ chmod 600 "$PANEL_DIR/config/config.php" 2>/dev/null
 
 # As the web user, never as root: a migration run by root leaves storage/logs
 # and the cache owned by root, and the panel then cannot write its own logs.
-if sudo -u "$WEB_USER" "$PHP_BIN" "$PANEL_DIR/cli/migrate.php" >/dev/null 2>&1; then
+if MIGRATE_SAYS="$(as_user "$WEB_USER" "$PHP_BIN" "$PANEL_DIR/cli/migrate.php" 2>&1)"; then
     ok "migrations are up to date"
 else
-    warn "cli/migrate.php reported a problem — run it by hand and read the output"
+    warn "cli/migrate.php failed. It said:"
+    printf '%s\n' "$MIGRATE_SAYS" | tail -15 | sed 's/^/        /'
+    say "Run it again, as the web user, once the cause is fixed:"
+    say "    sudo -u $WEB_USER $PHP_BIN $PANEL_DIR/cli/migrate.php"
 fi
 
 # ---------------------------------------------------------------- the website
@@ -798,105 +1056,172 @@ fi
 
 # ------------------------------------------------------------------- the edge
 
-step "building the coordinator and the relay"
+# The panel's own version, for the summary: the edge source may be ahead of
+# it, and the line that says what is installed should say what is installed.
+PANEL_VERSION="$(tr -d '\r\n' < "$PANEL_DIR/VERSION" 2>/dev/null)"
 
-PANEL_VERSION="$(cat "$SRC_DIR/VERSION" 2>/dev/null | tr -d '\r\n')"
-BUILD_DIR="$(keep_tmp "$(mktemp -d)")"
+EDGE_BUILT_NOW=0
 
-build_one() {
-    local svc=$1
-    ( cd "$SRC_DIR/services/$svc" \
-        && CGO_ENABLED=0 go build -trimpath \
-            -ldflags "-s -w -X main.version=$PANEL_VERSION" \
-            -o "$BUILD_DIR/akconnect-$svc" "./cmd/akconnect-$svc" )
-}
+if [ -f "$ETC_DIR/coordinator.env" ] && [ -x /usr/local/bin/akconnect-coordinator ] \
+        && [ -x /usr/local/bin/akconnect-relay ]; then
+    step "the edge"
 
-build_one coordinator || { rm -rf "$BUILD_DIR"; die "the coordinator did not compile"; }
-build_one relay       || { rm -rf "$BUILD_DIR"; die "the relay did not compile"; }
+    # Installed already, so left alone. A re-run used to rebuild both services
+    # from the tip of $BRANCH, whatever release the panel was on, restart the
+    # coordinator — a few seconds' outage for every relayed pair — and then
+    # let upgrade-edge.sh overwrite its rollback copies with that build.
+    # Keeping the edge on the panel's release is upgrade-edge.sh's job, and it
+    # runs below.
+    ok "the coordinator and relay are installed ($(/usr/local/bin/akconnect-coordinator version 2>/dev/null | awk '{print $NF}')); upgrade-edge.sh keeps them on the panel's release"
 
-install -m 755 "$BUILD_DIR/akconnect-coordinator" /usr/local/bin/akconnect-coordinator
-install -m 755 "$BUILD_DIR/akconnect-relay"       /usr/local/bin/akconnect-relay
-rm -rf "$BUILD_DIR"
-ok "coordinator and relay $PANEL_VERSION in /usr/local/bin"
+    # Enabled and running, though — not only built. install-edge.sh writes
+    # coordinator.env before it enables the services, so a run stopped between
+    # the two leaves an edge that looks installed with services that were never
+    # enabled, and a re-run that looked only at the files would call it done
+    # and let the next reboot take it down. enable --now does nothing to a
+    # service that is already enabled and running: no restart.
+    systemctl enable --now akconnect-relay akconnect-coordinator >/dev/null 2>&1 \
+        || die "the coordinator and relay are installed but would not start:
+        systemctl status akconnect-relay akconnect-coordinator
+        journalctl -u akconnect-relay -u akconnect-coordinator -n 50"
+    ok "both enabled and running"
+else
+    step "building the coordinator and the relay"
 
-step "installing the edge services"
+    EDGE_VERSION="$(tr -d '\r\n' < "$SRC_DIR/VERSION" 2>/dev/null)"
+    make_tmp BUILD_DIR -d
 
-# install-edge.sh does the service account, the keypair, the shared secrets,
-# the env files and the systemd units, and it is the script the release gate
-# exercises. --no-configure-apache because there is no Apache here: Caddy
-# already carries /fallback, configured above.
-"$SRC_DIR/deploy/install-edge.sh" \
-    --panel "$PANEL_URL" \
-    --relay-name "$(printf '%s' "$DOMAIN" | cut -d. -f1)-1" \
-    --public-host "$DOMAIN" \
-    --no-configure-apache \
-    || die "install-edge.sh failed — its output above says where"
+    # -buildvcs=false: the version is stamped explicitly, and go build would
+    # otherwise run git on the source tree itself — which fails, as a
+    # "compile" error, on a checkout that is not the caller's.
+    build_one() {
+        local svc=$1
+        ( cd "$SRC_DIR/services/$svc" \
+            && CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+                -ldflags "-s -w -X main.version=$EDGE_VERSION" \
+                -o "$BUILD_DIR/akconnect-$svc" "./cmd/akconnect-$svc" )
+    }
+
+    build_one coordinator || die "the coordinator did not compile"
+    build_one relay       || die "the relay did not compile"
+
+    install -m 755 "$BUILD_DIR/akconnect-coordinator" /usr/local/bin/akconnect-coordinator
+    install -m 755 "$BUILD_DIR/akconnect-relay"       /usr/local/bin/akconnect-relay
+    ok "coordinator and relay $EDGE_VERSION in /usr/local/bin"
+
+    step "installing the edge services"
+
+    # install-edge.sh does the service account, the keypair, the shared
+    # secrets, the env files and the systemd units, and it is the script the
+    # release gate exercises. --no-configure-apache because there is no Apache
+    # here: Caddy already carries /fallback, configured above.
+    "$SRC_DIR/deploy/install-edge.sh" \
+        --panel "$PANEL_URL" \
+        --relay-name "$(printf '%s' "$DOMAIN" | cut -d. -f1)-1" \
+        --public-host "$DOMAIN" \
+        --no-configure-apache \
+        || die "install-edge.sh failed — its output above says where"
+
+    EDGE_BUILT_NOW=1
+fi
 
 # ------------------------------------------------------- telling the panel
 
 step "pointing the panel at its coordinator"
 
-COORD_PUBLIC="$(cat "$ETC_DIR/coordinator.pub" 2>/dev/null | tr -d '\r\n')"
-COORD_SECRET="$(cat "$ETC_DIR/coordinator.secret.for-panel" 2>/dev/null | tr -d '\r\n')"
+COORD_PUBLIC="$(tr -d '\r\n' < "$ETC_DIR/coordinator.pub" 2>/dev/null)"
+COORD_SECRET="$(tr -d '\r\n' < "$ETC_DIR/coordinator.secret.for-panel" 2>/dev/null)"
 [ -n "$COORD_PUBLIC" ] || die "$ETC_DIR/coordinator.pub is missing — install-edge.sh did not finish"
+[ -n "$COORD_SECRET" ] || die "$ETC_DIR/coordinator.secret.for-panel is missing — install-edge.sh did not finish"
 
-# Written straight into the panel's settings rather than left for somebody to
-# type. A key that has to be copied by hand between two terminals is a key
-# that gets copied wrong, and the symptom — every agent enrolling and then
-# never connecting — looks like a network fault for as long as it takes to
-# check.
-WIRE_PHP="$(keep_tmp "$(mktemp)")"
-cat > "$WIRE_PHP" <<'PHP'
-<?php
-declare(strict_types=1);
+# Where the panel came from, so that the edge is built from the same place.
+#
+# The panel reports a branch and a commit to upgrade-edge.sh, which builds the
+# coordinator, the relay and the Windows installer from exactly that. Nothing
+# used to tell it: the seed says branch "main" and no commit, the edge source
+# is a single-branch clone of $BRANCH, and upgrade-edge.sh failed on every run
+# of every install this script made — so its timer was never installed and
+# /download/setup.exe was never published.
+PANEL_COMMIT="$(as_owner "$PANEL_DIR" git -C "$PANEL_DIR" rev-parse HEAD 2>/dev/null)"
+REPO_OWNER=""
+REPO_NAME=""
+case "$REPO_URL" in
+    https://github.com/*/*)
+        REPO_OWNER="$(printf '%s' "$REPO_URL" | cut -d/ -f4)"
+        REPO_NAME="$(printf '%s' "$REPO_URL" | cut -d/ -f5 | sed 's/\.git$//')"
+        ;;
+esac
 
-define('APP_ROOT', $argv[1]);
-require APP_ROOT . '/app/Core/Autoloader.php';
-$autoloader = new App\Core\Autoloader();
-$autoloader->addNamespace('App', APP_ROOT . '/app');
-$autoloader->register();
-require APP_ROOT . '/app/Core/helpers.php';
-require APP_ROOT . '/app/bootstrap.php';
-
-[, , $host, $publicKey, $sharedSecret, $channel] = $argv;
-
-try {
-    App\Services\CoordinatorSettings::save([
-        'host'          => $host,
-        'public_host'   => $host,
-        'port'          => 8443,
-        'public_key'    => $publicKey,
-        'shared_secret' => $sharedSecret,
-        'fallback_url'  => 'wss://' . $host . '/fallback',
-    ]);
-} catch (Throwable $e) {
-    // A validation failure names the field, and that is the thing worth
-    // seeing: "the public key is not 44 characters of base64" is actionable,
-    // "could not save settings" is not.
-    $detail = method_exists($e, 'errors') ? implode('; ', (array) $e->errors()) : $e->getMessage();
-    fwrite(STDERR, 'coordinator settings: ' . $detail . "\n");
-    exit(1);
-}
-
-App\Models\UpdateSetting::save(['channel' => $channel]);
-
-echo 'saved', "\n";
-PHP
-
-if sudo -u "$WEB_USER" "$PHP_BIN" "$WIRE_PHP" \
-        "$PANEL_DIR" "$DOMAIN" "$COORD_PUBLIC" "$COORD_SECRET" "$CHANNEL" >/dev/null; then
-    ok "coordinator key, secret, fallback URL and the $CHANNEL channel are in the panel"
-else
-    warn "could not write the settings automatically"
-    say "Set them by hand under Settings → Coordinator:"
-    say "    host        $DOMAIN"
-    say "    port        8443"
-    say "    public key  $COORD_PUBLIC"
-    say "    fallback    wss://$DOMAIN/fallback"
+# The channel is written when this run installed the panel, when one was asked
+# for (--channel, or typed at the prompt), or when no run of this release has
+# ever finished writing the panel's settings — a first run that died after the
+# panel installer, or an install by a release whose settings step never
+# worked. Those panels are on the seeded channel, not on one anybody chose.
+# Otherwise a re-run that merely accepted the default must not move a panel
+# somebody switched to stable back onto edge.
+WRITE_CHANNEL=""
+if [ "$INSTALLED_NOW" -eq 1 ] || [ "$CHANNEL_GIVEN" -eq 1 ] || [ "$SETTINGS_WRITTEN_BEFORE" -ne 1 ]; then
+    WRITE_CHANNEL="$CHANNEL"
 fi
-rm -f "$WIRE_PHP"
 
-systemctl restart akconnect-coordinator >/dev/null 2>&1
+# The source as a fact only on the run that installed the panel. On a re-run
+# the tree's .git is still at the commit it was installed from — the panel
+# updates itself from release archives and never moves it — so writing it back
+# would rewind the panel's own record and have it offer again an update it had
+# already applied. A re-run fills in only what was never set, which is what
+# repairs a panel an earlier version of this script installed without it.
+SOURCE_KEY="source_if_unset"
+[ "$INSTALLED_NOW" -eq 1 ] && SOURCE_KEY="source"
+
+EDGE_SETTINGS="$(jq -n \
+    --arg host "$DOMAIN" --arg key "$COORD_PUBLIC" --arg secret "$COORD_SECRET" \
+    --arg fallback "wss://$DOMAIN/fallback" \
+    --arg owner "$REPO_OWNER" --arg repo "$REPO_NAME" --arg branch "$BRANCH" \
+    --arg commit "$PANEL_COMMIT" --arg channel "$WRITE_CHANNEL" --arg sourcekey "$SOURCE_KEY" \
+    '{coordinator: {host: $host, port: 8443, public_key: $key, shared_secret: $secret,
+                    fallback_url: $fallback}}
+     + {($sourcekey): {repo_owner: $owner, repo_name: $repo, branch: $branch, commit: $commit}}
+     + (if $channel == "" then {} else {channel: $channel} end)')"
+
+# On standard input, as the web user: no temporary file for another user to
+# fail to open, and no secret on a command line for every user on the machine
+# to read in ps.
+#
+# This release's copy of the helper, from the edge source fetched above, aimed
+# at the panel with --root. Not the panel's own copy: a re-run leaves an
+# installed panel at its own version, and a panel an earlier release installed
+# has no cli/edge-settings.php at all — which is exactly the panel whose
+# settings a re-run is there to repair. The install gate's repair sequence
+# found it.
+#
+# The web user has to be able to read it. The source is root's and made under
+# umask 022, but a directory somebody tightened by hand would give PHP's bare
+# "Could not open input file" — so check, and say which path.
+if ! as_user "$WEB_USER" test -r "$SRC_DIR/cli/edge-settings.php" \
+        || ! as_user "$WEB_USER" test -r "$SRC_DIR/cli/_root.php"; then
+    EDGE_SETTINGS=""
+    die "$WEB_USER cannot read $SRC_DIR/cli/edge-settings.php.
+
+    The panel's settings are written by that script, run as $WEB_USER. It needs
+    read access to $SRC_DIR (the edge source is public code — no secrets live there):
+        sudo chmod o+rX $(dirname "$SRC_DIR") $SRC_DIR $SRC_DIR/cli
+    then run this installer again."
+fi
+if ! printf '%s\n' "$EDGE_SETTINGS" \
+        | as_user "$WEB_USER" "$PHP_BIN" "$SRC_DIR/cli/edge-settings.php" --root="$PANEL_DIR"; then
+    EDGE_SETTINGS=""
+    die "the panel would not take its coordinator settings — the lines above name the field.
+
+    Without them no agent can connect and upgrade-edge.sh cannot build this panel's
+    release. This used to be reported as a warning and the install called a success."
+fi
+EDGE_SETTINGS=""
+
+# Only when something here changed what it is talking to. A re-run that found
+# everything in place has no reason to cost every relayed pair an outage.
+if [ "$INSTALLED_NOW" -eq 1 ] || [ "$EDGE_BUILT_NOW" -eq 1 ]; then
+    systemctl restart akconnect-coordinator >/dev/null 2>&1
+fi
 
 # ------------------------------------------------------------------ firewall
 
@@ -997,6 +1322,31 @@ WRAPPER
 chmod 755 /usr/local/bin/akconnect-maintenance
 ok "akconnect-maintenance on|off|status"
 
+# ------------------------------------------------------- the setup link
+
+# When this run created the administrator, or nobody has taken the account up
+# yet — never signed in to it, never set its password. An account that is in
+# use, perhaps for months, should not get a fresh two-hour takeover link
+# printed into a terminal, or into whatever captured an unattended run's
+# output; that is what the throwaway password exists to avoid. But a first run
+# that died after creating the account (at the edge build, at Caddy) left it
+# with a random password nobody has seen, and the re-run that finished the job
+# used to print no link for it, because it had not created the account itself.
+#
+# This release's copy of the script, aimed at the panel, as with its settings:
+# an older panel's copy does not know --if-unclaimed, and would ignore it.
+#
+# Issued here, printed at the end. Here, because upgrade-edge.sh, below, puts
+# the edge source on the panel's own release — which on a re-run over an older
+# panel is older than this script, and has no --root. The first version asked
+# for the link after it, and got "not installed" from a copy that looked for
+# the panel in /opt/akconnect/src.
+SETUP_LINK=""
+SETUP_LINK_ARGS=(--root="$PANEL_DIR" --quiet --minutes=120)
+[ "$INSTALLED_NOW" -eq 1 ] || SETUP_LINK_ARGS+=(--if-unclaimed)
+SETUP_LINK="$(as_user "$WEB_USER" "$PHP_BIN" "$SRC_DIR/cli/setup-link.php" "${SETUP_LINK_ARGS[@]}" 2>/dev/null)"
+SETUP_LINK_CODE=$?
+
 # ---------------------------------------------------------- the upgrade timer
 
 step "the edge upgrade timer"
@@ -1042,20 +1392,24 @@ cat > "$STATE_FILE" <<STATE
 AKCONNECT_DOMAIN=$DOMAIN
 AKCONNECT_PANEL_DIR=$PANEL_DIR
 AKCONNECT_SRC_DIR=$SRC_DIR
-AKCONNECT_CHANNEL=$CHANNEL
+AKCONNECT_CHANNEL=${WRITE_CHANNEL:-$PREVIOUS_CHANNEL}
+AKCONNECT_SETTINGS_WRITTEN=1
 AKCONNECT_INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 STATE
 chmod 600 "$STATE_FILE"
 
 step "ready"
 
-SETUP_LINK="$(sudo -u "$WEB_USER" "$PHP_BIN" "$PANEL_DIR/cli/setup-link.php" --quiet --minutes=120 2>/dev/null)"
 
 printf '\n'
 printf '  %sAK Connect is installed.%s\n\n' "$GREEN$BOLD" "$RESET"
 printf '  Panel        %s\n' "$PANEL_URL"
 printf '  Installer    %s/download/setup.exe\n' "$PANEL_URL"
-printf '  Channel      %s\n' "$CHANNEL"
+if [ -n "$WRITE_CHANNEL" ]; then
+    printf '  Channel      %s\n' "$WRITE_CHANNEL"
+else
+    printf '  Channel      as the panel has it (Platform → Updates); --channel changes it\n'
+fi
 printf '  Version      %s\n' "${PANEL_VERSION:-unknown}"
 printf '\n'
 
@@ -1063,6 +1417,9 @@ if [ -n "$SETUP_LINK" ]; then
     printf '  %sSet the administrator password here — the link works once, and expires in two hours:%s\n\n' "$BOLD" "$RESET"
     printf '    %s\n\n' "$SETUP_LINK"
     printf '    account: %s\n' "$ADMIN_EMAIL"
+elif [ "$SETUP_LINK_CODE" -eq 3 ]; then
+    say "The administrator account is in use, so no new setup link was issued. If one is needed:"
+    say "    sudo -u $WEB_USER $PHP_BIN $PANEL_DIR/cli/setup-link.php"
 else
     warn "could not issue a setup link — run it yourself:"
     say "    sudo -u $WEB_USER $PHP_BIN $PANEL_DIR/cli/setup-link.php"

@@ -372,6 +372,9 @@ git -C "$WORK/seed" -c user.email=g@l -c user.name=gate commit --quiet -m old
 git -C "$WORK/seed" push --quiet origin HEAD:refs/heads/main 2>/dev/null
 
 cp "$SCRIPT" "$WORK/seed/deploy/upgrade-edge.sh"
+# The libraries it loads from the checkout, as a release carries them: the
+# HTTPS fallback step runs on an edge that is already current too.
+cp "$REPO"/deploy/lib-edge-*.sh "$WORK/seed/deploy/"
 printf '9.9.9-capture
 ' > "$WORK/seed/VERSION"
 git -C "$WORK/seed" add -A >/dev/null
@@ -420,6 +423,15 @@ if ! grep -q "I-AM-THE-OLD-SCRIPT" "$WORK/reexec.out"; then
     bad "the drill never started the old copy" "it is testing nothing; see $WORK/reexec.out"
 elif grep -q "handing over" "$WORK/reexec.out"; then
     ok "the old copy started and handed over to the release's own script"
+    # The copy handed to runs from a temporary path. Anything it loads from
+    # beside itself is loaded from there — and revision 2 put that path
+    # straight into /tmp.
+    if grep -q "lib-edge-args" "$WORK/reexec.out"; then
+        bad "the copy handed over looked for a file beside itself" \
+            "$(grep 'lib-edge-args' "$WORK/reexec.out" | head -2)"
+    else
+        ok "and the copy handed over loaded nothing from beside itself"
+    fi
 else
     bad "the previous release's script ran to the end" \
         "a fix to this file would not take effect until it had been run twice"
@@ -1546,6 +1558,569 @@ PARSED="$(. "$REPO/deploy/lib-edge-vhost.sh"; akconnect_vhost_blocks "$PARSEFIX"
 [ "$(cut -f6 <<<"$PARSED")" = "first.example.com,second.example.com" ] \
     && ok "and a directive continued with a backslash is one directive" \
     || bad "a continued ServerAlias loses every name after the first"
+
+# 11-14. The checkout, as git sees it — and the hour-by-hour cost of the timer.
+#
+# Every fixture above was created and run as root, so none of them could see
+# what the first field run of the one-command installer hit: git refusing a
+# repository that belongs to somebody else. On a checkout a login user cloned,
+# every git call here failed into /dev/null, and the preflight reported "no
+# git checkout" about a perfectly good one. And every fixture above cloned
+# every branch, so none could see a single-branch clone — which is how the
+# installer clones — fetch a branch it does not track, fail, and print
+# "source fetched" in green with an empty commit.
+#
+# The origin is served over git://, because git applies its ownership rule to
+# a local origin as well, and a server fetching from GitHub never meets that.
+chmod 755 "$WORK"
+git daemon --export-all --base-path="$WORK" --listen=127.0.0.1 --port=9419 \
+    --reuseaddr --detach --pid-file="$WORK/gitd.pid" 2>/dev/null
+for _ in $(seq 1 40); do
+    (exec 3<>"/dev/tcp/127.0.0.1/9419") 2>/dev/null && break
+    sleep 0.25
+done
+GIT_URL="git://127.0.0.1:9419/origin"
+
+# A release branch beside main, for the single-branch cases.
+git -C "$WORK/seed" push --quiet origin HEAD:refs/heads/release/9.9 2>/dev/null
+
+# run_edge <label> <checkout> <panel port> <panel args...> -- runs the
+# working tree's script against a checkout, as root with no SUDO_UID — the
+# timer's situation, and a root login's.
+run_edge() {
+    local label=$1 checkout=$2 port=$3
+    shift 3
+    python3 "$LAB/capture-panel.py" "$port" "$WORK/cap-$label.jsonl" --secret "$CAP_SECRET" "$@" \
+        >"$WORK/panel-$label.log" 2>&1 &
+    local panel=$!
+    for _ in $(seq 1 40); do
+        (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && break
+        sleep 0.25
+    done
+    mkdir -p "$WORK/etc-$label"
+    printf 'AKCONNECT_PANEL_URL=http://127.0.0.1:%s\nAKCONNECT_COORDINATOR_SECRET=%s\n' \
+        "$port" "$CAP_SECRET" > "$WORK/etc-$label/coordinator.env"
+
+    # EDGE_PREFIX: a command to run it under (a namespace), and EDGE_RUN: the
+    # script to run, when it is not the working tree's.
+    # shellcheck disable=SC2086
+    ${EDGE_PREFIX[@]+"${EDGE_PREFIX[@]}"} env -u SUDO_UID -u SUDO_USER PATH="$WORK/stub-bin:/usr/local/go/bin:$PATH" HOME="$WORK" \
+        AKCONNECT_ETC="$WORK/etc-$label" AKCONNECT_SRC="$checkout" \
+        AKCONNECT_BIN_DIR="${EDGE_BIN:-$WORK/no-bin}" AKCONNECT_SYSTEMD_DIR="$WORK/units-$label" \
+        bash "${EDGE_RUN:-$SCRIPT}" ${EDGE_ARGS:---skip-pack --no-timer} >"$WORK/edge-$label.out" 2>&1
+    EDGE_CODE=$?
+    kill "$panel" 2>/dev/null
+    wait "$panel" 2>/dev/null
+}
+
+# A systemctl that records and changes nothing, so no case here can restart
+# anything real — and so the "already current" case can prove nothing was.
+# A "service" is a process whose PID is in $HOME/pids/<unit>: active while it
+# lives, and that is its MainPID.
+mkdir -p "$WORK/stub-bin" "$WORK/pids"
+cat > "$WORK/stub-bin/systemctl" <<'STUB'
+#!/bin/sh
+echo "systemctl $*" >> "${HOME}/systemctl.log"
+verb=""; unit=""; quiet=0; skip=0
+for a in "$@"; do
+    # -p takes a value: `show -p MainPID --value <unit>`.
+    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
+    case "$a" in
+        -q|--quiet) quiet=1 ;;
+        -p|--property) skip=1 ;;
+        -*) ;;
+        *) if [ -z "$verb" ]; then verb="$a"; elif [ -z "$unit" ]; then unit="$a"; fi ;;
+    esac
+done
+pidfile="${HOME}/pids/$unit"
+case "$verb" in
+    is-active)
+        if [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+            [ "$quiet" -eq 1 ] || echo active; exit 0
+        fi
+        [ "$quiet" -eq 1 ] || echo inactive; exit 3 ;;
+    show)
+        case "$*" in
+            *MainPID*) cat "$pidfile" 2>/dev/null || echo 0 ;;
+            *) echo "Wed 2026-09-23 00:00:00 UTC" ;;
+        esac ;;
+esac
+exit 0
+STUB
+chmod 755 "$WORK/stub-bin/systemctl"
+
+# ss answers from $HOME/ss-lines: the ports a healthy edge has bound, for the
+# cases that model one; nothing for the rest.
+cat > "$WORK/stub-bin/ss" <<'STUB'
+#!/bin/sh
+cat "${HOME}/ss-lines" 2>/dev/null
+exit 0
+STUB
+chmod 755 "$WORK/stub-bin/ss"
+
+group "a checkout its runner does not own"
+
+FOREIGN="$WORK/foreign"
+git clone --quiet "$GIT_URL" "$FOREIGN" 2>/dev/null
+# A release behind, so that being at the panel's commit afterwards proves the
+# run moved it — a run that died at the preflight would otherwise leave it
+# exactly where these checks look for it.
+git -C "$FOREIGN" checkout --quiet -B main HEAD~1 2>/dev/null
+chown -R 65534:65534 "$FOREIGN"
+# And what every earlier root run left inside a checkout like this — a sudo
+# from its owner was let through by git, and wrote as root: FETCH_HEAD, the
+# index. A fix that ran git as the owner and stopped there died on the first
+# of these, on exactly the edges it was for.
+: > "$FOREIGN/.git/FETCH_HEAD"
+chown root:root "$FOREIGN/.git/FETCH_HEAD" "$FOREIGN/.git/index"
+
+run_edge foreign "$FOREIGN" 8797 --commit "$TARGET_SHA" --branch main
+
+if grep -qE "no git checkout|dubious ownership" "$WORK/edge-foreign.out"; then
+    bad "a checkout owned by another user is refused" \
+        "$(grep -E 'no git checkout|dubious ownership' "$WORK/edge-foreign.out" | head -2)"
+else
+    ok "a checkout owned by another user is used, as that user"
+fi
+
+if grep -E "source fetched" "$WORK/edge-foreign.out" | grep -qE "[0-9a-f]{7}"; then
+    ok "and the release is fetched into it"
+else
+    bad "the release was not fetched" "$(grep -E 'source fetched|could not' "$WORK/edge-foreign.out" | head -3)"
+fi
+
+FOREIGN_AT="$(setpriv --reuid=65534 --regid=65534 --clear-groups env HOME=/tmp git -C "$FOREIGN" rev-parse HEAD 2>/dev/null)"
+[ "$FOREIGN_AT" = "$TARGET_SHA" ] \
+    && ok "and checked out at the commit the panel named" \
+    || bad "the checkout is at '${FOREIGN_AT:-nothing}', not $TARGET_SHA"
+
+NOT_THEIRS="$(find "$FOREIGN" ! -user 65534 -printf '%u %p\n' 2>/dev/null | head -3)"
+if [ "$FOREIGN_AT" != "$TARGET_SHA" ]; then
+    bad "and every file in it is still its owner's" "not reached: the run never got as far as writing to it"
+elif [ -n "$NOT_THEIRS" ]; then
+    bad "root left files in someone else's checkout" "$NOT_THEIRS"
+else
+    ok "and every file in it is still its owner's, so their own git pull still works"
+fi
+
+group "a single-branch clone, and a panel on another branch"
+
+SINGLE="$WORK/single"
+git clone --quiet --depth 50 --branch main "$GIT_URL" "$SINGLE" 2>/dev/null
+
+run_edge single "$SINGLE" 8798 --branch release/9.9 --commit ""
+
+if grep -E "source fetched" "$WORK/edge-single.out" | grep -qE "[0-9a-f]{7}"; then
+    ok "a branch the clone does not track is fetched by name"
+else
+    bad "a single-branch clone could not fetch the panel's branch" \
+        "$(grep -E 'source fetched|could not|neither' "$WORK/edge-single.out" | head -3)"
+fi
+
+[ "$(git -C "$SINGLE" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "release/9.9" ] \
+    && ok "and the checkout is left on it" \
+    || bad "the checkout is on '$(git -C "$SINGLE" rev-parse --abbrev-ref HEAD 2>/dev/null)', not release/9.9"
+
+MISSING="$WORK/missing"
+git clone --quiet --depth 50 --branch main "$GIT_URL" "$MISSING" 2>/dev/null
+
+run_edge missing "$MISSING" 8799 --branch no-such-branch --commit ""
+
+if grep -E "✓.*source fetched|PASS.*source fetched" "$WORK/edge-missing.out" >/dev/null \
+        || grep -E "source fetched" "$WORK/edge-missing.out" | grep -vqE "[0-9a-f]{7}"; then
+    bad "a branch that does not exist is reported as fetched" \
+        "$(grep -E 'source fetched' "$WORK/edge-missing.out" | head -2)"
+else
+    ok "a branch that does not exist is never reported as fetched"
+fi
+
+[ "$EDGE_CODE" -ne 0 ] && grep -q "no-such-branch" "$WORK/edge-missing.out" \
+    && ok "and the run fails, naming the branch the panel asked for" \
+    || bad "the run did not fail naming the branch" "exit $EDGE_CODE"
+
+group "an edge already on the panel's release"
+
+# Binaries that answer with the panel's version and are running as the two
+# services, a timer already in place, the ports bound, and a panel that says
+# both installers are published for that version.
+#
+# Real executables, running: "current" now means the process is running the
+# file on disk, read from /proc/<pid>/exe, and a shell script's process is the
+# shell.
+mkdir -p "$WORK/current-bin" "$WORK/units-current" "$WORK/fake-svc"
+cat > "$WORK/fake-svc/main.go" <<'GO'
+package main
+
+import (
+	"fmt"
+	"os"
+	"time"
+)
+
+var name, version string
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println(name, version)
+		return
+	}
+	for {
+		time.Sleep(time.Hour)
+	}
+}
+GO
+printf 'module fakesvc\n\ngo 1.21\n' > "$WORK/fake-svc/go.mod"
+for svc in coordinator relay; do
+    (cd "$WORK/fake-svc" && env GOFLAGS= GOTOOLCHAIN=local GOPROXY=off CGO_ENABLED=0 \
+        /usr/local/go/bin/go build -o "$WORK/current-bin/akconnect-$svc" \
+        -ldflags "-X main.name=akconnect-$svc -X main.version=9.9.9-capture" . ) \
+        || bad "could not build the stand-in akconnect-$svc" "the already-current cases below prove nothing"
+    "$WORK/current-bin/akconnect-$svc" serve >/dev/null 2>&1 &
+    echo $! > "$WORK/pids/akconnect-$svc"
+done
+printf 'UNCONN 0 0 0.0.0.0:8443 0.0.0.0:*\nUNCONN 0 0 0.0.0.0:9000 0.0.0.0:*\nLISTEN 0 4096 127.0.0.1:9443 0.0.0.0:*\n' \
+    > "$WORK/ss-lines"
+: > "$WORK/units-current/akconnect-upgrade.timer"
+: > "$WORK/systemctl.log"
+
+CURRENT="$WORK/current"
+git clone --quiet "$GIT_URL" "$CURRENT" 2>/dev/null
+
+
+EDGE_BIN="$WORK/current-bin" EDGE_ARGS=" " \
+    run_edge current "$CURRENT" 8800 --commit "$TARGET_SHA" --branch main --published 9.9.9-capture
+
+if [ "$EDGE_CODE" -eq 0 ] && grep -q "already current" "$WORK/edge-current.out"; then
+    ok "it says it is already current, and exits cleanly"
+else
+    bad "an edge on the right release did not recognise it" "exit $EDGE_CODE; $(tail -3 "$WORK/edge-current.out" | tr '\n' ' ')"
+fi
+
+if grep -q "restart" "$WORK/systemctl.log" || grep -q "building the coordinator" "$WORK/edge-current.out"; then
+    bad "and it rebuilt or restarted anyway" "$(grep restart "$WORK/systemctl.log" | head -2)"
+else
+    ok "and nothing was rebuilt or restarted — no hourly outage for every relayed pair"
+fi
+
+# Nothing to rebuild is not nothing to do. The relay's version reaches the
+# panel only in this report, and "Last heard" is its time; the fallback can
+# break under an edge that has not moved.
+if grep -q '"path": "/api/v1/edge/report"' "$WORK/cap-current.jsonl"; then
+    ok "and it still tells the panel what is running here"
+else
+    bad "an edge that is already current never reports to the panel" \
+        "the relay's version and 'Last heard' go stale until the next release"
+fi
+
+if sed 's/\x1b\[[0-9;]*m//g' "$WORK/edge-current.out" \
+        | grep -qE "^\s+(HTTPS fallback|Apache proxy|relay fallback listener)\s"; then
+    ok "and it still checks the HTTPS fallback"
+else
+    bad "an edge that is already current never checks its HTTPS fallback"
+fi
+
+# --configure-apache is the documented way to set the fallback up, and the
+# script's own hold message says to run it. On a current edge it said
+# "Nothing to do" and configured nothing.
+: > "$WORK/systemctl.log"
+mkdir -p "$WORK/units-apache"
+: > "$WORK/units-apache/akconnect-upgrade.timer"
+EDGE_BIN="$WORK/current-bin" EDGE_ARGS="--configure-apache" \
+    run_edge apache "$CURRENT" 8802 --commit "$TARGET_SHA" --branch main --published 9.9.9-capture
+
+if grep -q "already current" "$WORK/edge-apache.out" \
+        && sed 's/\x1b\[[0-9;]*m//g' "$WORK/edge-apache.out" | grep -qE "^\s+Apache proxy\s"; then
+    ok "--configure-apache on a current edge reaches the Apache step"
+else
+    bad "--configure-apache on a current edge never reaches the Apache step" \
+        "$(grep -E 'already current|Apache|fallback' "$WORK/edge-apache.out" | head -4)"
+fi
+grep -q "restart" "$WORK/systemctl.log" \
+    && bad "and it restarted the services to get there" \
+    || ok "without rebuilding or restarting anything"
+
+# --skip-pack: the installers were not looked at, so they are not reported on.
+mkdir -p "$WORK/units-skippack"
+: > "$WORK/units-skippack/akconnect-upgrade.timer"
+EDGE_BIN="$WORK/current-bin" EDGE_ARGS="--skip-pack" \
+    run_edge skippack "$CURRENT" 8803 --commit "$TARGET_SHA" --branch main
+if grep -q "already current" "$WORK/edge-skippack.out" \
+        && ! grep -q "installers are all" "$WORK/edge-skippack.out"; then
+    ok "with --skip-pack it does not claim the installers are current"
+else
+    bad "with --skip-pack it reports installers it never compared" \
+        "$(grep 'already current' "$WORK/edge-skippack.out" | head -1)"
+fi
+
+# The same in every respect but one — the published installer is a release
+# behind — so that "not current" is decided by that and nothing else.
+: > "$WORK/systemctl.log"
+mkdir -p "$WORK/units-stale"
+: > "$WORK/units-stale/akconnect-upgrade.timer"
+CURRENT2="$WORK/current2"
+git clone --quiet "$GIT_URL" "$CURRENT2" 2>/dev/null
+
+EDGE_BIN="$WORK/current-bin" EDGE_ARGS=" " \
+    run_edge stale "$CURRENT2" 8801 --commit "$TARGET_SHA" --branch main --published 9.9.8
+
+if grep -q "already current" "$WORK/edge-stale.out"; then
+    bad "an installer published for an older release was taken as current"
+else
+    ok "an installer published for an older release is not taken as current"
+fi
+
+# A check that fails on an edge that IS on the release — here the relay's
+# fallback listener is not bound — is a failed check, not "the edge is NOT
+# upgraded", which sends an operator to undo work that was fine.
+cp "$WORK/ss-lines" "$WORK/ss-lines.healthy"
+grep -v ':9443 ' "$WORK/ss-lines.healthy" > "$WORK/ss-lines"
+mkdir -p "$WORK/units-nolistener"
+: > "$WORK/units-nolistener/akconnect-upgrade.timer"
+EDGE_BIN="$WORK/current-bin" EDGE_ARGS=" " \
+    run_edge nolistener "$CURRENT" 8810 --commit "$TARGET_SHA" --branch main --published 9.9.9-capture
+cp "$WORK/ss-lines.healthy" "$WORK/ss-lines"
+if [ "$EDGE_CODE" -ne 0 ] && grep -q "ARE upgraded" "$WORK/edge-nolistener.out" \
+        && ! grep -q "NOT upgraded" "$WORK/edge-nolistener.out"; then
+    ok "a check failing on a current edge fails the run without calling it not upgraded"
+else
+    bad "a current edge with a failed check is reported as not upgraded" \
+        "exit $EDGE_CODE; $(grep -E 'upgraded|PARTIAL|FAIL' "$WORK/edge-nolistener.out" | tail -3 | tr '\n' ' ')"
+fi
+
+# Replaced under a running service: the file says the release, the process is
+# the build before it. A run stopped between installing the new binaries and
+# restarting left exactly this, and every hour after it looked current.
+: > "$WORK/systemctl.log"
+mkdir -p "$WORK/units-replaced"
+: > "$WORK/units-replaced/akconnect-upgrade.timer"
+cp "$WORK/current-bin/akconnect-relay" "$WORK/current-bin/akconnect-relay.new"
+mv -f "$WORK/current-bin/akconnect-relay.new" "$WORK/current-bin/akconnect-relay"
+EDGE_BIN="$WORK/current-bin" EDGE_ARGS=" " \
+    run_edge replaced "$CURRENT" 8809 --commit "$TARGET_SHA" --branch main --published 9.9.9-capture
+if grep -q "already current" "$WORK/edge-replaced.out"; then
+    bad "a relay still running the build its file replaced was taken as current" \
+        "the panel would be told the new version while the old one serves"
+else
+    ok "a service still running a replaced binary is not taken as current"
+fi
+
+for svc in coordinator relay; do
+    kill "$(cat "$WORK/pids/akconnect-$svc" 2>/dev/null)" 2>/dev/null
+done
+rm -f "$WORK/ss-lines"
+
+# 15-20. What the review of 1.9.7-dev.21 found, each as it would happen.
+
+group "a copy of this script run from a directory it does not control"
+
+# A copy up to revision 2 hands over by writing the release's copy straight
+# into /tmp and running it. The copy sourced lib-edge-args.sh from beside
+# itself: /tmp/lib-edge-args.sh, which any local user can create, and root ran
+# it. Modelled directly — the working tree's script, beside a planted file.
+PLANT="$WORK/planted"
+mkdir -p "$PLANT"
+cp "$SCRIPT" "$PLANT/upgrade-edge.sh"
+printf 'touch "%s/SOURCED"\n' "$PLANT" > "$PLANT/lib-edge-args.sh"
+env PATH="/usr/local/go/bin:$PATH" HOME="$WORK" bash "$PLANT/upgrade-edge.sh" --src \
+    >"$WORK/planted.out" 2>&1
+
+if [ -e "$PLANT/SOURCED" ]; then
+    bad "it ran a file planted beside it, as root" "a local user writing /tmp/lib-edge-args.sh owns the machine"
+else
+    ok "it runs nothing that happens to be beside it"
+fi
+grep -q -- "--src needs a value" "$WORK/planted.out" \
+    && ok "and still has its own argument checks" \
+    || bad "its argument checks went missing with the file" "$(head -3 "$WORK/planted.out")"
+
+group "handing over: an option only the new copy knows, a relative --src, an early stop"
+
+# An origin whose release carries this script, and a checkout one commit
+# behind whose copy is older (revision 1) and does not know --force — which
+# is what an edge carrying the previous release looks like to an operator
+# following this release's instructions.
+HO_SEED="$WORK/ho-seed"
+git init --quiet -b main "$HO_SEED"
+mkdir -p "$HO_SEED/deploy"
+cp "$REPO"/deploy/lib-edge-*.sh "$HO_SEED/deploy/"
+printf '9.9.9-capture\n' > "$HO_SEED/VERSION"
+sed -e 's/^SCRIPT_REVISION=.*/SCRIPT_REVISION=1/' -e '/^        --force) *FORCE=1; shift ;;$/d' \
+    "$SCRIPT" > "$HO_SEED/deploy/upgrade-edge.sh"
+chmod 755 "$HO_SEED/deploy/upgrade-edge.sh"
+if grep -q -- '--force)' "$HO_SEED/deploy/upgrade-edge.sh"; then
+    bad "the old copy still knows --force" "the fixture tests nothing; the sed no longer matches the option loop"
+fi
+git -C "$HO_SEED" add -A >/dev/null
+git -C "$HO_SEED" -c user.email=g@l -c user.name=gate commit --quiet -m old
+cp "$SCRIPT" "$HO_SEED/deploy/upgrade-edge.sh"
+git -C "$HO_SEED" -c user.email=g@l -c user.name=gate commit --quiet -am new
+HO_SHA="$(git -C "$HO_SEED" rev-parse HEAD)"
+git clone --quiet --bare "$HO_SEED" "$WORK/ho-origin.git"
+git clone --quiet "$WORK/ho-origin.git" "$WORK/ho-clone" 2>/dev/null
+git -C "$WORK/ho-clone" checkout --quiet -B main HEAD~1 2>/dev/null
+
+ls -d /tmp/akconnect-upgrade-edge.* 2>/dev/null | sort > "$WORK/ho-tmp-before"
+
+# From $WORK, with --src relative to it, running the checkout's old copy.
+( cd "$WORK" && EDGE_RUN="$WORK/ho-clone/deploy/upgrade-edge.sh" EDGE_ARGS="--force --skip-pack --no-timer --src ho-clone" \
+    run_edge handover ho-clone 8811 --commit "$HO_SHA" --branch main )
+
+if grep -q "unknown option" "$WORK/edge-handover.out"; then
+    bad "an option only the release's copy knows was refused before the hand-over" \
+        "$(grep -m1 'unknown option' "$WORK/edge-handover.out")"
+elif grep -q "handing over" "$WORK/edge-handover.out" \
+        && grep -q "running the release's own copy" "$WORK/edge-handover.out"; then
+    ok "an option only the release's copy knows is handed to it, not refused"
+else
+    bad "the old copy did not hand over" "$(grep -E '✗|handing|running the release' "$WORK/edge-handover.out" | head -3)"
+fi
+if grep -qE "no git checkout at ho-clone|cannot change to 'ho-clone'" "$WORK/edge-handover.out"; then
+    bad "a relative --src was looked for inside the checkout after the hand-over" \
+        "$(grep -E 'no git checkout|cannot change' "$WORK/edge-handover.out" | head -1)"
+else
+    ok "and a relative --src means the same thing to the copy handed to"
+fi
+
+# The copy handed to stops early: an option neither copy knows. The directory
+# it ran from is its to remove, whatever point it stops at.
+( cd "$WORK" && EDGE_RUN="$WORK/ho-clone/deploy/upgrade-edge.sh" EDGE_ARGS="--no-such-option --skip-pack --no-timer --src ho-clone" \
+    run_edge handover2 ho-clone 8812 --commit "$HO_SHA" --branch main )
+git -C "$WORK/ho-clone" checkout --quiet -B main HEAD~1 2>/dev/null
+ls -d /tmp/akconnect-upgrade-edge.* 2>/dev/null | sort > "$WORK/ho-tmp-after"
+LEAKED="$(comm -13 "$WORK/ho-tmp-before" "$WORK/ho-tmp-after")"
+if ! grep -q "unknown option: --no-such-option" "$WORK/edge-handover2.out"; then
+    bad "an option nobody knows was not refused" "$(tail -3 "$WORK/edge-handover2.out" | tr '\n' ' ')"
+elif [ -n "$LEAKED" ]; then
+    bad "a copy handed to that stopped early left itself in /tmp" "$LEAKED"
+else
+    ok "an option nobody knows is refused, and the copy handed to leaves nothing in /tmp"
+fi
+
+group "a machine whose own name does not resolve"
+
+# sudo says "unable to resolve host" on standard error and carries on. Read as
+# part of git's answer, it made a clean checkout "have local changes".
+UNRESOLVED="$WORK/unresolved"
+git clone --quiet "$GIT_URL" "$UNRESOLVED" 2>/dev/null
+chown -R 65534:65534 "$UNRESOLVED"
+EDGE_PREFIX=(unshare -u sh -c 'hostname akc-gate-no-such-host && exec "$@"' sh)
+run_edge unresolved "$UNRESOLVED" 8813 --commit "$TARGET_SHA" --branch main
+unset EDGE_PREFIX
+if ! grep -q "unable to resolve host" "$WORK/edge-unresolved.out"; then
+    ok "(sudo here does not warn about an unresolvable name, so this case holds trivially)"
+fi
+if grep -q "has local changes" "$WORK/edge-unresolved.out"; then
+    bad "sudo's warning about the host name was read as local changes"
+else
+    ok "a warning from sudo is not mistaken for git's answer"
+fi
+
+group "a release branch deleted after it was merged"
+
+# The panel names a branch origin no longer has, and a commit that is on main.
+GONE="$WORK/gone"
+git clone --quiet --branch main --single-branch "$GIT_URL" "$GONE" 2>/dev/null
+git -C "$GONE" checkout --quiet -B main HEAD~1 2>/dev/null
+
+run_edge gone "$GONE" 8804 --branch release/gone --commit "$TARGET_SHA"
+
+if grep -E "source fetched" "$WORK/edge-gone.out" | grep -qE "PASS.*[0-9a-f]{7}"; then
+    ok "the panel's commit is fetched by name when its branch is gone"
+else
+    bad "a deleted branch stopped an edge whose release is still in the repository" \
+        "$(grep -E 'source fetched|could not|no longer' "$WORK/edge-gone.out" | head -3)"
+fi
+[ "$(git -C "$GONE" rev-parse HEAD 2>/dev/null)" = "$TARGET_SHA" ] \
+    && ok "and the checkout is at that commit" \
+    || bad "the checkout is at $(git -C "$GONE" rev-parse --short HEAD 2>/dev/null), not the panel's commit"
+
+group "a tag that moved on origin"
+
+# git fetch --tags refuses a tag that moved ("would clobber existing tag"),
+# and one re-pointed release tag failed every edge's fetch, every hour.
+git -C "$WORK/seed" tag -f moved-tag HEAD~1 >/dev/null 2>&1
+git -C "$WORK/seed" push --quiet --force origin refs/tags/moved-tag 2>/dev/null
+MOVED="$WORK/moved"
+git clone --quiet "$GIT_URL" "$MOVED" 2>/dev/null
+git -C "$WORK/seed" tag -f moved-tag HEAD >/dev/null 2>&1
+git -C "$WORK/seed" push --quiet --force origin refs/tags/moved-tag 2>/dev/null
+
+run_edge moved "$MOVED" 8805 --branch main --commit "$TARGET_SHA"
+
+if grep -E "source fetched" "$WORK/edge-moved.out" | grep -qE "PASS.*[0-9a-f]{7}"; then
+    ok "a tag that moved on origin does not stop the fetch"
+else
+    bad "a moved tag stops the fetch" "$(grep -E 'clobber|could not|source fetched' "$WORK/edge-moved.out" | head -3)"
+fi
+[ "$(git -C "$MOVED" rev-parse moved-tag 2>/dev/null)" = "$(git -C "$WORK/seed" rev-parse moved-tag)" ] \
+    && ok "and the tag now says what origin says" \
+    || bad "the local tag still points where it used to"
+
+group "a checkout reached through a symlink, or owned by nobody"
+
+LINKED="$WORK/linked-clone"
+git clone --quiet "$GIT_URL" "$LINKED" 2>/dev/null
+git -C "$LINKED" checkout --quiet -B main HEAD~1 2>/dev/null
+chown -R 65534:65534 "$LINKED"
+ln -s "$LINKED" "$WORK/srclink"
+
+run_edge linked "$WORK/srclink" 8806 --commit "$TARGET_SHA" --branch main
+
+if grep -qE "dubious ownership|not usable as a git checkout" "$WORK/edge-linked.out"; then
+    bad "a symlink to a login user's clone is run as the link's owner, root" \
+        "$(grep -E 'dubious|not usable' "$WORK/edge-linked.out" | head -2)"
+elif grep -E "source fetched" "$WORK/edge-linked.out" | grep -qE "PASS.*[0-9a-f]{7}"; then
+    ok "a symlinked checkout is used as the owner of the clone it names"
+else
+    bad "a symlinked checkout was not fetched" "$(grep -E 'source fetched|could not|✗' "$WORK/edge-linked.out" | head -3)"
+fi
+NOT_THEIRS="$(find "$LINKED" ! -user 65534 -printf '%u %p\n' 2>/dev/null | head -3)"
+[ -z "$NOT_THEIRS" ] \
+    && ok "and every file in the clone is still its owner's" \
+    || bad "root left files in the clone behind the symlink" "$NOT_THEIRS"
+
+if getent passwd 4242 >/dev/null 2>&1; then
+    bad "uid 4242 has an account here, so the no-owner case cannot be built" "pick another uid"
+else
+    ORPHAN="$WORK/orphan"
+    git clone --quiet "$GIT_URL" "$ORPHAN" 2>/dev/null
+    chown -R 4242:4242 "$ORPHAN"
+    run_edge orphan "$ORPHAN" 8807 --commit "$TARGET_SHA" --branch main
+    if grep -q "belongs to uid 4242, which has no account" "$WORK/edge-orphan.out" \
+            && ! grep -q "unknown user" "$WORK/edge-orphan.out"; then
+        ok "a checkout whose owner has no account is refused, saying so and what to run"
+    else
+        bad "a checkout whose owner has no account fails with sudo's words" \
+            "$(grep -E 'unknown user|✗' "$WORK/edge-orphan.out" | head -2)"
+    fi
+fi
+
+group "a worktree checkout that earlier root runs touched"
+
+WT_MAIN="$WORK/wt-main"
+WT="$WORK/wt"
+git clone --quiet "$GIT_URL" "$WT_MAIN" 2>/dev/null
+git -C "$WT_MAIN" checkout --quiet --detach HEAD~1 2>/dev/null
+git -C "$WT_MAIN" worktree add --quiet "$WT" main >/dev/null 2>&1
+git -C "$WT" reset --quiet --hard HEAD~1 >/dev/null 2>&1
+chown -R 65534:65534 "$WT_MAIN" "$WT"
+WT_GITDIR="$(sed -n 's/^gitdir: //p' "$WT/.git")"
+: > "$WT_GITDIR/FETCH_HEAD"
+chown root:root "$WT_GITDIR/FETCH_HEAD"
+
+run_edge worktree "$WT" 8808 --commit "$TARGET_SHA" --branch main
+
+if grep -E "source fetched" "$WORK/edge-worktree.out" | grep -qE "PASS.*[0-9a-f]{7}"; then
+    ok "a worktree with root's FETCH_HEAD in its git directory is fetched into"
+else
+    bad "a worktree's root-owned FETCH_HEAD stops every fetch" \
+        "$(grep -E 'FETCH_HEAD|could not|✗' "$WORK/edge-worktree.out" | head -3)"
+fi
+[ "$(stat -c %u "$WT_GITDIR/FETCH_HEAD" 2>/dev/null)" = "65534" ] \
+    && ok "and it was given back to the worktree's owner" \
+    || bad "FETCH_HEAD in the worktree's git directory is still root's"
+
+kill "$(cat "$WORK/gitd.pid" 2>/dev/null)" 2>/dev/null
 
 # ---------------------------------------------------------------- the report
 
