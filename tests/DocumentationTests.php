@@ -18,6 +18,7 @@ final class DocumentationTests
         self::securityCitations();
         self::requiredDocuments();
         self::nothingStopsTheWebServer();
+        self::gettingStartedMatchesTheServices();
     }
 
     private static function securityCitations(): void
@@ -297,5 +298,97 @@ final class DocumentationTests
             str_contains((string) @file_get_contents(APP_ROOT . '/DEPLOY.md'), 'cli/maintenance.php'),
             'DEPLOY.md documents it'
         );
+    }
+
+    /**
+     * The one-command installer must open exactly the ports the services bind.
+     *
+     * getting-started.sh writes firewall rules from numbers typed into it, and
+     * the services take theirs from their systemd units and their own
+     * defaults. Nothing connects the two, so moving the relay's data-port
+     * range leaves a firewall that blocks it — and the symptom is a relay that
+     * accepts a binding and then carries nothing, which reads as a network
+     * fault at the customer's end rather than a rule on ours.
+     */
+    private static function gettingStartedMatchesTheServices(): void
+    {
+        TestCase::group('Documentation — the installer opens the ports the services use');
+
+        $script = (string) @file_get_contents(APP_ROOT . '/deploy/getting-started.sh');
+        $relayUnit = (string) @file_get_contents(APP_ROOT . '/deploy/systemd/akconnect-relay.service');
+        $coordUnit = (string) @file_get_contents(APP_ROOT . '/deploy/systemd/akconnect-coordinator.service');
+
+        TestCase::assert($script !== '', 'deploy/getting-started.sh ships with the release');
+
+        // The relay's data ports, as its unit really pins them.
+        $ports = [];
+        preg_match('/--data-ports\s+(\d+)-(\d+)/', $relayUnit, $ports);
+        TestCase::assert($ports !== [], 'the relay unit pins a data-port range');
+
+        if ($ports !== []) {
+            TestCase::assert(
+                str_contains($script, $ports[1] . ':' . $ports[2] . '/udp'),
+                'the installer opens the relay data ports the unit pins (' . $ports[1] . '-' . $ports[2] . ')',
+                str_contains($script, $ports[1] . ':' . $ports[2] . '/udp') ? '' :
+                    'the unit says --data-ports ' . $ports[1] . '-' . $ports[2]
+                    . ' and getting-started.sh does not open that range'
+            );
+        }
+
+        // The relay's control port, and the coordinator's.
+        preg_match('/--control\s+:(\d+)/', $relayUnit, $control);
+        if ($control !== []) {
+            TestCase::assert(
+                str_contains($script, $control[1] . '/udp'),
+                'the installer opens the relay control port (' . $control[1] . ')'
+            );
+        }
+
+        preg_match('/--listen\s+:(\d+)/', $coordUnit, $listen);
+        if ($listen !== []) {
+            TestCase::assert(
+                str_contains($script, $listen[1] . '/udp'),
+                'the installer opens the coordinator port (' . $listen[1] . ')'
+            );
+        }
+
+        // The fallback. The relay listens on one address and the panel derives
+        // one path; the installer's web-server configuration has to join them.
+        preg_match('/--ws-listen\s+([0-9.]+:\d+)/', $relayUnit, $wsListen);
+        if ($wsListen !== []) {
+            TestCase::assert(
+                str_contains($script, 'reverse_proxy ' . $wsListen[1]),
+                'the installer proxies the fallback to where the relay listens (' . $wsListen[1] . ')'
+            );
+        }
+
+        TestCase::assert(
+            str_contains($script, 'handle ' . \App\Services\CoordinatorSettings::FALLBACK_PATH),
+            'the installer serves the fallback on the path the panel hands to agents ('
+            . \App\Services\CoordinatorSettings::FALLBACK_PATH . ')'
+        );
+
+        // And the thing that makes a web server other than Apache safe here:
+        // Caddy does not read .htaccess, so every directory .htaccess denies
+        // has to be denied again in the site file this script writes.
+        $htaccess = (string) @file_get_contents(APP_ROOT . '/.htaccess');
+        preg_match('/RewriteRule \^\(([a-z|]+)\)\(\/\|\$\)/', $htaccess, $denied);
+        TestCase::assert($denied !== [], '.htaccess names the directories it denies');
+
+        if ($denied !== []) {
+            $missing = [];
+            foreach (explode('|', $denied[1]) as $directory) {
+                if (!str_contains($script, '/' . $directory . '/*')) {
+                    $missing[] = $directory;
+                }
+            }
+
+            TestCase::assert(
+                $missing === [],
+                'the installer denies every directory .htaccess denies',
+                $missing === [] ? '' : 'not denied in the Caddy site file: ' . implode(', ', $missing)
+                . '. Caddy does not read .htaccess, so these would be served as plain files.'
+            );
+        }
     }
 }

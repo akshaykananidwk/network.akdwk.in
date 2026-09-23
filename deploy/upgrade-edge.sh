@@ -878,7 +878,21 @@ fi
 # Whether this run may edit Apache. See akconnect_may_configure_apache.
 CONFIGURE_APACHE="$(akconnect_may_configure_apache "$CONFIGURE_APACHE" "$UNATTENDED")"
 
-if akconnect_apache_configured "$PANEL"; then
+# Whether the fallback answers, asked once and used twice.
+#
+# It is the question that matters — a device on a UDP-blocked network needs
+# $PANEL/fallback to reach the relay, and nothing below cares which web server
+# carries it there. Asked before the Apache branch rather than after, because
+# a server running Caddy or nginx has a perfectly good fallback and used to be
+# told, once an hour, to go and configure Apache.
+FALLBACK_ANSWERS=0
+akconnect_fallback_reachable "$PANEL" && FALLBACK_ANSWERS=1
+
+if [ "$FALLBACK_ANSWERS" -eq 1 ] && ! akconnect_apache_configured "$PANEL"; then
+    # Something is already proxying it, and it is not this script's Apache
+    # stanza. Nothing to do, and nothing to say beyond what is true.
+    pass "HTTPS fallback" "$PANEL/fallback answers; this server is not Apache, so nothing here to configure"
+elif akconnect_apache_configured "$PANEL"; then
     # Already in place. Verified, never re-applied: re-asserting a
     # configuration is still editing it, and there is nothing to repair.
     pass "Apache proxy" "already configured for $(akconnect_panel_host "$PANEL")"
@@ -907,7 +921,7 @@ fi
 # that deliberately did not configure it has already said so once, and saying
 # it again in red would make an hourly timer report a failure for something
 # nobody asked it to do.
-if akconnect_fallback_reachable "$PANEL"; then
+if [ "$FALLBACK_ANSWERS" -eq 1 ]; then
     pass "fallback reachable" "$PANEL/fallback/health"
 elif akconnect_apache_configured "$PANEL"; then
     fail "fallback reachable" "$PANEL/fallback/health did not answer"

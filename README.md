@@ -48,6 +48,21 @@ installer.
 
 ## Installing
 
+### On a server of its own
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/akshaykananidwk/network.akdwk.in/release/1.9.7/deploy/getting-started.sh | sudo bash
+```
+
+Three questions — domain, administrator email, release channel — and it
+installs Caddy with automatic certificates, PHP-FPM, MariaDB, the panel, the
+coordinator, a relay, the HTTPS fallback, the firewall and the timers, then
+prints a one-time link for setting the administrator password. `--uninstall`
+removes it all. It refuses to run on a machine that is already serving
+something; see DEPLOY.md for that case, and for what each step does.
+
+### By hand, or onto an existing web server
+
 1. Copy the repository to your web root.
 2. Make these writable by the web server user:
 

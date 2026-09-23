@@ -6,6 +6,52 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.17] — development
+
+**One command on a fresh server.**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/akshaykananidwk/network.akdwk.in/release/1.9.7/deploy/getting-started.sh | sudo bash
+```
+
+Three questions — domain, administrator email, release channel — and
+`deploy/getting-started.sh` installs and configures Caddy with automatic Let's
+Encrypt certificates, PHP-FPM, MariaDB, the panel, the coordinator, a relay,
+the `/fallback` route to the relay's websocket listener, the firewall
+(80 and 443 tcp; 8443, 9000 and 51900-52400 udp), the systemd units, a
+five-minute worker timer and the edge upgrade timer. It finishes with the
+panel's address and a one-time link for setting the administrator password.
+`--uninstall` removes everything it installed, and running it again changes
+nothing it already made — in particular it never regenerates the coordinator's
+keypair, which would orphan every enrolled device.
+
+It refuses to run on a machine that is already serving something. It installs
+a web server, claims 80 and 443 and opens firewall rules, and on a box with
+aaPanel, cPanel, Plesk or a running Apache or nginx on it, each of those is
+somebody else's outage.
+
+**Caddy does not read `.htaccess`,** and the repository root is the webroot —
+so `config/config.php`, with the database credentials and the app key in it,
+is a plain file under the document root. The site file the installer writes
+denies every directory `.htaccess` denies; this was checked by serving the
+tree and asking for each path, and a test now fails if the two lists drift
+apart, along with the ports: the firewall rules are checked against the
+`--data-ports`, `--control`, `--listen` and `--ws-listen` the units really
+pin.
+
+**`cli/setup-link.php`** issues that one-time link — a single-use token over
+the panel's existing `/reset-password` route. The installer sets a long random
+password nobody ever learns, because a password it printed would live in
+scrollback and in whatever captured the installer's output.
+
+**`upgrade-edge.sh` no longer tells a Caddy server to configure Apache.** It
+asks whether `/fallback` answers before it asks whether Apache is configured;
+when something is already carrying it, there is nothing to do and it says so.
+An hourly timer on a server that has no Apache was reporting a step nobody
+could take.
+
+---
+
 ## [1.9.7-dev.16] — development
 
 **Three drills were passing without testing the thing they were written for.**

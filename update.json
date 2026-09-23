@@ -1,10 +1,10 @@
 {
-  "version": "1.9.7-dev.16",
-  "released_at": "2026-09-23T13:30:00Z",
+  "version": "1.9.7-dev.17",
+  "released_at": "2026-09-23T15:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Three networking drills had been running against ten-minute relay tickets when they were written for sixty-second ones, so none of them ever reached the renewal they existed to test. The setting now takes effect, each drill proves it arrived, and the panel-maintenance drill reproduces what Update Now really does.",
+  "notes": "One command installs AK Connect on a fresh server: deploy/getting-started.sh asks for a domain, an email and a channel, and configures Caddy with automatic certificates, PHP-FPM, MariaDB, the panel, the coordinator, a relay, the HTTPS fallback, the firewall and the timers.",
   "migrations": [],
   "protected": [
     ".env",

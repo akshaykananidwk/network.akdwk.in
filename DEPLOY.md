@@ -22,6 +22,58 @@ those steps say so.
 
 ---
 
+## The short way: one command on a server of its own
+
+Everything below this section is the staged deployment, for a machine that is
+already serving something — a control panel, other people's websites, their
+mail. That is the production shape at `network.akdwk.in`, and it is why the
+steps are careful.
+
+On a **server of its own**, with nothing else on it, there is a single command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/akshaykananidwk/network.akdwk.in/release/1.9.7/deploy/getting-started.sh | sudo bash
+```
+
+It asks three questions — domain, administrator email, release channel — and
+then installs and configures Caddy with automatic Let's Encrypt certificates,
+PHP-FPM, MariaDB, the panel, the coordinator, a relay, the `/fallback` route to
+the relay's websocket listener, the firewall, the systemd units, the
+five-minute worker and the edge upgrade timer. It finishes with the panel's
+address and a one-time link for setting the administrator password.
+
+```
+  --domain nb.akdwk.in --email you@example.com --channel edge
+  --unattended        ask nothing (needs the three above)
+  --branch <ref>      install a ref other than release/1.9.7
+  --uninstall         remove everything it installed
+```
+
+It is safe to run again: nothing it creates is recreated, the database is not
+touched, and the coordinator's keypair is never regenerated — doing that would
+orphan every device already enrolled.
+
+**It refuses to run on a shared machine.** It installs a web server, claims 80
+and 443 and opens firewall rules; on a box already serving somebody, each of
+those is their outage. It looks for aaPanel, cPanel, Plesk and a running
+Apache or nginx, and stops if it finds any of them. Use the staged
+instructions below there.
+
+**Caddy does not read `.htaccess`.** The repository root is the webroot, so
+`config/config.php` — database credentials and the app key — is a plain file
+underneath it. The site file the script writes denies every directory
+`.htaccess` denies, and a test in the verification suite fails if the two ever
+drift apart.
+
+### Taking that panel down for a test
+
+`akconnect-maintenance on|off|status`, installed by the same script. It is
+`cli/maintenance.php` with the paths filled in — this site answers 503, and
+nothing else on the machine is touched. The rule in the next section applies
+there too: never stop the web server to take a panel down.
+
+---
+
 ## What to buy
 
 ### The panel
