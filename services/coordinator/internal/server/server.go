@@ -15,11 +15,13 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/coordinator/internal/panelapi"
 	"github.com/akshaykananidwk/network.akdwk.in/services/coordinator/internal/registry"
 	"github.com/akshaykananidwk/network.akdwk.in/services/shared/disco"
+	"github.com/akshaykananidwk/network.akdwk.in/services/shared/hub"
 )
 
 // Options configures a Server.
@@ -64,7 +66,21 @@ type Server struct {
 
 	mu      sync.Mutex
 	pending map[string]panelapi.EndpointReport
+
+	// control bounds the goroutines handling control datagrams. It used to
+	// be one goroutine per datagram with no limit, so a flood of junk grew
+	// memory without bound; now a datagram that finds no free slot is
+	// dropped and counted, as a full socket buffer would drop it.
+	control        chan struct{}
+	controlDropped atomic.Uint64
+	// hubDropped counts hub frames this coordinator does not forward yet.
+	hubDropped atomic.Uint64
 }
+
+// maxControlInFlight is how many control datagrams may be handled at once.
+// A Hello waits on the panel, so this is also how many verifications can be
+// outstanding before new ones are shed.
+const maxControlInFlight = 1024
 
 // New builds a Server without binding anything.
 func New(opts Options) (*Server, error) {
@@ -172,7 +188,14 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) readLoop(ctx context.Context) error {
-	buf := make([]byte, disco.MaxPacket)
+	// Big enough for a hub frame, which carries a whole WireGuard packet. It
+	// was disco.MaxPacket, 1200 bytes, and a larger datagram is truncated
+	// without an error — every full-size frame would have arrived cut short.
+	// The type is checked first; control messages keep their 1200-byte limit.
+	buf := make([]byte, hub.MaxFrame)
+	if s.control == nil {
+		s.control = make(chan struct{}, maxControlInFlight)
+	}
 
 	for {
 		n, from, err := s.conn.ReadFromUDPAddrPort(buf)
@@ -185,14 +208,40 @@ func (s *Server) readLoop(ctx context.Context) error {
 			return fmt.Errorf("reading: %w", err)
 		}
 
+		// Unmapped so a v4 address arriving on a dual-stack socket is
+		// recorded as 1.2.3.4:51820 rather than [::ffff:1.2.3.4]:51820,
+		// which a peer would then fail to parse as an endpoint.
+		src := netip.AddrPortFrom(from.Addr().Unmap(), from.Port())
+
+		// Hub data is handled here, on the reader, in the order it arrived:
+		// one goroutine per packet reorders a stream, and WireGuard's replay
+		// window is the only thing between that and dropped packets.
+		if hub.IsData(buf[:n]) {
+			s.hubDropped.Add(1)
+
+			continue
+		}
+
+		if n > disco.MaxPacket {
+			continue
+		}
+
+		select {
+		case s.control <- struct{}{}:
+		default:
+			s.controlDropped.Add(1)
+
+			continue
+		}
+
 		// Copied because the handler runs after the buffer is reused.
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])
 
-		// Unmapped so a v4 address arriving on a dual-stack socket is
-		// recorded as 1.2.3.4:51820 rather than [::ffff:1.2.3.4]:51820,
-		// which a peer would then fail to parse as an endpoint.
-		go s.handle(ctx, pkt, netip.AddrPortFrom(from.Addr().Unmap(), from.Port()))
+		go func() {
+			defer func() { <-s.control }()
+			s.handle(ctx, pkt, src)
+		}()
 	}
 }
 
