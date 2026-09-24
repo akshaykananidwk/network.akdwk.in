@@ -5,7 +5,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/keystore"
@@ -13,113 +15,179 @@ import (
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/wgkey"
 )
 
+// statusDeadline is how long `status` may take in all. It only reads files,
+// so anything longer is something blocking, and saying which step blocked is
+// worth more than waiting for it.
+var statusDeadline = 15 * time.Second
+
+// statusBody is printStatus, replaceable by a test that needs a step to hang.
+var statusBody = printStatus
+
+// runStatus prints what this machine is and what the agent is doing.
+//
+// It must always print something. A field report had it print nothing at all
+// in an administrator's command prompt — no version, no error, no "not
+// running" — which leaves a technician with no way to tell a hang from a
+// crash from a program that never started. So the first line is printed
+// before anything is opened, every step runs against a deadline and names
+// itself if it overruns, a panic is reported rather than lost, and --out
+// writes the same text to a file for the case where the console shows
+// nothing.
 func runStatus(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	outFile := fs.String("out", "", "also write the output to this file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
+	w := io.Writer(os.Stdout)
+	if *outFile != "" {
+		f, err := os.Create(*outFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  cannot write %s: %v\n", *outFile, err)
+		} else {
+			defer f.Close()
+			w = io.MultiWriter(os.Stdout, f)
+		}
+	}
+
+	fmt.Fprintf(w, "  akconnect-agent %s — status\n\n", version)
+
+	var step atomic.Value
+	step.Store("starting")
+
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("status failed while %s: %v", step.Load(), r)
+			}
+		}()
+		done <- statusBody(w, &step)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			fmt.Fprintf(w, "\n  error: %v\n", err)
+		}
+
+		return err
+	case <-time.After(statusDeadline):
+		err := fmt.Errorf("status gave up after %s while %s", statusDeadline, step.Load())
+		fmt.Fprintf(w, "\n  %v\n", err)
+
+		return err
+	}
+}
+
+func printStatus(w io.Writer, step *atomic.Value) error {
+	step.Store("opening the state directory")
 	stateStore, err := state.Open()
 	if err != nil {
 		return err
 	}
 
+	step.Store("reading " + stateStore.Path())
 	st, err := stateStore.Load()
 	if err != nil {
 		return err
 	}
 
+	step.Store("opening the key store")
 	keyStore, err := keystore.Open()
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("  akconnect-agent %s\n\n", version)
-
+	step.Store("reading the device identity")
 	priv, keyErr := keyStore.Load()
 	switch {
 	case errors.Is(keyErr, wgkey.ErrNoKey):
-		fmt.Printf("  Identity   : none — this machine has never enrolled\n")
+		fmt.Fprintf(w, "  Identity   : none — this machine has never enrolled\n")
 	case keyErr != nil:
-		fmt.Printf("  Identity   : unreadable — %v\n", keyErr)
+		fmt.Fprintf(w, "  Identity   : unreadable — %v\n", keyErr)
 	default:
 		pub, err := priv.Public()
 		if err != nil {
 			return err
 		}
-		fmt.Printf("  Identity   : %s\n", pub.Base64())
-		fmt.Printf("  Private key: %s\n", keyStore.Describe())
+		fmt.Fprintf(w, "  Identity   : %s\n", pub.Base64())
+		fmt.Fprintf(w, "  Private key: %s\n", keyStore.Describe())
 	}
 
 	if !st.Enrolled() {
-		fmt.Printf("\n  Not enrolled. Run 'akconnect-agent enroll --panel URL --join-code CODE'.\n")
+		fmt.Fprintf(w, "\n  Not enrolled. Run 'akconnect-agent enroll --panel URL --join-code CODE'.\n")
 		return nil
 	}
 
-	fmt.Printf("\n  Panel      : %s\n", st.PanelURL)
-	fmt.Printf("  Device     : %s\n", st.DeviceUID)
-	fmt.Printf("  Network    : %s\n", st.NetworkUID)
+	fmt.Fprintf(w, "\n  Panel      : %s\n", st.PanelURL)
+	fmt.Fprintf(w, "  Device     : %s\n", st.DeviceUID)
+	fmt.Fprintf(w, "  Network    : %s\n", st.NetworkUID)
 
 	// The token is a bearer credential. Its presence is worth reporting; its
 	// value is not, here or anywhere else.
 	if st.Approved() {
-		fmt.Printf("  Approved   : yes (device token held)\n")
-		fmt.Printf("  Overlay IP : %s\n", orDash(st.VirtualIP))
-		fmt.Printf("  Revision   : %d\n", st.Revision)
+		fmt.Fprintf(w, "  Approved   : yes (device token held)\n")
+		fmt.Fprintf(w, "  Overlay IP : %s\n", orDash(st.VirtualIP))
+		fmt.Fprintf(w, "  Revision   : %d\n", st.Revision)
 	} else {
-		fmt.Printf("  Approved   : no — waiting for an administrator (R4)\n")
+		fmt.Fprintf(w, "  Approved   : no — waiting for an administrator (R4)\n")
 	}
 
-	fmt.Printf("  State file : %s\n", stateStore.Path())
+	fmt.Fprintf(w, "  State file : %s\n", stateStore.Path())
+	fmt.Fprintf(w, "  Live status: %s\n", stateStore.RuntimePath())
 
 	// Where the service writes, which is the first thing to ask for when
 	// somebody says "it just stops".
 	if path := state.ServiceLogPath(); path != "" {
 		if _, err := os.Stat(path); err == nil {
-			fmt.Printf("  Service log: %s\n", path)
+			fmt.Fprintf(w, "  Service log: %s\n", path)
 		}
 	}
 
-	return printRuntime(stateStore)
+	step.Store("reading " + stateStore.RuntimePath())
+
+	return printRuntime(w, stateStore)
 }
 
 // printRuntime reports what the running agent knows, or says plainly that
 // nothing is running rather than showing a stale picture as if it were live.
-func printRuntime(stateStore *state.Store) error {
+func printRuntime(w io.Writer, stateStore *state.Store) error {
 	rt, err := stateStore.LoadRuntime()
 	if err != nil {
 		return err
 	}
 
 	if rt == nil {
-		fmt.Printf("\n  Tunnel     : not running\n")
+		fmt.Fprintf(w, "\n  Tunnel     : not running\n")
 		return nil
 	}
 
 	if !rt.Fresh() {
-		fmt.Printf("\n  Tunnel     : not running (last status %s old, from pid %d)\n",
+		fmt.Fprintf(w, "\n  Tunnel     : not running (last status %s old, from pid %d)\n",
 			time.Since(rt.UpdatedAt).Truncate(time.Second), rt.PID)
 
 		return nil
 	}
 
-	fmt.Printf("\n  Tunnel     : up on %s, port %d (pid %d)\n", rt.Interface, rt.ListenPort, rt.PID)
-	fmt.Printf("  Overlay    : %s via %s\n", orDash(rt.VirtualIP), orDash(rt.OverlayCIDR))
-	fmt.Printf("  Public addr: %s\n", orDash(rt.Reflexive))
-	fmt.Printf("  Coordinator: %s\n", reachable(rt.CoordinatorUp))
-	fmt.Printf("  Panel      : %s\n", reachable(rt.ControlPlaneUp))
+	fmt.Fprintf(w, "\n  Tunnel     : up on %s, port %d (pid %d)\n", rt.Interface, rt.ListenPort, rt.PID)
+	fmt.Fprintf(w, "  Overlay    : %s via %s\n", orDash(rt.VirtualIP), orDash(rt.OverlayCIDR))
+	fmt.Fprintf(w, "  Public addr: %s\n", orDash(rt.Reflexive))
+	fmt.Fprintf(w, "  Coordinator: %s\n", reachable(rt.CoordinatorUp))
+	fmt.Fprintf(w, "  Panel      : %s\n", reachable(rt.ControlPlaneUp))
 
 	if rt.Names != nil && rt.Names.Zone != "" {
-		fmt.Printf("\n  Names      : %d under %s, served at %s\n",
+		fmt.Fprintf(w, "\n  Names      : %d under %s, served at %s\n",
 			rt.Names.Records, rt.Names.Zone, rt.Names.Resolver)
 		if rt.Names.RoutedBy != "" {
-			fmt.Printf("               routed there by %s; every other name is untouched\n",
+			fmt.Fprintf(w, "               routed there by %s; every other name is untouched\n",
 				rt.Names.RoutedBy)
 		} else {
 			// Said plainly rather than left to be discovered by a name not
 			// resolving: the resolver is running, and nothing is asking it.
-			fmt.Printf("               NOT in use — %s\n", orDash(rt.Names.Note))
-			fmt.Printf("               addresses still work; this machine's own DNS is unchanged\n")
+			fmt.Fprintf(w, "               NOT in use — %s\n", orDash(rt.Names.Note))
+			fmt.Fprintf(w, "               addresses still work; this machine's own DNS is unchanged\n")
 		}
 	}
 
@@ -127,24 +195,24 @@ func printRuntime(stateStore *state.Store) error {
 		// The only place a technician can look this up. The rewriting happens
 		// inside the agent, so neither `ip route` on Linux nor `Get-NetNat` on
 		// Windows shows which overlay address reaches which machine.
-		fmt.Printf("\n  This device is a gateway. Machines on these LANs are reached\n")
-		fmt.Printf("  at the matching address in the overlay range:\n\n")
+		fmt.Fprintf(w, "\n  This device is a gateway. Machines on these LANs are reached\n")
+		fmt.Fprintf(w, "  at the matching address in the overlay range:\n\n")
 		for _, m := range rt.Mappings {
-			fmt.Printf("    %-20s on the site  →  %-20s on the overlay\n", m.LAN, m.Overlay)
+			fmt.Fprintf(w, "    %-20s on the site  →  %-20s on the overlay\n", m.LAN, m.Overlay)
 		}
 	}
 
 	if len(rt.Peers) == 0 {
-		fmt.Printf("\n  No peers.\n")
+		fmt.Fprintf(w, "\n  No peers.\n")
 		return nil
 	}
 
-	fmt.Printf("\n  Peers:\n")
+	fmt.Fprintf(w, "\n  Peers:\n")
 	for _, p := range rt.Peers {
-		fmt.Printf("    %-20s %-14s %-11s %s\n",
+		fmt.Fprintf(w, "    %-20s %-14s %-11s %s\n",
 			truncate(orDash(p.Name), 20), orDash(p.VirtualIP), p.Path, orDash(p.Endpoint))
 		if p.LastHandshakeAgo != "" {
-			fmt.Printf("      handshake %s ago, rx %s, tx %s\n",
+			fmt.Fprintf(w, "      handshake %s ago, rx %s, tx %s\n",
 				p.LastHandshakeAgo, humanBytes(p.RXBytes), humanBytes(p.TXBytes))
 		}
 	}
