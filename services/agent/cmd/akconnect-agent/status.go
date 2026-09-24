@@ -47,7 +47,9 @@ func runStatus(ctx context.Context, args []string) error {
 			fmt.Fprintf(os.Stderr, "  cannot write %s: %v\n", *outFile, err)
 		} else {
 			defer f.Close()
-			w = io.MultiWriter(os.Stdout, f)
+			// The file first: when the console is what swallows the
+			// output, the file must still get every line.
+			w = io.MultiWriter(f, os.Stdout)
 		}
 	}
 
@@ -88,21 +90,31 @@ func printStatus(w io.Writer, step *atomic.Value) error {
 		return err
 	}
 
+	// A step that fails is reported and the rest still runs: the live status
+	// is readable by any user even when the state file and the key are not,
+	// and it is the part that answers "what is the tunnel doing".
 	step.Store("reading " + stateStore.Path())
 	st, err := stateStore.Load()
 	if err != nil {
-		return err
+		fmt.Fprintf(w, "  State file : %s unreadable — %v\n", stateStore.Path(), err)
+		fmt.Fprintf(w, "               (run as administrator to see enrolment and identity)\n")
+		fmt.Fprintf(w, "  Live status: %s\n", stateStore.RuntimePath())
+		step.Store("reading " + stateStore.RuntimePath())
+
+		return printRuntime(w, stateStore)
 	}
 
 	step.Store("opening the key store")
 	keyStore, err := keystore.Open()
-	if err != nil {
-		return err
+	var priv wgkey.Private
+	keyErr := err
+	if err == nil {
+		step.Store("reading the device identity")
+		priv, keyErr = keyStore.Load()
 	}
-
-	step.Store("reading the device identity")
-	priv, keyErr := keyStore.Load()
 	switch {
+	case err != nil:
+		fmt.Fprintf(w, "  Identity   : key store unavailable — %v\n", err)
 	case errors.Is(keyErr, wgkey.ErrNoKey):
 		fmt.Fprintf(w, "  Identity   : none — this machine has never enrolled\n")
 	case keyErr != nil:
@@ -156,11 +168,20 @@ func printStatus(w io.Writer, step *atomic.Value) error {
 func printRuntime(w io.Writer, stateStore *state.Store) error {
 	rt, err := stateStore.LoadRuntime()
 	if err != nil {
-		return err
+		// Said with what is on disk, because "empty" and "unreadable" have
+		// different causes and a field report could not tell them apart.
+		desc := "missing"
+		if fi, statErr := os.Stat(stateStore.RuntimePath()); statErr == nil {
+			desc = fmt.Sprintf("%d bytes, written %s ago", fi.Size(), time.Since(fi.ModTime()).Truncate(time.Second))
+		}
+		fmt.Fprintf(w, "\n  Tunnel     : unknown — the live status file (%s) cannot be read: %v\n", desc, err)
+		fmt.Fprintf(w, "               the service log says why it was not written\n")
+
+		return nil
 	}
 
 	if rt == nil {
-		fmt.Fprintf(w, "\n  Tunnel     : not running\n")
+		fmt.Fprintf(w, "\n  Tunnel     : not running (no live status file — the service writes it every few seconds while up)\n")
 		return nil
 	}
 
@@ -199,6 +220,24 @@ func printRuntime(w io.Writer, stateStore *state.Store) error {
 		fmt.Fprintf(w, "  at the matching address in the overlay range:\n\n")
 		for _, m := range rt.Mappings {
 			fmt.Fprintf(w, "    %-20s on the site  →  %-20s on the overlay\n", m.LAN, m.Overlay)
+		}
+	}
+	if g := rt.Gateway; g != nil {
+		switch {
+		case g.Problem != "":
+			fmt.Fprintf(w, "\n  Gateway    : NOT working — %s\n", g.Problem)
+		case g.Mode == "agent":
+			fmt.Fprintf(w, "\n  Gateway    : translated by the agent itself (no WinNAT, RRAS or router change needed)\n")
+		default:
+			fmt.Fprintf(w, "\n  Gateway    : translated by the operating system (iptables MASQUERADE)\n")
+		}
+		if g.Mode == "agent" {
+			// Per hop: diverted = arrived through the tunnel for the LAN;
+			// the rest = what the LAN machines did about it.
+			fmt.Fprintf(w, "               arrived for the LAN %d; pings answered %d, unanswered %d\n",
+				g.Diverted, g.PingsOK, g.PingsFailed)
+			fmt.Fprintf(w, "               TCP opened %d, refused %d; UDP flows %d; dropped %d\n",
+				g.TCPOpened, g.TCPRefused, g.UDPOpened, g.Dropped)
 		}
 	}
 

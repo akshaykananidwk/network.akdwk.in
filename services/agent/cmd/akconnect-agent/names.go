@@ -193,6 +193,12 @@ func (s *session) problems() []panel.Problem {
 		out = append(out, panel.Problem{Code: "dns.not_routed", Detail: s.dnsProblem})
 	}
 
+	// A share that is not working must not look live in the panel. The
+	// panel shows this against the route, in words, instead of "live".
+	if s.gatewayProblem != "" {
+		out = append(out, panel.Problem{Code: "gateway.failed", Detail: s.gatewayProblem})
+	}
+
 	if s.fwProblem != "" {
 		out = append(out, panel.Problem{
 			Code: "firewall.inbound",

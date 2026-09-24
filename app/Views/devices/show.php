@@ -290,6 +290,12 @@ declare(strict_types=1);
     </header>
 
     <?php if (($shared_lans ?? []) !== []): ?>
+        <?php
+        // Proven, not assumed: see RouteHealth. "live" used to mean only
+        // "approved", and a Windows gateway without WinNAT showed it while
+        // nothing on the LAN could answer.
+        $shareTests = \App\Services\RouteHealth::latestTests((int) $device['tenant_id'], $shared_lans);
+        ?>
         <table class="table">
             <thead><tr><th>Shared range</th><th>Others reach it at</th><th>Status</th><th></th></tr></thead>
             <tbody>
@@ -298,11 +304,25 @@ declare(strict_types=1);
                     <td><code><?= e((string) $route['destination_cidr']) ?></code></td>
                     <td><code><?= e((string) $route['mapped_cidr']) ?></code></td>
                     <td>
-                        <?= (int) $route['approved'] === 1
-                            ? '<span class="badge badge-ok">live</span>'
-                            : '<span class="badge">waiting for approval</span>' ?>
+                        <?php $health = \App\Services\RouteHealth::of($route, $device, $shareTests[(int) $route['id']] ?? null); ?>
+                        <span class="badge <?= $health['state'] === 'working' ? 'badge-ok' : ($health['state'] === 'broken' ? 'badge-danger' : '') ?>">
+                            <?= e($health['text']) ?>
+                        </span>
+                        <?php if ($health['detail'] !== ''): ?>
+                            <span class="text-muted small d-block"><?= e($health['detail']) ?></span>
+                        <?php endif; ?>
                     </td>
                     <td class="text-right">
+                        <?php if ((int) $route['approved'] === 1 && (int) $route['enabled'] === 1 && can('device.update')): ?>
+                            <form method="post" class="inline"
+                                  action="<?= e(url('networks/' . (int) $route['network_id'] . '/routes/' . (int) $route['id'] . '/test')) ?>">
+                                <?= csrf_field() ?>
+                                <input type="hidden" name="back" value="device">
+                                <input type="text" name="target" class="input-sm" size="13" maxlength="15"
+                                       placeholder="address to test" aria-label="Address to test (optional)">
+                                <button type="submit" class="btn btn-sm">Test</button>
+                            </form>
+                        <?php endif; ?>
                         <?php if (can('network.update')): ?>
                             <?php
                             // Removing it here rather than only on the network

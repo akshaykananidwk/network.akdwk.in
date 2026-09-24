@@ -125,6 +125,29 @@ func (t *Table) Real(addr netip.Addr) (netip.Addr, bool) {
 	return translate(addr, mapped, real), true
 }
 
+// addressedToReal reports whether a packet from a peer names a translated
+// LAN by its REAL address instead of the mapped one.
+//
+// No client is ever given a route to a real range — only the mapped one — so
+// such a packet was built by hand to go around the mapping. And going around
+// the mapping is going around the rules: the access rules are compiled against
+// mapped addresses and enforced above this layer, so the filter judged a
+// packet to 192.168.10.50 by the peer's rules for the gateway PC itself, not
+// by the route's rules for the LAN. The gateway (the agent's own NAT, or
+// iptables) then delivered it.
+func (t *Table) addressedToReal(pkt []byte) bool {
+	if len(t.mappings) == 0 || len(pkt) < ipv4MinHeader || pkt[0]>>4 != 4 {
+		return false
+	}
+	dst := netip.AddrFrom4([4]byte(pkt[16:20]))
+	if _, _, ok := t.toReal(dst); ok {
+		return false // the mapped address: the legitimate path
+	}
+	_, _, ok := t.toMapped(dst)
+
+	return ok
+}
+
 // toReal finds the mapping covering an address the overlay used.
 func (t *Table) toReal(addr netip.Addr) (netip.Prefix, netip.Prefix, bool) {
 	for _, m := range t.mappings {

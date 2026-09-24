@@ -162,9 +162,9 @@ func (b *Bind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 // intercept sifts discovery packets out of a batch.
 //
 // wireguard-go hands us a batch and expects back the number of packets it
-// should process. Discovery packets are dispatched and then removed by
-// compacting the surviving entries forward, so WireGuard sees a batch that
-// contains only its own traffic and never learns discovery exists.
+// should process. Discovery packets are dispatched and then hidden by setting
+// their size to zero in place, so WireGuard processes only its own traffic and
+// never learns discovery exists.
 func (b *Bind) intercept(fn conn.ReceiveFunc) conn.ReceiveFunc {
 	return func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
 		n, err := fn(packets, sizes, eps)

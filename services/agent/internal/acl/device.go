@@ -54,28 +54,27 @@ func (d *Device) Dropped() uint64 { return d.dropped.Load() }
 
 // Read takes packets from the kernel and removes the ones that may not go out.
 //
-// Survivors are compacted forward so the caller sees a dense batch, which is
-// the same shape wireguard-go's own batching expects. Dropping in place and
-// returning a shorter count would hand it a hole.
+// A dropped packet is hidden by its size, in place. It used to be removed by
+// compacting the batch — swapping slice headers — but wireguard-go keeps its
+// own element for each index and takes elems[i].packet from bufs[i], then
+// encrypts into elems[i]'s own buffer: after a swap, element i's plaintext
+// lived in another element's buffer, which that element overwrote with its
+// ciphertext first. Any batch with a dropped packet in it (a batch is more
+// than one packet on Linux) could send another packet corrupted.
+// wireguard-go skips any entry whose size is below 1.
 func (d *Device) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	n, err := d.Device.Read(bufs, sizes, offset)
 	if n == 0 || err != nil {
 		return n, err
 	}
 
-	kept := 0
 	for i := 0; i < n; i++ {
-		if !d.permit(Outbound, bufs[i][offset:offset+sizes[i]]) {
-			continue
+		if sizes[i] > 0 && !d.permit(Outbound, bufs[i][offset:offset+sizes[i]]) {
+			sizes[i] = 0
 		}
-		if kept != i {
-			bufs[kept], bufs[i] = bufs[i], bufs[kept]
-			sizes[kept] = sizes[i]
-		}
-		kept++
 	}
 
-	return kept, nil
+	return n, nil
 }
 
 // Write delivers packets from peers, minus the ones they may not send us.

@@ -153,6 +153,10 @@ type session struct {
 	port         int
 	verbose      bool
 	applied      bool
+	// gatewayProblem is why this device's gateway is not working, reported to
+	// the panel so a share is never shown live when it is not.
+	gatewayProblem       string
+	gatewayLegacyCleared bool
 	// ifaceSynced: the interface is known to hold plan. See applyConfig.
 	ifaceSynced bool
 	lastRX      int64
@@ -501,20 +505,65 @@ func (s *session) applyGateway(cfg *panel.Config) error {
 
 	// Withdraw what is no longer advertised before adding what is, so a
 	// prefix moved from one gateway to another does not briefly exist on both.
-	if s.gateway != nil {
+	//
+	// With the agent doing the NAT there is nothing in the operating system
+	// to withdraw — except what an older agent left there (a WinNAT instance,
+	// iptables rules), removed once per process.
+	if tunnel.GatewayUserspace() {
+		// Once per process, whether or not this device shares anything now:
+		// a PC whose share was turned off while an older agent ran still has
+		// that agent's WinNAT instance. In the background, because it is a
+		// PowerShell start that nothing here waits on.
+		if !s.gatewayLegacyCleared {
+			s.gatewayLegacyCleared = true
+			legacy := next
+			if legacy == nil {
+				if overlay, err := netip.ParsePrefix(cfg.Network.CIDR); err == nil {
+					legacy = &netcfg.GatewayPlan{Interface: s.tun.Name(), Overlay: overlay.Masked()}
+				}
+			}
+			if legacy != nil {
+				go func(plan *netcfg.GatewayPlan) { _ = netcfg.RemoveGateway(plan) }(legacy)
+			}
+		}
+	} else if s.gateway != nil {
 		if err := netcfg.RemoveGateway(s.gateway); err != nil {
 			s.logf("gateway: could not withdraw the previous routes: %v", err)
 		}
 	}
 	s.gateway = next
 
+	// The agent's own NAT (gwnat), where the operating system's cannot be
+	// relied on: Windows has WinNAT only with Hyper-V or Containers, and
+	// without it a gateway forwarded peers' packets onto the LAN with their
+	// overlay source, which nothing on the LAN can answer.
+	if tunnel.GatewayUserspace() {
+		if next == nil {
+			s.gatewayProblem = ""
+			return s.tun.SetGatewayLANs(netip.Prefix{}, nil, 0)
+		}
+		if err := s.tun.SetGatewayLANs(next.Overlay, next.Advertised, cfg.Network.MTU); err != nil {
+			s.gatewayProblem = "gateway could not start its NAT: " + err.Error()
+			return fmt.Errorf("configuring gateway mode: %w", err)
+		}
+		s.gatewayProblem = ""
+		s.logf("gateway: forwarding for %s from the overlay %s, translated by the agent itself "+
+			"(no operating-system NAT, IP forwarding or LAN route needed)",
+			joinPrefixes(next.Advertised), next.Overlay)
+
+		return nil
+	}
+
 	if next == nil {
+		s.gatewayProblem = "" // nothing shared, nothing failing
 		return nil
 	}
 
 	if err := netcfg.ApplyGateway(next); err != nil {
+		s.gatewayProblem = "gateway: " + err.Error()
 		return fmt.Errorf("configuring gateway mode: %w", err)
 	}
+	s.gatewayProblem = ""
 
 	s.logf("gateway: forwarding for %s from the overlay %s",
 		joinPrefixes(next.Advertised), next.Overlay)

@@ -368,6 +368,8 @@ code.inline-command { margin-left: .4rem; white-space: normal; word-break: break
 .btn-ghost { background: transparent; border-color: transparent; color: var(--text-muted); }
 .btn-ghost:hover { background: var(--bg-hover); color: var(--text-body); }
 .btn-sm { padding: .28rem .6rem; font-size: .8rem; }
+/* The optional address beside a share's Test button. */
+.input-sm { padding: .22rem .45rem; font-size: .8rem; width: auto; }
 .btn-block { width: 100%; }
 .btn-icon { padding: .4rem .55rem; position: relative; }
 
@@ -422,6 +424,10 @@ textarea { resize: vertical; font-family: var(--font-mono); font-size: .82rem; }
 .chip-sm { font-size: .7rem; }
 .chip-online { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); border-color: transparent; }
 .chip-warning { background: color-mix(in srgb, var(--warning) 16%, transparent); color: var(--warning); border-color: transparent; }
+.chip-danger { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); border-color: transparent; }
+/* A shared LAN's status: proven working, or not working with the reason. */
+.badge-ok { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
+.badge-danger { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
 
 .status {
     display: inline-flex; padding: .1rem .5rem; font-size: .75rem; font-weight: 500;

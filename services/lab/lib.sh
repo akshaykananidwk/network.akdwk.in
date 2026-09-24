@@ -177,7 +177,9 @@ declare(strict_types=1);
 // Written by services/lab/run-all.sh. Removed when the drill finishes.
 
 return [
-    'app' => ['url' => '$PANEL_URL'],
+    'app' => ['url' => '$PANEL_URL'],${LAB_DB_NAME:+
+    // LAB_DB_NAME: the drill runs against a copy of the database.
+    'db' => ['name' => '$LAB_DB_NAME'],}
     'coordinator' => [
         'host'          => '$HOST_IP',
         'public_host'   => '$HOST_IP',

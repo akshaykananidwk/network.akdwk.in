@@ -10,7 +10,17 @@ import (
 	"strings"
 )
 
-// Gateway mode on Windows.
+// Gateway mode on Windows — the operating-system way, NO LONGER USED by the
+// agent since 1.9.7-dev.25.
+//
+// The paragraph below about New-NetNat was wrong: MSFT_NetNat exists only with
+// the Hyper-V or Containers feature, and on an ordinary Windows 10 Pro PC
+// Get-NetNat fails with "Invalid class". A field gateway forwarded peers'
+// packets onto its LAN with their overlay source and nothing answered. The
+// agent now translates a gateway's traffic itself (internal/gwnat) and never
+// calls applyGateway on Windows; removeGateway still runs once per start, to
+// take away a NAT instance an older agent created. The rest is kept for the
+// record of why each step was believed necessary.
 //
 // Windows has no iptables, and its two routing facilities are not equivalent:
 //
@@ -173,6 +183,10 @@ func lanInterfacesFor(advertised []netip.Prefix) []string {
 
 func removeGateway(plan *GatewayPlan) error {
 	removeNat(natName(plan.Overlay))
+	// Any other instance of ours, whatever overlay it was made for: the agent
+	// no longer uses WinNAT at all (see the top of this file).
+	_ = runPowerShell(`Get-NetNat -Name '` + natPrefix + `*' -ErrorAction SilentlyContinue | ` +
+		`Remove-NetNat -Confirm:$false -ErrorAction SilentlyContinue`)
 
 	// Instances from before this was one-per-overlay, so upgrading a machine
 	// that ran the old code does not leave NAT rules nobody will ever remove.

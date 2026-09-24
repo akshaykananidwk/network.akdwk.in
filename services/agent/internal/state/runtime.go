@@ -58,6 +58,12 @@ type Runtime struct {
 	// `akconnect-agent status` is the only place a technician can see which
 	// overlay address reaches which machine.
 	Mappings []RuntimeMapping `json:"mappings,omitempty"`
+	// Gateway is how this device does a gateway's NAT and what it has done,
+	// present only on a device that shares a LAN. The counters are the
+	// per-hop answer to "the packet reached the gateway — then what?":
+	// diverted rising means packets for the LAN arrive through the tunnel;
+	// pings_ok / tcp_opened rising means the LAN machine answered this PC.
+	Gateway *RuntimeGateway `json:"gateway,omitempty"`
 
 	// Names is the zone this device answers and where it answers it, so a
 	// technician can see what to type and confirm nothing else was touched.
@@ -103,6 +109,23 @@ type RuntimeMapping struct {
 	Overlay string `json:"overlay"`
 	// LAN is the range as it exists on the site's own network.
 	LAN string `json:"lan"`
+}
+
+// RuntimeGateway is a gateway's NAT.
+type RuntimeGateway struct {
+	// Mode is "agent" when the agent translates the traffic itself (always on
+	// Windows), "system" when the operating system does (iptables on Linux).
+	Mode string `json:"mode"`
+	// Problem is why the gateway is not working, empty when it is.
+	Problem string `json:"problem,omitempty"`
+	// Counters, in agent mode only.
+	Diverted    uint64 `json:"diverted"`
+	TCPOpened   uint64 `json:"tcp_opened"`
+	TCPRefused  uint64 `json:"tcp_refused"`
+	UDPOpened   uint64 `json:"udp_opened"`
+	PingsOK     uint64 `json:"pings_ok"`
+	PingsFailed uint64 `json:"pings_failed"`
+	Dropped     uint64 `json:"dropped"`
 }
 
 // RuntimePeer is one peer's live state.

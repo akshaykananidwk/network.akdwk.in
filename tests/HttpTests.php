@@ -75,6 +75,8 @@ final class HttpTests
             self::edgeUploadTrust();
             // 1.9.7-dev.24: Online is the device; direct / via server is the pair.
             self::pairLinks();
+            // 1.9.7-dev.25: a share is working only when a test proves it.
+            self::shareStatusIsProven();
         } finally {
             self::removeFixtures();
         }
@@ -1894,5 +1896,109 @@ final class HttpTests
 
         // Clear the bucket so the rest of the suite is unaffected.
         \App\Core\RateLimit::clear('login:127.0.0.1');
+    }
+
+    /**
+     * 1.9.7-dev.25: a shared LAN's status on the pages is proven, never
+     * assumed. The agent's own report of a broken gateway reaches the page
+     * with its reason; the Test button asks another computer to reach the
+     * share's router through the tunnel; only its answer says "working".
+     */
+    private static function shareStatusIsProven(): void
+    {
+        TestCase::group('HTTP — a share is "working" only when a test proves it (1.9.7-dev.25)');
+
+        $tenantId = (int) self::$fixtures['alpha']['tenant_id'];
+        $networkId = (int) self::$fixtures['alpha']['network_id'];
+        $gatewayId = (int) self::$fixtures['alpha']['device_id'];
+
+        [$route, $testerId] = TenantScope::asTenant($tenantId, static function () use ($tenantId, $networkId, $gatewayId): array {
+            \App\Core\Auth::setApiActor(null, $tenantId, ['*']);
+            $enrolment = DeviceService::enroll([
+                'join_code'     => self::$fixtures['alpha']['join_code'],
+                'public_key'    => base64_encode(random_bytes(32)),
+                'hostname'      => 'alpha-share-tester',
+                'os'            => 'windows',
+                'agent_version' => '1.0.0',
+            ]);
+            $tester = Device::findByUid($enrolment['device_uid']);
+            DeviceService::approve((int) $tester['id']);
+            DB::execute('UPDATE ' . DB::table('devices') . ' SET last_seen_at = UTC_TIMESTAMP(), connection_type = \'relay\'
+                         WHERE id = :id', ['id' => (int) $tester['id']]);
+
+            $route = \App\Services\RouteService::advertise($networkId, [
+                'destination_cidr' => '192.168.10.0/24',
+                'via_device_id'    => $gatewayId,
+            ]);
+            \App\Services\RouteService::approve((int) $route['id']);
+
+            return [\App\Models\NetworkRoute::find((int) $route['id']), (int) $tester['id']];
+        });
+        \App\Core\Auth::reset();
+        TenantScope::reset();
+
+        try {
+            $agent = [
+                'Authorization' => 'Bearer ' . (string) self::$fixtures['alpha']['device_token'],
+                'Content-Type'  => 'application/json',
+                'Accept'        => 'application/json',
+            ];
+            $client = self::client();
+            $page = self::signIn('alpha');
+
+            // The gateway's agent says its NAT could not start.
+            $client->post('/api/v1/agent/heartbeat', (string) json_encode([
+                'connection_type' => 'relay',
+                'problems'        => [['code' => 'gateway.failed', 'detail' => 'gateway could not start its NAT: test']],
+            ]), $agent);
+            TestCase::assertSame(200, $client->status(), 'a heartbeat carrying gateway.failed is accepted');
+            $page->get('/devices/' . $gatewayId);
+            TestCase::assertContains('NOT working', $page->body(), 'the gateway\'s page says the share is NOT working');
+            TestCase::assertContains('could not start its NAT', $page->body(), 'with the agent\'s reason');
+            TestCase::assert(!preg_match('/class="badge[^"]*">\s*live\s*</', $page->body()),
+                'and the share is never badged "live" (the top bar\'s live-updates dot is something else)');
+
+            // Healthy again, not yet tested.
+            $client->post('/api/v1/agent/heartbeat', (string) json_encode([
+                'connection_type' => 'relay', 'problems' => [],
+            ]), $agent);
+            $page->get('/devices/' . $gatewayId);
+            TestCase::assertContains('not tested yet', $page->body(), 'a healthy, untested share says "not tested yet"');
+
+            // The Test button: a probe for the OTHER computer, to the router.
+            $mappedBase = explode('/', (string) $route['mapped_cidr'])[0];
+            $router = (string) long2ip((int) ip2long($mappedBase) + 1);
+            $page->post('/networks/' . $networkId . '/routes/' . (int) $route['id'] . '/test', [
+                '_token' => $page->csrfToken(),
+                'back'   => 'device',
+            ]);
+            TestCase::assertSame(302, $page->status(), 'Test answers with a redirect back to the page');
+            $probe = TenantScope::asTenant($tenantId, static fn (): ?array => DB::selectOne(
+                'SELECT * FROM ' . DB::table('device_probes') . ' WHERE tenant_id = :t AND label = :l ORDER BY id DESC LIMIT 1',
+                ['t' => $tenantId, 'l' => \App\Services\RouteHealth::label($route)]
+            ));
+            TestCase::assert($probe !== null && (int) $probe['device_id'] === $testerId,
+                'and asks the other computer, not the gateway, to run it');
+            TestCase::assertSame($router, (string) ($probe['target'] ?? ''), 'against the share\'s router address in the overlay');
+
+            // The tester answers: proven.
+            TenantScope::asTenant($tenantId, static fn (): int => DB::execute(
+                'UPDATE ' . DB::table('device_probes') . ' SET state = \'ok\', latency_ms = 23, method = \'icmp\',
+                        answered_at = UTC_TIMESTAMP() WHERE id = :id',
+                ['id' => (int) $probe['id']]
+            )->rowCount());
+            $page->get('/devices/' . $gatewayId);
+            TestCase::assert((bool) preg_match('/class="badge badge-ok">\s*working\s*</', $page->body()),
+                'an answered test badges the share working');
+            TestCase::assertContains('from alpha-share-tester to ' . $router, $page->body(),
+                'proven from the computer that ran it, to the router');
+            TestCase::assert(!str_contains($page->body(), 'NOT working'), 'and nothing on the page says NOT working');
+            $page->get('/networks/' . $networkId . '?tab=routes');
+            TestCase::assertContains('proven', $page->body(), 'the network\'s routes tab shows the same proof');
+        } finally {
+            TenantScope::asTenant($tenantId, static fn (): int => DB::execute(
+                'DELETE FROM ' . DB::table('routes') . ' WHERE id = :id', ['id' => (int) $route['id']]
+            )->rowCount());
+        }
     }
 }

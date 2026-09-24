@@ -282,6 +282,11 @@ $base = url('networks/' . $network['id']);
                         </tr>
                         </thead>
                         <tbody>
+                        <?php
+                        // Once for the table, not once per row.
+                        $shareTests = \App\Services\RouteHealth::latestTests((int) $network['tenant_id'], $routes);
+                        $shareGateways = [];
+                        ?>
                         <?php foreach ($routes as $route): ?>
                             <tr>
                                 <td>
@@ -307,7 +312,26 @@ $base = url('networks/' . $network['id']);
                                             <button type="submit" class="btn btn-sm btn-primary">Approve</button>
                                         </form>
                                     <?php elseif ((int) $route['enabled'] === 1): ?>
-                                        <span class="chip chip-online">active</span>
+                                        <?php
+                                        $viaId = (int) $route['via_device_id'];
+                                        $shareGateways[$viaId] ??= \App\Models\Device::find($viaId);
+                                        $health = \App\Services\RouteHealth::of($route, $shareGateways[$viaId], $shareTests[(int) $route['id']] ?? null);
+                                        ?>
+                                        <span class="chip <?= $health['state'] === 'working' ? 'chip-online' : ($health['state'] === 'broken' ? 'chip-danger' : ($health['state'] === 'stale' ? '' : 'chip-warning')) ?>"
+                                              title="<?= e($health['detail']) ?>"><?= e($health['text']) ?></span>
+                                        <?php if ($health['detail'] !== ''): ?>
+                                            <span class="text-muted small d-block"><?= e($health['detail']) ?></span>
+                                        <?php endif; ?>
+                                        <?php if (can('device.update')): ?>
+                                        <form method="post" class="inline"
+                                              action="<?= e(url('networks/' . (int) $route['network_id'] . '/routes/' . (int) $route['id'] . '/test')) ?>">
+                                            <?= csrf_field() ?>
+                                            <input type="hidden" name="back" value="network">
+                                            <input type="text" name="target" class="input-sm" size="13" maxlength="15"
+                                                   placeholder="address to test" aria-label="Address to test (optional)">
+                                            <button type="submit" class="btn btn-sm">Test</button>
+                                        </form>
+                                        <?php endif; ?>
                                     <?php else: ?>
                                         <span class="chip">disabled</span>
                                     <?php endif; ?>

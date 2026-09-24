@@ -35,7 +35,10 @@ func main() {
 	// Started by the Windows service control manager rather than a person:
 	// hand straight over, because the SCM expects a status report within
 	// seconds and will kill a process that parses flags instead.
-	if winsvc.IsService() {
+	//
+	// Never for the commands a person types to find out what is wrong: those
+	// must print, whatever the process thinks it is.
+	if !interactiveOnly(os.Args[1]) && winsvc.IsService() {
 		if err := winsvc.Run(func(ctx context.Context) error { return runUp(ctx, nil) }); err != nil {
 			fmt.Fprintf(os.Stderr, "service failed: %v\n", err)
 			os.Exit(1)
@@ -124,4 +127,15 @@ func usage() {
 
 Requires root on Linux and Administrator on Windows to create the interface.
 `)
+}
+
+// interactiveOnly are the commands that only ever make sense typed by a
+// person, which are never handed to the service control manager.
+func interactiveOnly(cmd string) bool {
+	switch cmd {
+	case "status", "version", "--version", "-v", "help", "--help", "-h":
+		return true
+	}
+
+	return false
 }

@@ -6,6 +6,90 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.25] — development
+
+**A Windows PC can share its LAN — with no WinNAT, RRAS, Hyper-V or router
+change.** A gateway has to put its own LAN address in the source of what it
+forwards, or the site's router answers towards its WAN and nothing comes
+back. On Windows the agent left that to WinNAT (`New-NetNat`), which exists
+only with Hyper-V or Containers: on an ordinary Windows 10 Pro PC it is
+"Invalid class", the packets reached the router as 10.50.0.4, and a laptop
+pinging the shared router got "Request timed out" while the panel said
+"live". The agent now does the translation itself, the way a userspace subnet
+router does: packets for the shared LAN go into a userspace TCP/IP stack
+inside the agent (gVisor netstack), each TCP connection and UDP flow is
+re-opened from the gateway as an ordinary socket — so its source is the PC's
+own LAN address — and a ping is answered by pinging the target for real. It
+is always on for Windows; nothing is enabled on the PC, and the WinNAT
+instance an older agent created is removed. It sits below the address mapping
+and the access rules, so both work exactly as before, "via server" and
+"direct" alike. Linux keeps iptables, and runs the same code with
+`AKCONNECT_GATEWAY_USERSPACE=1`.
+
+**A shared LAN is "working" only when a test proves it.** The "live" badge
+meant only "approved". Each share now shows, on the device page and the
+network's Routes tab: **NOT working** with the reason (the gateway is offline,
+its agent reports the gateway could not start, gateway mode is off, or the
+last test failed and how), **not tested yet**, or **working — proven at 14:02
+from AVFM7NN to 10.128.0.1, 21 ms**. The new **Test** button asks another
+computer in the network — never the gateway itself — to reach the share's
+router through the tunnel: the first machine named in the share, else its
+first address as the overlay sees it, or an address typed beside the button.
+The tester is one the access rules let reach the share, preferring one no
+rule about the LAN's machines restricts; anyone who may test a peer may test
+a share. Test says plainly when the share is disabled or gateway mode is
+off. A proof belongs to
+the computer sharing it now (moving the share starts it untested), a day-old
+proof reads "last proven", and a test nobody picked up within three minutes
+is a failure rather than "testing…" for ever. A share whose computer has
+gateway mode off says so (the other computers keep the route, so their
+traffic fails inside the tunnel instead of leaving by their own network).
+
+**Reviewed before release, and fixed.** A peer that addressed a shared LAN
+by its real address (192.168.10.50) instead of its overlay one — which no
+client is given a route to, so only a modified agent does it — was judged by
+its rules for the gateway PC rather than the share's rules, and delivered;
+the gateway now drops such packets (on Linux's own NAT path too). The agent's
+NAT translates only unicast hosts: never the range's network or broadcast
+address, multicast or loopback, so a peer cannot make the gateway broadcast
+on the site's LAN. Each peer has its own share of what the gateway holds
+open (TCP connections being dialled and open, UDP flows), a UDP flow nothing
+answered closes after 30 seconds, a datagram too large to relay is dropped
+without ending its flow, and pings in flight are bounded. A
+fragmented ping is not half-answered. The stack uses the tunnel's MTU as the
+panel set it, not wintun's fixed 1420. An interface error behind packets
+already read is no longer lost. The WinNAT instance an older agent made is
+removed even when the PC no longer shares anything, and a Linux gateway's
+failure report clears when its share is withdrawn.
+
+**`status` always prints, and shows the gateway.** It no longer stops at the
+first step that fails: without administrator rights it still shows the live
+status, which any user can read, and an empty or unreadable `runtime.json` is
+reported with its size and age instead of an error. `status`, `version` and
+`help` never take the service path. `--out FILE` writes the file before the
+console. A gateway's section says how it translates, or **NOT working** with
+the reason, and counts packets arrived for the LAN, pings answered and
+unanswered, TCP opened and refused, UDP flows and drops — the per-hop answer
+to "the packet reached the gateway; then what?". The same counters are in
+`runtime.json` under `gateway`.
+
+**A latent packet-corruption bug in the access rules.** A packet the rules
+refused on the way out was removed by reshuffling the batch, which wireguard-go
+never reads back — it encrypts each entry into its own buffer by index — so a
+batch with a refused packet in it (Linux batches up to 128) could send another
+packet corrupted. Refused packets are now hidden in place, as discovery's
+already are since dev.24.
+
+**Lab gate: the field case.** New drills put the site router in its own
+namespace with no route back to the overlay — the old gateway drill routed
+the NVR's replies through the gateway, so a gateway with no NAT at all passed —
+and run the agent's own NAT with ping and HTTP to the router, relayed and
+direct, checking from the router's log that the request came from the
+gateway's LAN address. A negative control removes the gateway's NAT and must
+see the router go silent.
+
+---
+
 ## [1.9.7-dev.24] — development
 
 **A device's status is Online or Offline, and nothing else.** The blue

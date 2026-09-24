@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Core\DB;
 use App\Core\Auth;
 use App\Core\ValidationException;
 use App\Models\Device;
@@ -102,9 +103,29 @@ final class ProbeService
             }
         }
 
+        // A route from before subnet mapping has no mapped range: its real
+        // one is what the overlay uses.
         foreach (NetworkRoute::where(['via_device_id' => (int) $device['id']]) as $route) {
-            if (self::inPrefix($target, (string) $route['mapped_cidr'])) {
+            if (self::inPrefix($target, (string) ($route['mapped_cidr'] ?: $route['destination_cidr']))) {
                 return true;
+            }
+        }
+
+        // And a range another device in the same network shares, once it is
+        // approved: this device already has a route to it and may already
+        // send it anything, so being asked to test it adds nothing it could
+        // not do — and it is the only way to prove a share works from the
+        // side that uses it (RouteHealth).
+        if ($networkId > 0) {
+            $shared = DB::select(
+                'SELECT COALESCE(NULLIF(mapped_cidr, \'\'), destination_cidr) AS mapped_cidr FROM ' . DB::table('routes') . '
+                 WHERE tenant_id = :t AND network_id = :n AND approved = 1 AND enabled = 1 AND deleted_at IS NULL',
+                ['t' => (int) $device['tenant_id'], 'n' => $networkId]
+            );
+            foreach ($shared as $route) {
+                if (self::inPrefix($target, (string) $route['mapped_cidr'])) {
+                    return true;
+                }
             }
         }
 

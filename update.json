@@ -1,10 +1,10 @@
 {
-  "version": "1.9.7-dev.24",
-  "released_at": "2026-09-24T18:00:00Z",
+  "version": "1.9.7-dev.25",
+  "released_at": "2026-09-24T22:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "A device's status is Online or Offline only; each pair is shown as direct or via server. A panel update no longer shows devices as offline, a configuration change no longer resets every tunnel, and a deadlock that could stop a device receiving until restarted is fixed. Includes the dev.23 review fixes.",
+  "notes": "A Windows PC can share its LAN without WinNAT, RRAS or Hyper-V: the agent translates the gateway's traffic itself. A shared LAN shows 'working' only when a Test from another computer proves it, or 'NOT working' with the reason. `status` always prints and shows the gateway's counters. Fixes a packet-corruption bug in outbound filtering.",
   "migrations": [],
   "protected": [
     ".env",

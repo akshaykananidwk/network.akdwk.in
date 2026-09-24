@@ -29,7 +29,7 @@ teardown() {
     # natgw-alpha and cgnat-alpha are the two layers the CGNAT topology adds.
     # A namespace left behind makes the next "ip netns add" fail, and the
     # scenario then blames the product for a lab that did not clean up.
-    for ns in alpha beta gamma natgw-a natgw-b natgw-alpha cgnat-alpha natgw-s nvr office; do
+    for ns in alpha beta gamma natgw-a natgw-b natgw-alpha cgnat-alpha natgw-s nvr office lanrtr; do
         ip netns del "$ns" 2>/dev/null || true
     done
     ip link del "$BRIDGE" 2>/dev/null || true
@@ -46,7 +46,7 @@ teardown() {
                 lan-natgw-a lan-natgw-b lan-beta veth-nvr lan-alpha veth-office \
                 lan-local lan-local-far lan-office lan-office-far \
                 wan-natgw-s br-natgw-s lan-natgw-s lan-shared \
-                veth-gamma lan-gamma; do
+                veth-gamma lan-gamma veth-rtr; do
         ip link del "$link" 2>/dev/null || true
     done
 
@@ -589,6 +589,55 @@ build_shared() {
     note "alpha 192.168.30.2 and gamma 192.168.30.3 share one router at 10.0.0.30"
 }
 
+# The field case the gateway drill could not see (1.9.7-dev.25).
+#
+# build_gateway puts the NVR's default route on beta, so replies came back to
+# the gateway whether or not anything translated them — a gateway with no NAT
+# at all passed. A real site is not like that: the machine a technician wants
+# is behind the site's own router, whose default route is its WAN, and it has
+# never heard of the overlay. On a Windows gateway without WinNAT the packets
+# reached the ZTE router at 192.168.10.1 with the laptop's overlay address as
+# their source, the router answered towards its WAN, and nothing came back.
+#
+# So here the site router is its own namespace at 192.168.77.1, with NO route
+# anywhere but its own LAN, and beta is an ordinary host on that LAN at .23.
+# A reply reaches beta only if the packet that caused it carried beta's own
+# LAN address as its source — only if the gateway translated.
+#
+#   alpha 192.168.10.2 ── natgw-a ─┐  (mode: symmetric = relayed, cone = direct)
+#                                  ├─ akbr0 (coordinator, relays)
+#   beta  192.168.20.2 ── natgw-b ─┘
+#     └── 192.168.77.23 (beta's LAN side)
+#           └── lanrtr 192.168.77.1   the site router: no agent, no route back
+build_gateway_router() {
+    local mode=${1:-symmetric}
+    teardown
+
+    ip link add "$BRIDGE" type bridge
+    ip address add "$HOST_IP/24" dev "$BRIDGE"
+    ip link set "$BRIDGE" up
+
+    build_nat_side alpha natgw-a 10 192.168.10 "$mode"
+    build_nat_side beta  natgw-b 11 192.168.20 "$mode"
+
+    ip netns add lanrtr
+    ip link add lan-beta type veth peer name veth-rtr
+    ip link set lan-beta netns beta
+    ip link set veth-rtr netns lanrtr
+
+    ip netns exec beta ip address add 192.168.77.23/24 dev lan-beta
+    ip netns exec beta ip link set lan-beta up
+
+    ip netns exec lanrtr ip link set lo up
+    ip netns exec lanrtr ip address add 192.168.77.1/24 dev veth-rtr
+    ip netns exec lanrtr ip link set veth-rtr up
+    # Deliberately no default route: only 192.168.77.0/24 is reachable from
+    # here, exactly as the overlay is not reachable from a customer's router.
+
+    sysctl -qw net.ipv4.ip_forward=1
+    note "the site router is 192.168.77.1 with no route to the overlay; beta is 192.168.77.23 ($mode NAT)"
+}
+
 case "${1:-up}" in
     up)        build_flat ;;
     nat)       build_nat ;;
@@ -596,6 +645,7 @@ case "${1:-up}" in
     cgnat)     build_cgnat "${2:-symmetric}" ;;
     mixed)     build_mixed "${2:-cone}" "${3:-symmetric}" ;;
     gateway)   build_gateway ;;
+    gateway-router) build_gateway_router "${2:-symmetric}" ;;
     collision) build_collision ;;
     shared)    build_shared "${2:-none}" ;;
     down)      teardown ;;

@@ -497,3 +497,166 @@ scenario_subnet_mapping() {
 
     lab::stop_servers
 }
+
+# 1.9.7-dev.25: the field defect, as a gate. "Windows gateway + relayed pair +
+# ping/HTTP to the gateway's LAN router" had never been tested end to end.
+#
+# The site router has no route back to the overlay (build_gateway_router), so
+# the only way a reply returns is the gateway putting its own LAN address in
+# the source. Beta runs the agent's own NAT (gwnat) — the code every Windows
+# gateway runs, since WinNAT is absent without Hyper-V — forced on here with
+# AKCONNECT_GATEWAY_USERSPACE=1. Run relayed (symmetric NAT both sides) and
+# direct (cone): the gateway must work "via server" and "direct" alike.
+gateway_lan_router() {
+    local mode=$1 want_path=$2 tag=$3
+    step "gateway — ping and HTTP to the site's router through a $want_path pair, NAT done by the agent"
+
+    LAB_ENV_beta="AKCONNECT_GATEWAY_USERSPACE=1" fixture gateway-router "$mode"
+
+    if ip netns exec lanrtr ip route get "$ALPHA_IP" >/dev/null 2>&1; then
+        record "$tag/no-route-back" FAIL "the site router has a route to the overlay, so this drill cannot see missing NAT"
+        return
+    fi
+    record "$tag/no-route-back" PASS "the site router 192.168.77.1 has no route to the overlay, like a real one"
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
+        record "$tag/tunnel" FAIL "no tunnel between the laptop and the gateway"
+        return
+    fi
+    if ! lab::wait_path alpha "$want_path" 60; then
+        record "$tag/path" FAIL "the pair is on '$(lab::path alpha)', not $want_path — this drill needs $want_path"
+        return
+    fi
+    record "$tag/path" PASS "the pair is $(lab::path alpha)"
+
+    # The router's web page, served on the router itself.
+    local www="$RUN/lanrtr-www" weblog="$LOGS/lanrtr-http.log"
+    mkdir -p "$www"
+    printf 'ZTE-ROUTER-LOGIN\n' >"$www/index.html"
+    setsid ip netns exec lanrtr php -S 192.168.77.1:80 -t "$www" >"$weblog" 2>&1 &
+    SERVER_PIDS+=("$!")
+    if ! lab::wait_reachable lanrtr 192.168.77.1 80 10; then
+        record "$tag/setup" FAIL "the router's web server never came up"
+        lab::stop_servers
+        return
+    fi
+
+    local advertised routeId mapped router
+    advertised="$(php "$LAB_DIR/lab-setup.php" route "$NETWORK" 192.168.77.0/24 "$UID_BETA")" \
+        || { record "$tag/advertise" FAIL "could not advertise the route"; lab::stop_servers; return; }
+    routeId="$(awk -F= '/^ROUTE=/ {print $2}' <<<"$advertised")"
+    mapped="$(awk -F= '/^MAPPED=/ {print $2}' <<<"$advertised")"
+    php "$LAB_DIR/lab-setup.php" route-approve "$routeId" >/dev/null \
+        || { record "$tag/advertise" FAIL "could not approve the route"; lab::stop_servers; return; }
+    router="$(lab::mapped_host "$mapped" 1)"
+
+    # ICMP first: the field symptom was "ping 10.128.0.1 — Request timed out".
+    local deadline=$(( $(date +%s) + 60 ))
+    while [ "$(date +%s)" -lt "$deadline" ] && ! lab::ping alpha "$router" 1; do sleep 1; done
+    local out received
+    out="$(ip netns exec alpha ping -c 20 -i 0.2 -W 2 "$router" 2>&1)"
+    received="$(grep -oE '[0-9]+ received' <<<"$out" | grep -oE '^[0-9]+')"
+    if [ "${received:-0}" -ge 19 ]; then
+        record "$tag/icmp" PASS "ping $router (the router 192.168.77.1): ${received}/20 answered"
+    else
+        record "$tag/icmp" FAIL "ping $router (the router 192.168.77.1): ${received:-0}/20 answered"
+    fi
+
+    local body
+    body="$(ip netns exec alpha curl -s -m 8 "http://$router/" 2>/dev/null)"
+    if [ "$body" = "ZTE-ROUTER-LOGIN" ]; then
+        record "$tag/http" PASS "HTTP GET http://$router/ returned the router's page"
+    else
+        record "$tag/http" FAIL "HTTP GET http://$router/ returned '${body:-nothing}'"
+    fi
+
+    # Proof it was translated, from the router's side: the request came from
+    # the gateway's own LAN address, never an overlay one.
+    if grep -q '192\.168\.77\.23:' "$weblog" && ! grep -qE '10\.99\.0\.[0-9]+:' "$weblog"; then
+        record "$tag/source" PASS "the router saw the request from the gateway's LAN address 192.168.77.23"
+    else
+        record "$tag/source" FAIL "the router's log does not show 192.168.77.23 as the source (see $weblog)"
+    fi
+
+    # And the gateway says so itself — the counters status prints.
+    # The status file is rewritten on the agent's next poll, so wait for it.
+    local gw ok=0
+    deadline=$(( $(date +%s) + 45 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        gw="$(lab::runtime beta | jq -c '.gateway // {}')"
+        if [ "$(jq -r '.mode // ""' <<<"$gw")" = "agent" ] && [ "$(jq -r '.pings_ok // 0' <<<"$gw")" -gt 0 ] \
+            && [ "$(jq -r '.tcp_opened // 0' <<<"$gw")" -gt 0 ] && [ -z "$(jq -r '.problem // ""' <<<"$gw")" ]; then
+            ok=1
+            break
+        fi
+        sleep 2
+    done
+    if [ "$ok" = 1 ]; then
+        record "$tag/counters" PASS "the gateway reports agent NAT with pings and TCP answered: $gw"
+    else
+        record "$tag/counters" FAIL "the gateway's status does not show the agent's NAT working: $gw"
+    fi
+
+    lab::stop_servers
+}
+
+scenario_gateway_lan_router_relayed() { gateway_lan_router symmetric relay gwr-relay; }
+scenario_gateway_lan_router_direct()  { gateway_lan_router cone direct gwr-direct; }
+
+# The negative control: the same site with the gateway's NAT taken away must
+# fail. Linux's own NAT (iptables MASQUERADE, kernel mode) is used and then
+# removed; a drill that still passes after that could not have caught the
+# field defect, whatever it prints.
+scenario_gateway_lan_router_needs_nat() {
+    step "gateway — without translation the site router cannot answer (the drill can see the defect)"
+
+    LAB_ENV_beta="" fixture gateway-router symmetric
+
+    if ! lab::wait_tunnel alpha "$BETA_IP" 90; then
+        record "gwr-nonat/tunnel" FAIL "no tunnel between the laptop and the gateway"
+        return
+    fi
+
+    local www="$RUN/lanrtr-www"
+    mkdir -p "$www"
+    printf 'ZTE-ROUTER-LOGIN\n' >"$www/index.html"
+    setsid ip netns exec lanrtr php -S 192.168.77.1:80 -t "$www" >"$LOGS/lanrtr-http.log" 2>&1 &
+    SERVER_PIDS+=("$!")
+
+    local advertised routeId mapped router
+    advertised="$(php "$LAB_DIR/lab-setup.php" route "$NETWORK" 192.168.77.0/24 "$UID_BETA")" \
+        || { record "gwr-nonat/advertise" FAIL "could not advertise the route"; lab::stop_servers; return; }
+    routeId="$(awk -F= '/^ROUTE=/ {print $2}' <<<"$advertised")"
+    mapped="$(awk -F= '/^MAPPED=/ {print $2}' <<<"$advertised")"
+    php "$LAB_DIR/lab-setup.php" route-approve "$routeId" >/dev/null \
+        || { record "gwr-nonat/advertise" FAIL "could not approve the route"; lab::stop_servers; return; }
+    router="$(lab::mapped_host "$mapped" 1)"
+
+    local deadline=$(( $(date +%s) + 60 )) body=""
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        body="$(ip netns exec alpha curl -s -m 3 "http://$router/" 2>/dev/null)"
+        [ "$body" = "ZTE-ROUTER-LOGIN" ] && break
+        sleep 2
+    done
+    if [ "$body" = "ZTE-ROUTER-LOGIN" ]; then
+        record "gwr-nonat/kernel" PASS "with Linux's own NAT (kernel mode) the router answers HTTP through the relayed pair"
+    else
+        record "gwr-nonat/kernel" FAIL "even with Linux's own NAT the router did not answer HTTP"
+        lab::stop_servers
+        return
+    fi
+
+    # Take the translation away, and the connection tracking that would keep
+    # an existing flow translated.
+    ip netns exec beta iptables -t nat -F POSTROUTING
+    ip netns exec beta conntrack -F >/dev/null 2>&1 || true
+
+    body="$(ip netns exec alpha curl -s -m 5 "http://$router/" 2>/dev/null)"
+    if [ -z "$body" ]; then
+        record "gwr-nonat/detects" PASS "with the gateway's NAT removed the router cannot answer — the drill sees the field defect"
+    else
+        record "gwr-nonat/detects" FAIL "the router answered with no NAT on the gateway; this topology cannot catch the defect"
+    fi
+
+    lab::stop_servers
+}

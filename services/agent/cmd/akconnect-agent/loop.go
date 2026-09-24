@@ -389,6 +389,19 @@ func (s *session) publishRuntime(controlPlaneUp bool) {
 				LAN:     lan.String(),
 			})
 		}
+		rt.Gateway = &state.RuntimeGateway{Mode: "system", Problem: s.gatewayProblem}
+		if s.tun != nil {
+			if c := s.tun.GatewayCounters(); c != nil {
+				rt.Gateway.Mode = "agent"
+				rt.Gateway.Diverted = c.Diverted.Load()
+				rt.Gateway.TCPOpened = c.TCPOpened.Load()
+				rt.Gateway.TCPRefused = c.TCPRefused.Load()
+				rt.Gateway.UDPOpened = c.UDPOpened.Load()
+				rt.Gateway.PingsOK = c.PingsOK.Load()
+				rt.Gateway.PingsFailed = c.PingsFailed.Load()
+				rt.Gateway.Dropped = c.Dropped.Load()
+			}
+		}
 	}
 
 	if s.plan != nil && len(s.plan.Routes) > 0 {

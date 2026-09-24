@@ -55,10 +55,13 @@ func restrictedDevice(inner tun.Device) *Device {
 	return d
 }
 
-// The survivors of a filtered batch have to be compacted forward. Leaving a
-// hole and returning a smaller count hands wireguard-go a buffer it will
-// encrypt and send as if it were a packet.
-func TestFilteringABatchCompactsTheSurvivors(t *testing.T) {
+// A packet the filter drops is hidden in place, by its size. The batch keeps
+// its shape: wireguard-go pairs bufs[i] with its own element i and encrypts
+// into that element's buffer, so moving slice headers around (the old
+// compaction) made one element encrypt another's packet — a corrupted packet
+// on the wire whenever a batch held a dropped one. wireguard-go skips an
+// entry whose size is below 1.
+func TestFilteringABatchHidesTheDroppedInPlace(t *testing.T) {
 	inner := &fakeTun{outgoing: [][]byte{
 		ipv4(ipProtoTCP, self, nvr, 40000, 445),  // blocked
 		ipv4(ipProtoTCP, self, nvr, 40001, 554),  // allowed
@@ -68,8 +71,10 @@ func TestFilteringABatchCompactsTheSurvivors(t *testing.T) {
 	d := restrictedDevice(inner)
 
 	bufs := make([][]byte, 4)
+	backing := make([]*byte, 4)
 	for i := range bufs {
 		bufs[i] = make([]byte, 128)
+		backing[i] = &bufs[i][0]
 	}
 	sizes := make([]int, 4)
 
@@ -77,19 +82,25 @@ func TestFilteringABatchCompactsTheSurvivors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Fatalf("kept %d packets, want 2", n)
+	if n != 4 {
+		t.Fatalf("returned %d entries, want the whole batch of 4", n)
+	}
+	for i := range bufs {
+		if &bufs[i][0] != backing[i] {
+			t.Fatalf("slot %d now holds another slot's buffer; the batch was reshuffled", i)
+		}
 	}
 
-	// Both survivors must be in the first two slots and must be the allowed
-	// ones, not whatever happened to be left in the buffer.
-	for i := 0; i < n; i++ {
-		p, ok := parse(bufs[i][:sizes[i]])
-		if !ok {
-			t.Fatalf("packet %d is not readable after compaction", i)
+	for i, wantPort := range []uint16{0, 554, 0, 554} {
+		if wantPort == 0 {
+			if sizes[i] != 0 {
+				t.Fatalf("dropped packet %d still has size %d", i, sizes[i])
+			}
+			continue
 		}
-		if p.dstPort != 554 {
-			t.Fatalf("packet %d has destination port %d, want 554", i, p.dstPort)
+		p, ok := parse(bufs[i][:sizes[i]])
+		if !ok || p.dstPort != wantPort {
+			t.Fatalf("packet %d is not the allowed one on port %d", i, wantPort)
 		}
 	}
 

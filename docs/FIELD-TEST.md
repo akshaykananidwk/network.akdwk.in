@@ -152,7 +152,6 @@ from each PC that did not update:
 
 ```powershell
 Get-Content C:\ProgramData\AKConnect\service.log -Tail 200
-Get-Content C:\ProgramData\AKConnect\status.json
 Get-Content C:\ProgramData\AKConnect\runtime.json
 ```
 
@@ -164,21 +163,74 @@ rollout" or "already current" applies.
 
 ## 4. The gateway — reaching 192.168.10.0/24
 
-**4a — from the other Windows PC.**
+**4a — from the other Windows PC (1.9.7-dev.25).**
 
-1. On the gateway PC's device page, **Share a network** →
-   `192.168.10.0/24`.
-2. From the laptop:
+The gateway PC needs nothing enabled: no WinNAT, no RRAS, no Hyper-V, no IP
+forwarding, no route on the router. The agent translates the traffic itself.
+
+1. On the gateway PC's device page, **Share this computer's network** →
+   `192.168.10.0/24`, and approve it. The page shows the overlay range it is
+   reached at — `10.128.0.0/24` below; use the one your page shows.
+2. From the laptop, pairs "via server" and "direct" alike:
 
    ```powershell
-   ping 192.168.10.1
-   curl http://192.168.10.1
+   ping -n 20 10.128.0.1
+   curl.exe -m 5 http://10.128.0.1/
    ```
 
-**PASS** — the router answers the ping, and the page loads. Also press
-**Test** on the panel's device page against `10.128.5.1`; it must say the
-router answered, and when the probing device is the one sharing that range it
-must say **tested directly on the LAN** rather than reporting no answer.
+3. On the gateway's device page press **Test** beside the share.
+
+**PASS** — 20/20 replies, the router's login page, and within a minute the
+share reads **working — proven … from <laptop> to 10.128.0.1**. It must never
+read "live". Any **NOT working** carries its reason.
+
+**If it fails — where the packet dies, hop by hop.** Run these while the
+laptop runs `ping -t 10.128.0.1`, and send the output of every step.
+
+*Laptop* (Administrator PowerShell):
+
+```powershell
+& "$env:ProgramFiles\AKConnect\akconnect-agent.exe" status --out $env:TEMP\akc-status.txt
+Find-NetRoute -RemoteIPAddress 10.128.0.1 | ft InterfaceAlias,DestinationPrefix
+# Bytes sent to the gateway peer over 10 s: should grow by ~1 KB per ping.
+$p={(gc C:\ProgramData\AKConnect\runtime.json|ConvertFrom-Json).peers|?{$_.virtual_ip -eq '10.50.0.2'}}
+$a=&$p; Start-Sleep 10; $b=&$p; "tx +$($b.tx_bytes-$a.tx_bytes)  rx +$($b.rx_bytes-$a.rx_bytes)  path $($b.path)"
+Select-String C:\ProgramData\AKConnect\service.log -Pattern 'acl: dropped|refusing|not installed' | select -Last 20
+```
+
+- No route on AKConnect, or `tx` not growing: the laptop never sends it —
+  the share is not in its configuration (the page says why).
+- `tx` grows, `rx` does not: the packet left; look at the server and the
+  gateway.
+
+*Server* (nb.akdwk.in, the relay — only while the pair is "via server"):
+
+```sh
+journalctl -u akconnect-relay --since '-15 min' | grep -E 'bound|refused'
+timeout 20 tcpdump -ni any -c 40 'udp and greater 1000'   # laptop: ping -l 1000 -t 10.128.0.1
+```
+
+Datagrams in from the laptop and out to the gateway, and the same size back:
+the relay did its part.
+
+*Gateway* (Administrator PowerShell):
+
+```powershell
+& "$env:ProgramFiles\AKConnect\akconnect-agent.exe" status --out $env:TEMP\akc-status.txt
+Start-Sleep 10
+& "$env:ProgramFiles\AKConnect\akconnect-agent.exe" status --out $env:TEMP\akc-status2.txt
+Select-String C:\ProgramData\AKConnect\service.log -Pattern 'gateway' | select -Last 20
+ping -n 4 192.168.10.1
+```
+
+`status` has a **Gateway** section. Compare the two runs:
+
+| What changes between the two | Where the packet is |
+|---|---|
+| `arrived for the LAN` does not rise | it never reached the gateway through the tunnel: laptop or server |
+| `arrived` rises, `pings answered` rises | the router answered the gateway; the reply is lost on the way back: send both status files |
+| `arrived` rises, `unanswered` rises | the router did not answer this PC either — compare with `ping 192.168.10.1` from the gateway itself |
+| `Gateway : NOT working — …` | the reason is the fault |
 
 **4b — from Android: cannot be tested yet.**
 

@@ -2,9 +2,9 @@ package tunnel
 
 import (
 	"fmt"
-	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/acl"
-	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/netmap"
 	"net/netip"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,9 +12,11 @@ import (
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
 
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/acl"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/disconn"
-
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/gwnat"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/netcfg"
+	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/netmap"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/panel"
 	"github.com/akshaykananidwk/network.akdwk.in/services/agent/internal/wgkey"
 )
@@ -37,6 +39,9 @@ type Tunnel struct {
 	// packets the panel's ACL forbids, in both directions.
 	filter *acl.Device
 	mapper *netmap.Device
+	// gateway does a subnet router's NAT in the agent, where the operating
+	// system cannot be relied on to (Windows without WinNAT). See gwnat.
+	gateway *gwnat.Device
 }
 
 // Options configures Open.
@@ -110,7 +115,13 @@ func Open(opts Options) (*Tunnel, error) {
 	// LAN beyond it see the customer's real range. Translating above the
 	// filter would have the gateway judging packets by addresses no other
 	// device in the network uses.
-	mapper := netmap.Wrap(tunDev)
+	// Innermost of all, below the translation so it sees real LAN addresses:
+	// a gateway's NAT, done here on Windows — where the operating system's own
+	// (WinNAT) exists only with Hyper-V — and on Linux when asked to, which is
+	// how the lab runs the Windows path.
+	gateway := gwnat.Wrap(tunDev, gwnat.Options{Userspace: GatewayUserspace(), Logf: opts.Logf})
+
+	mapper := netmap.Wrap(gateway)
 
 	// The ACL filter wraps that, so wireguard-go reads and writes through both
 	// without knowing either is there. This is the only point on the machine
@@ -120,13 +131,14 @@ func Open(opts Options) (*Tunnel, error) {
 	dev := device.NewDevice(filter, bind, logger)
 
 	return &Tunnel{
-		dev:    dev,
-		tunDev: tunDev,
-		bind:   bind,
-		name:   actualName,
-		port:   port,
-		filter: filter,
-		mapper: mapper,
+		dev:     dev,
+		tunDev:  tunDev,
+		bind:    bind,
+		name:    actualName,
+		port:    port,
+		filter:  filter,
+		mapper:  mapper,
+		gateway: gateway,
 	}, nil
 }
 
@@ -136,6 +148,34 @@ func (t *Tunnel) SetMappings(table *netmap.Table) {
 	if t.mapper != nil {
 		t.mapper.SetTable(table)
 	}
+}
+
+// GatewayUserspace reports whether this platform does a gateway's NAT in the
+// agent: always on Windows, and on Linux when AKCONNECT_GATEWAY_USERSPACE=1.
+func GatewayUserspace() bool {
+	return runtime.GOOS == "windows" || os.Getenv("AKCONNECT_GATEWAY_USERSPACE") == "1"
+}
+
+// SetGatewayLANs names the LANs, in their real addresses, whose traffic from
+// the overlay this device translates itself, and the tunnel's MTU as the
+// panel set it. Empty stops. A no-op when the operating system does the NAT
+// (GatewayUserspace false).
+func (t *Tunnel) SetGatewayLANs(overlay netip.Prefix, lans []netip.Prefix, mtu int) error {
+	if t.gateway == nil {
+		return nil
+	}
+
+	return t.gateway.SetLANs(overlay, lans, mtu)
+}
+
+// GatewayCounters are the userspace NAT's running totals, nil when this device
+// does not do it.
+func (t *Tunnel) GatewayCounters() *gwnat.Stats {
+	if t.gateway == nil || !t.gateway.Userspace() {
+		return nil
+	}
+
+	return t.gateway.Counters()
 }
 
 // Mapped is how many advertised LANs this device translates for.

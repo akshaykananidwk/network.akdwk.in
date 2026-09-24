@@ -342,6 +342,9 @@ declare -A SCENARIOS=(
     [gateway-clash]=scenario_gateway_clash
     [overlay-clash]=scenario_overlay_clash
     [gateway-tamper]=scenario_gateway_tamper
+    [gateway-router-relayed]=scenario_gateway_lan_router_relayed
+    [gateway-router-direct]=scenario_gateway_lan_router_direct
+    [gateway-router-nonat]=scenario_gateway_lan_router_needs_nat
     [subnet-mapping]=scenario_subnet_mapping
     [cgnat]=scenario_cgnat
     [cgnat-direct]=scenario_cgnat_direct
@@ -363,7 +366,7 @@ declare -A SCENARIOS=(
     [edge-upgrade]=scenario_edge_upgrade
     [https-recover]=scenario_https_recover
 )
-ORDER=(cone relay cgnat cgnat-direct late-joiner shared-router reconnect reconnect-both roaming https-fallback https-inbound https-switch https-recover cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash overlay-clash gateway-tamper subnet-mapping dns resolved revocation)
+ORDER=(cone relay cgnat cgnat-direct late-joiner shared-router reconnect reconnect-both roaming https-fallback https-inbound https-switch https-recover cone-sym sym-cone controller-down relay-down relay-failover accounting acl acl-srcport acl-tamper enrol-throttle gateway gateway-clash overlay-clash gateway-tamper gateway-router-relayed gateway-router-direct gateway-router-nonat subnet-mapping dns resolved revocation)
 
 if [ "${1:-}" = "--list" ]; then
     printf '%s\n' "${ORDER[@]}"

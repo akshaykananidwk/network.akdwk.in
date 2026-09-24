@@ -6,8 +6,10 @@ namespace App\Controllers;
 
 use App\Core\Request;
 use App\Core\Response;
+use App\Core\ValidationException;
 use App\Models\Network;
 use App\Models\NetworkRoute;
+use App\Services\RouteHealth;
 use App\Services\RouteHostService;
 use App\Services\RouteService;
 
@@ -59,6 +61,43 @@ final class NetworkRouteController extends Controller
                 $route['mapped_cidr'] ?: $route['destination_cidr']
             )
         );
+    }
+
+    /**
+     * Test a share end to end, from another computer in the network.
+     *
+     * @param array<string,string> $params
+     */
+    public function test(Request $request, array $params): Response
+    {
+        $networkId = (int) $params['id'];
+        Network::findOrFail($networkId);
+
+        $route = NetworkRoute::find((int) $params['routeId']);
+        if ($route === null || (int) $route['network_id'] !== $networkId) {
+            throw new \App\Core\NotFoundException('That shared range does not exist.');
+        }
+
+        $from = $request->input('from');
+        $back = (string) $request->input('back', '') === 'device'
+            ? 'devices/' . (int) $route['via_device_id']
+            : 'networks/' . $networkId . '?tab=routes';
+
+        try {
+            $probe = RouteHealth::test(
+                $route,
+                $from !== null && $from !== '' ? (int) $from : null,
+                $request->input('target') !== null ? (string) $request->input('target') : null
+            );
+        } catch (ValidationException $e) {
+            return $this->redirect($back, '', implode(' ', $e->errors()));
+        }
+
+        return $this->redirect($back, sprintf(
+            'Testing %s from another computer in the network, through the tunnel and the computer sharing it. '
+                . 'The result appears here within a minute.',
+            $probe['target']
+        ));
     }
 
     /** @param array<string,string> $params */

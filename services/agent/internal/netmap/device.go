@@ -32,7 +32,15 @@ type Device struct {
 	// the filter's is: a route withdrawn in the panel must stop being
 	// translated on the next packet, not the next reconnection.
 	table atomic.Pointer[Table]
+
+	// refused counts packets from peers addressed to a translated LAN by its
+	// real address (Table.addressedToReal), which are dropped.
+	refused atomic.Uint64
 }
+
+// Refused is how many packets were dropped for naming a LAN by its real
+// address rather than its mapped one.
+func (d *Device) Refused() uint64 { return d.refused.Load() }
 
 // Wrap puts address translation around an existing tunnel device.
 func Wrap(inner tun.Device) *Device {
@@ -78,16 +86,40 @@ func (d *Device) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 
 // Write takes packets from peers and puts mapped destinations back onto the
 // real LAN before the operating system routes them.
+//
+// A packet naming a translated LAN by its real address is dropped: see
+// Table.addressedToReal. The rest of the batch goes on.
 func (d *Device) Write(bufs [][]byte, offset int) (int, error) {
 	table := d.table.Load()
-	if table.Len() > 0 {
-		for _, b := range bufs {
-			if len(b) <= offset {
-				continue
+	if table.Len() == 0 {
+		return d.Device.Write(bufs, offset)
+	}
+
+	var kept [][]byte // built only once something is dropped
+	for i, b := range bufs {
+		if len(b) > offset && table.addressedToReal(b[offset:]) {
+			d.refused.Add(1)
+			if kept == nil {
+				kept = append(make([][]byte, 0, len(bufs)), bufs[:i]...)
 			}
+			continue
+		}
+		if len(b) > offset {
 			table.Rewrite(ToLAN, b[offset:])
+		}
+		if kept != nil {
+			kept = append(kept, b)
 		}
 	}
 
-	return d.Device.Write(bufs, offset)
+	if kept == nil {
+		return d.Device.Write(bufs, offset)
+	}
+	if len(kept) > 0 {
+		if _, err := d.Device.Write(kept, offset); err != nil {
+			return 0, err
+		}
+	}
+
+	return len(bufs), nil
 }

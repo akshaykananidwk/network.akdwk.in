@@ -81,8 +81,14 @@ lab::uid() { jq -r '.device_uid' "$(lab::state_dir "$1")/state.json"; }
 # setsid puts the whole chain in one group so the group can be killed.
 lab::up() {
     local ns=$1 binary="${2:-akconnect-agent}"
+    # LAB_ENV_<ns> adds environment to one namespace's agent — the gateway
+    # drills use it to force the agent's own NAT on Linux, which is the code
+    # every Windows gateway runs.
+    local var="LAB_ENV_${ns//-/_}" extra=()
+    [ -n "${!var:-}" ] && read -ra extra <<<"${!var}"
     setsid ip netns exec "$ns" env \
         AKCONNECT_STATE_DIR="$(lab::state_dir "$ns")" \
+        "${extra[@]}" \
         "$BIN/$binary" up --verbose \
         >"$LOGS/$ns-up.log" 2>&1 &
     AGENT_PIDS+=("$!")

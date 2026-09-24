@@ -82,6 +82,10 @@ $router->group('', ['maintenance', 'auth'], static function (Router $router): vo
     $router->post('/networks/{id:int}/routes', 'NetworkRouteController@store', ['csrf', 'can:network.update']);
     $router->post('/networks/{id:int}/routes/{routeId:int}/approve', 'NetworkRouteController@approve', ['csrf', 'can:device.approve']);
     $router->post('/networks/{id:int}/routes/{routeId:int}/withdraw', 'NetworkRouteController@withdraw', ['csrf', 'can:network.update']);
+    // Prove a share works end to end: another computer in the network reaches
+    // an address in it, through the tunnel and the gateway (RouteHealth).
+    // A share's Test asks one device to probe, as a peer test does: the same right.
+    $router->post('/networks/{id:int}/routes/{routeId:int}/test', 'NetworkRouteController@test', ['csrf', 'can:device.update']);
     $router->post('/networks/{id:int}/routes/{routeId:int}/hosts', 'NetworkRouteController@storeHost', ['csrf', 'can:network.update']);
     $router->post('/networks/{id:int}/hosts/{hostId:int}/delete', 'NetworkRouteController@deleteHost', ['csrf', 'can:network.update']);
 

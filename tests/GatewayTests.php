@@ -23,6 +23,7 @@ use App\Services\RouteHostService;
 use App\Services\NetworkService;
 use App\Core\ValidationException;
 use App\Services\RouteService;
+use App\Services\RouteHealth;
 use App\Services\SubnetMapper;
 use App\Core\Rbac;
 use Throwable;
@@ -63,6 +64,7 @@ final class GatewayTests
             self::aDeletedDeviceReleasesItsShares();
             self::refusalsSayWhy();
             self::aReEnrolledMachineCanTakeBackItsShare();
+            self::aShareIsWorkingOnlyWhenATestProvesIt();
         } finally {
             DB::rollback();
             Auth::reset();
@@ -687,5 +689,214 @@ final class GatewayTests
             NetworkRoute::forNetwork(self::$fx['hotelA_network']),
             static fn (array $r): bool => $r['destination_cidr'] === '192.168.1.0/24'
         )), 'and the network still carries exactly one route for that prefix');
+    }
+
+    /**
+     * A share used to be "live" the moment it was approved. On a Windows
+     * gateway without WinNAT that was false for ever: the router could not
+     * answer the overlay's source address, and the page said live. Now it is
+     * NOT working with the reason, not tested, or proven by a test that ran
+     * from another computer through the tunnel — never assumed.
+     */
+    private static function aShareIsWorkingOnlyWhenATestProvesIt(): void
+    {
+        TestCase::group('Gateway — a share is working only when a test from another computer proves it');
+
+        self::act('hotelA');
+        // Fresh devices: the earlier cases delete and replace the fixtures'.
+        $gw = self::enrol('hotelA', self::$fx['hotelA_network'], 'sharegw');
+        $laptop = self::enrol('hotelA', self::$fx['hotelA_network'], 'sharetester');
+
+        $created = RouteService::advertise(self::$fx['hotelA_network'], [
+            'destination_cidr' => '192.168.93.0/24',
+            'via_device_id'    => $gw,
+        ]);
+        RouteService::approve((int) $created['id']);
+        $route = NetworkRoute::find((int) $created['id']);
+        $mapped = (string) $route['mapped_cidr'];
+        $routerAddr = (string) long2ip((int) ip2long(explode('/', $mapped)[0]) + 1);
+
+        $now = gmdate('Y-m-d H:i:s');
+        $online = ['last_seen_at' => $now, 'connection_type' => 'relay'];
+        $offline = ['last_seen_at' => null, 'connection_type' => 'offline'];
+
+        self::setDevice($gw, $offline);
+        $health = RouteHealth::of($route, Device::find($gw), null);
+        TestCase::assertSame('broken', $health['state'], 'a share whose gateway is offline is NOT working');
+        TestCase::assertContains('offline', $health['detail'], 'and says the gateway is offline');
+
+        self::setDevice($gw, $online);
+        $health = RouteHealth::of($route, Device::find($gw), null);
+        TestCase::assertSame('untested', $health['state'], 'approved and online is "not tested yet", not live');
+        TestCase::assert(!str_contains(strtolower($health['text']), 'live'), 'the word live is gone');
+
+        self::setDevice($gw, ['problems_json' => json_encode([[
+            'code' => 'gateway.failed', 'detail' => 'gateway could not start its NAT: boom',
+        ]])]);
+        $health = RouteHealth::of($route, Device::find($gw), null);
+        TestCase::assertSame('broken', $health['state'], 'a gateway whose agent reports gateway.failed is NOT working');
+        TestCase::assertContains('could not start its NAT', $health['detail'], 'with the agent\'s reason');
+        self::setDevice($gw, ['problems_json' => null]);
+
+        // Gateway mode off with an approved route: the peer set carries no
+        // allowed IP for the range. The page says so; the laptop keeps its
+        // route, so the traffic fails inside the tunnel rather than going
+        // out of the laptop's own network towards whoever owns 10.128/10.
+        self::setDevice($gw, ['is_gateway' => 0]);
+        $health = RouteHealth::of($route, Device::find($gw), null);
+        TestCase::assertSame('broken', $health['state'], 'a share through a device with gateway mode off is NOT working');
+        TestCase::assertContains('gateway mode is turned off', $health['detail'], 'and says so');
+        $config = DeviceService::buildAgentConfig(Device::find($laptop));
+        TestCase::assert(in_array($mapped, array_column($config['routes'], 'destination'), true),
+            'and the laptop keeps the route, so the traffic fails closed inside the tunnel');
+        $refused = '';
+        try {
+            RouteHealth::test($route);
+        } catch (ValidationException $e) {
+            $refused = implode(' ', $e->errors());
+        }
+        TestCase::assertContains('Gateway mode is turned off', $refused,
+            'Test says gateway mode is off, not that the rules forbid it');
+        self::setDevice($gw, ['is_gateway' => 1]);
+        self::setDevice($gw, $online);
+
+        // The test runs from another computer, never the gateway itself.
+        self::setDevice($laptop, $offline);
+        $refused = false;
+        try {
+            RouteHealth::test($route);
+        } catch (ValidationException) {
+            $refused = true;
+        }
+        TestCase::assert($refused, 'with no other computer online there is nothing to test from, and it says so');
+
+        self::setDevice($laptop, $online);
+        $probe = RouteHealth::test($route);
+        TestCase::assertSame($laptop, (int) $probe['device_id'], 'the test is run by the other computer, not the gateway');
+        TestCase::assertSame($routerAddr, (string) $probe['target'], 'against the first address of the share — the router');
+        TestCase::assertSame(RouteHealth::label($route), (string) $probe['label'], 'tied to this share and this gateway');
+
+        $latest = RouteHealth::latestTests(self::$fx['hotelA_tenant'], [$route])[(int) $route['id']] ?? null;
+        TestCase::assertSame('testing', RouteHealth::of($route, Device::find($gw), $latest)['state'],
+            'while the laptop has not answered it is testing');
+
+        self::setProbe((int) $probe['id'], [
+            'state' => 'ok', 'latency_ms' => 21, 'method' => 'icmp', 'answered_at' => $now,
+        ]);
+        $latest = RouteHealth::latestTests(self::$fx['hotelA_tenant'], [$route])[(int) $route['id']];
+        $health = RouteHealth::of($route, Device::find($gw), $latest);
+        TestCase::assertSame('working', $health['state'], 'an answered test proves the share working');
+        TestCase::assertContains('hotela-sharetester', $health['detail'], 'naming the computer it was proven from');
+        TestCase::assertContains('21 ms', $health['detail'], 'and how long it took');
+
+        // A day on, the proof is history, not a status.
+        $health = RouteHealth::of($route, Device::find($gw), $latest, time() + RouteHealth::PROOF_FRESH_SECONDS + 60);
+        TestCase::assertSame('stale', $health['state'], 'a proof older than a day is not shown as working');
+        TestCase::assertContains('last proven', $health['text'], 'but as when it was last proven');
+
+        // Moved to another computer: the old gateway's proof does not follow.
+        $moved = $route;
+        $moved['via_device_id'] = $laptop;
+        TestCase::assertSame([], RouteHealth::latestTests(self::$fx['hotelA_tenant'], [$moved]),
+            'a share moved to another gateway starts untested');
+
+        self::setProbe((int) $probe['id'], ['state' => 'failed', 'error' => 'no reply within 3s']);
+        $latest = RouteHealth::latestTests(self::$fx['hotelA_tenant'], [$route])[(int) $route['id']];
+        $health = RouteHealth::of($route, Device::find($gw), $latest);
+        TestCase::assertSame('broken', $health['state'], 'a failed test is NOT working');
+        TestCase::assertContains('no reply within 3s', $health['detail'], 'with what failed');
+
+        // A test nobody picked up is a failure after a few minutes, not
+        // "testing…" for ever.
+        self::setProbe((int) $probe['id'], ['state' => 'pending', 'error' => null, 'answered_at' => null]);
+        $latest = RouteHealth::latestTests(self::$fx['hotelA_tenant'], [$route])[(int) $route['id']];
+        $health = RouteHealth::of($route, Device::find($gw), $latest, time() + RouteHealth::PENDING_EXPIRES_SECONDS + 60);
+        TestCase::assertSame('broken', $health['state'], 'a test not picked up in minutes is NOT working');
+        TestCase::assertContains('did not run the test', $health['detail'], 'and says the tester never ran it');
+
+        // A machine named in the share is what Test reaches by default, at
+        // its overlay address (host bits kept, as the agent translates).
+        RouteHostService::add((int) $route['id'], ['label' => 'nvr', 'address' => '192.168.93.50']);
+        $named = RouteHealth::test($route);
+        TestCase::assertSame(explode('.', $routerAddr, 4)[0] . '.' . explode('.', $routerAddr, 4)[1] . '.'
+            . explode('.', $routerAddr, 4)[2] . '.50', (string) $named['target'],
+            'a machine named in the share is the default target, at its overlay address');
+
+        // A tester whose rules restrict it inside the LAN (tcp/554 on the NVR
+        // only) is not chosen while an unrestricted one is online: its probe
+        // failing would say nothing about the share.
+        $second = self::enrol('hotelA', self::$fx['hotelA_network'], 'sharetester2');
+        self::setDevice($second, ['last_seen_at' => gmdate('Y-m-d H:i:s', time() - 5), 'connection_type' => 'relay']);
+        self::setDevice($laptop, ['last_seen_at' => gmdate('Y-m-d H:i:s'), 'connection_type' => 'relay']);
+        AclService::createRule(self::$fx['hotelA_network'], [
+            'action'    => 'allow',
+            'src_type'  => 'device',
+            'src_value' => (string) Device::find($laptop)['device_uid'],
+            'dst_type'  => 'cidr',
+            'dst_value' => '192.168.93.0/24',
+            'protocol'  => 'tcp',
+            'port_from' => 554,
+            'port_to'   => 554,
+            'priority'  => 10,
+        ]);
+        $ranked = RouteHealth::test($route, null, $routerAddr);
+        TestCase::assertSame($second, (int) $ranked['device_id'],
+            'the unrestricted computer tests the share, not the more recently seen one limited to tcp/554');
+
+        // A computer the access rules keep away from the share cannot prove
+        // or disprove it, so it is not asked.
+        $network = self::$fx['hotelA_network'];
+        DB::execute('UPDATE ' . DB::table('networks') . ' SET acl_default_action = \'deny\' WHERE id = :n', ['n' => $network]);
+        $refused = '';
+        try {
+            RouteHealth::test($route);
+        } catch (ValidationException $e) {
+            $refused = implode(' ', $e->errors());
+        }
+        DB::execute('UPDATE ' . DB::table('networks') . ' SET acl_default_action = \'allow\' WHERE id = :n', ['n' => $network]);
+        TestCase::assertContains('access rules', $refused, 'with the rules denying it, no computer is asked, and it says why');
+
+        $refused = false;
+        try {
+            RouteHealth::test($route, null, '192.168.93.1');
+        } catch (ValidationException) {
+            $refused = true;
+        }
+        TestCase::assert($refused, 'a target outside the share\'s overlay range is refused (the real LAN address is not routable)');
+
+        RouteService::withdraw((int) $route['id']);
+    }
+
+    /**
+     * Set device columns the model does not let a caller write — the
+     * heartbeat's own (last_seen_at, problems_json) — as a heartbeat would.
+     *
+     * @param array<string,mixed> $columns
+     */
+    private static function setDevice(int $id, array $columns): void
+    {
+        $sets = [];
+        $params = ['id' => $id];
+        foreach ($columns as $column => $value) {
+            $sets[] = '`' . $column . '` = :' . $column;
+            $params[$column] = $value;
+        }
+        DB::execute('UPDATE ' . DB::table('devices') . ' SET ' . implode(', ', $sets) . ' WHERE id = :id', $params);
+    }
+
+    /**
+     * Answer a probe as the agent's report would.
+     *
+     * @param array<string,mixed> $columns
+     */
+    private static function setProbe(int $id, array $columns): void
+    {
+        $sets = [];
+        $params = ['id' => $id];
+        foreach ($columns as $column => $value) {
+            $sets[] = '`' . $column . '` = :' . $column;
+            $params[$column] = $value;
+        }
+        DB::execute('UPDATE ' . DB::table('device_probes') . ' SET ' . implode(', ', $sets) . ' WHERE id = :id', $params);
     }
 }
