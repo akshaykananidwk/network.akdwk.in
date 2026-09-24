@@ -143,6 +143,45 @@ and republish from source with `sudo /opt/akconnect/src/deploy/upgrade-edge.sh -
 On the production host, where the panel was not installed by
 getting-started.sh: `sudo /opt/akconnect/src/deploy/rotate-secret.sh --panel /www/wwwroot/network.akdwk.in`.
 
+### The edge's release key: what the panel publishes
+
+From 1.9.7-dev.23 the panel publishes a Windows installer or an agent update
+only when the edge server's own **release key** signed it. The shared secret
+alone is not enough: an upload with no edge signature is refused, and one
+signed by a key the panel does not trust yet is **held** under Platform →
+Coordinator, where no device and no customer is offered it until an
+administrator approves it.
+
+The key is made on the edge, once, by `upgrade-edge.sh`:
+`/etc/akconnect/release-signing.key`, root's, mode 0600. It never leaves that
+machine, and nothing prints it. To see its fingerprint:
+
+```bash
+sudo akconnect-coordinator release-key public /etc/akconnect/release-signing.key
+```
+
+Which key the panel trusts is decided in one of two ways, and never over the
+network:
+
+- **The panel is on the edge's machine** (a getting-started.sh install): the
+  edge tells the panel directly, as the panel's own user. Nothing to approve.
+- **Otherwise**: the first upload waits under Platform → Coordinator with the
+  fingerprint of the key that signed it. Compare it with the command above and
+  press *The fingerprint matches — trust this key and publish*. From then on
+  that edge's uploads publish by themselves.
+
+An upload held under a **different** key from the trusted one is shown in red.
+Unless you replaced or reinstalled the edge server, somebody else signed it:
+discard it and run `sudo akconnect-rotate-secret` on the edge.
+
+On the production host, where the panel was not installed by
+getting-started.sh but is on the same machine, either approve the first
+upload in the panel or trust the key directly, once:
+
+```bash
+sudo /opt/akconnect/src/deploy/upgrade-edge.sh --panel-dir /www/wwwroot/network.akdwk.in
+```
+
 ### Taking that panel down for a test
 
 `akconnect-maintenance on|off|status`, installed by the same script. It is

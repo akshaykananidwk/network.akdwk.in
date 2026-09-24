@@ -35,6 +35,7 @@ require __DIR__ . '/_bootstrap.php';
 use App\Core\DB;
 use App\Core\Logger;
 use App\Models\Setting;
+use App\Services\EdgeRelease;
 use App\Updater\UpdateEnv;
 
 $options = cli_options($argv);
@@ -88,6 +89,24 @@ foreach (['windows-setup' => 'the installer (setup.exe)', 'windows-agent' => 'th
         (string) (Setting::get('edge.' . $kind . '.sha256', null) ?? '?'),
         version_compare($version, $panelVersion, '>') ? '   ← NEWER than this panel: not built by this edge' : ''
     ));
+}
+
+// From 1.9.7-dev.23 nothing is published unless the edge's own release key
+// signed it; what arrived with the shared secret alone is held, or refused.
+if (method_exists(EdgeRelease::class, 'trustedReleaseKey')) {
+    $trusted = EdgeRelease::trustedReleaseKey();
+    cli_out('');
+    cli_out('  Trusted edge release key: ' . ($trusted === '' ? 'none yet' : EdgeRelease::fingerprint($trusted)));
+    foreach (EdgeRelease::held() as $kind => $upload) {
+        cli_out(sprintf(
+            '    waiting for an administrator: %s %s, signed by %s%s, received %s UTC',
+            $kind,
+            (string) $upload['version'],
+            (string) $upload['fingerprint'],
+            $upload['other_key'] ? '  ← NOT the trusted key: discard it unless you replaced the edge' : '',
+            (string) $upload['received_at']
+        ));
+    }
 }
 
 $rows = DB::select(

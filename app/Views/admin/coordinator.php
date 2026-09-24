@@ -4,6 +4,8 @@
 /** @var string $fallback_default */
 /** @var bool $has_signing_key */
 /** @var list<string> $problems */
+/** @var string $release_key fingerprint of the trusted edge release key, or '' */
+/** @var array<string,array<string,mixed>> $held uploads waiting for an administrator */
 declare(strict_types=1);
 \App\Core\View::layout('layouts.app');
 
@@ -108,6 +110,71 @@ declare(strict_types=1);
                 </p>
             </div>
         <?php endif; ?>
+    </div>
+
+    <div class="card-body">
+        <h3>What the edge publishes</h3>
+        <p class="text-muted">
+            The Windows installer and the agent update this panel hands out are published only when
+            the edge server's own release key signed them. The shared secret alone is not enough:
+            anything else waits here for you, and no device or customer is offered it.
+        </p>
+        <table class="table table-compact">
+            <tbody>
+                <tr>
+                    <th>Trusted edge key</th>
+                    <td>
+                        <?php if ($release_key !== ''): ?>
+                            <code><?= e($release_key) ?></code>
+                        <?php else: ?>
+                            none yet — the edge's first upload waits for you here
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+
+        <?php
+        $kindLabels = [
+            'windows-setup' => 'The Windows installer',
+            'windows-agent' => 'The agent update',
+            'windows-pack'  => 'The Windows pack',
+        ];
+        ?>
+        <?php foreach ($held as $kind => $upload): ?>
+            <div class="alert <?= $upload['other_key'] ? 'alert-error' : 'alert-warning' ?>">
+                <strong>
+                    <?= e($kindLabels[$kind] ?? $kind) ?> <?= e((string) $upload['version']) ?> is waiting for you.
+                </strong>
+                <p>
+                    Signed by edge key <code><?= e((string) $upload['fingerprint']) ?></code>,
+                    received <?= e(local_time((string) $upload['received_at'])) ?>.
+                </p>
+                <?php if ($upload['other_key']): ?>
+                    <p>
+                        <strong>That is not the key this panel trusts.</strong> Unless you have
+                        replaced or reinstalled the edge server, someone else signed this: discard it,
+                        and run <code>sudo akconnect-rotate-secret</code> on the edge server.
+                    </p>
+                <?php endif; ?>
+                <p>Before you approve it, run this on the edge server and check it prints the same fingerprint:</p>
+                <pre><code>sudo akconnect-coordinator release-key public /etc/akconnect/release-signing.key</code></pre>
+                <div class="form-actions">
+                    <form method="post" action="<?= e(url('admin/coordinator/held/approve')) ?>" style="display:inline"
+                          onsubmit="return confirm('Trust edge key <?= e((string) $upload['fingerprint']) ?> and publish this?\n\nEvery upload that key signs will then publish by itself.');">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="kind" value="<?= e((string) $kind) ?>">
+                        <input type="hidden" name="fingerprint" value="<?= e((string) $upload['fingerprint']) ?>">
+                        <button type="submit" class="btn btn-primary">The fingerprint matches — trust this key and publish</button>
+                    </form>
+                    <form method="post" action="<?= e(url('admin/coordinator/held/discard')) ?>" style="display:inline">
+                        <?= csrf_field() ?>
+                        <input type="hidden" name="kind" value="<?= e((string) $kind) ?>">
+                        <button type="submit" class="btn btn-danger">Discard</button>
+                    </form>
+                </div>
+            </div>
+        <?php endforeach; ?>
     </div>
 
     <form method="post" action="<?= e(url('admin/coordinator')) ?>" class="form">

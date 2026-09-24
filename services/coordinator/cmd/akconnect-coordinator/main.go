@@ -10,6 +10,7 @@
 //
 //	akconnect-coordinator serve --listen :8443 --panel https://net.example.com
 //	akconnect-coordinator keygen
+//	akconnect-coordinator release-key init|public|sign …   (see releasekey.go)
 //
 // Configuration comes from flags or the environment:
 //
@@ -57,6 +58,8 @@ func main() {
 		err = runServe(os.Args[2:])
 	case "keygen":
 		err = runKeygen()
+	case "release-key":
+		err = runReleaseKey(os.Args[2:], os.Stdout)
 	case "version", "--version", "-v":
 		fmt.Printf("akconnect-coordinator %s\n", version)
 	case "help", "--help", "-h":
@@ -86,6 +89,11 @@ func usage() {
   keygen   Generate an X25519 keypair. The private half goes in
            AKCONNECT_COORDINATOR_KEY; the public half goes in the panel's
            coordinator.public_key so agents know what to seal to.
+
+  release-key init|public <keyfile>
+  release-key sign <keyfile> <kind> <version> <file>
+           The edge's ed25519 key for what it publishes to the panel. Used
+           by deploy/upgrade-edge.sh; the key file is root's, mode 0600.
 
 Environment:
   AKCONNECT_COORDINATOR_KEY     base64 X25519 private key (required)

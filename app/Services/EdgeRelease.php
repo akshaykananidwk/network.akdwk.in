@@ -47,6 +47,15 @@ final class EdgeRelease
     /** Artefacts this panel will accept and serve. */
     public const KINDS = ['windows-pack', 'windows-setup', 'windows-agent'];
 
+    /** The edge release key uploads must be signed with (hex). */
+    private const TRUSTED_KEY = 'edge.release_key';
+
+    /** An upload waiting for an administrator, per kind (JSON). */
+    private const HELD = 'edge.held.';
+
+    /** Where held uploads wait. Never served. */
+    private const HELD_DIR = 'storage/downloads/held';
+
     /**
      * What the edge should build.
      *
@@ -75,6 +84,14 @@ final class EdgeRelease
             // the full run, as it always did.
             'published_setup' => (string) (self::current('windows-setup')['version'] ?? ''),
             'published_agent' => (string) (self::current('windows-agent')['version'] ?? ''),
+            // What is waiting for an administrator, and under which edge key
+            // (1.9.7-dev.23), so an edge whose own uploads are waiting says so
+            // instead of building and uploading them again every hour. The
+            // fingerprint of a public key; nothing here is secret.
+            'held_setup'       => (string) (self::heldRecord('windows-setup')['version'] ?? ''),
+            'held_agent'       => (string) (self::heldRecord('windows-agent')['version'] ?? ''),
+            'held_fingerprint' => self::fingerprint((string) (self::heldRecord('windows-agent')['key']
+                ?? self::heldRecord('windows-setup')['key'] ?? '')),
         ];
     }
 
@@ -247,7 +264,9 @@ final class EdgeRelease
         string $sha256,
         int $offset,
         int $total,
-        string $bytes
+        string $bytes,
+        string $edgeKey = '',
+        string $edgeSignature = ''
     ): array {
         if (!in_array($kind, self::KINDS, true)) {
             throw new UpdateException('Unknown artefact kind: ' . $kind);
@@ -308,9 +327,44 @@ final class EdgeRelease
             throw new UpdateException('The uploaded artefact does not match its checksum; discarded.');
         }
 
-        $final = $dir . '/' . self::filename($kind, $version);
-        if (!rename($partial, $final)) {
+        // Whose upload is this? The shared secret only says it came from
+        // something that holds the shared secret — which, since 1.9.7-dev.21
+        // printed it, may be anyone. What is published has to carry the
+        // edge's own signature, under the one edge key this panel was told to
+        // trust by someone with root on it or by an administrator.
+        $verdict = self::judge($kind, $version, $sha256, $edgeKey, $edgeSignature);
+
+        if ($verdict['action'] === 'refuse') {
             @unlink($partial);
+            Logger::warning('security', 'Edge upload refused: not signed by the trusted edge key', [
+                'kind'    => $kind,
+                'version' => $version,
+                'sha256'  => $sha256,
+                'reason'  => $verdict['reason'],
+            ]);
+
+            throw new UpdateException($verdict['message']);
+        }
+
+        if ($verdict['action'] === 'hold') {
+            return self::hold($kind, $version, $sha256, $total, $partial, $edgeKey, $edgeSignature, $verdict);
+        }
+
+        return self::publish($kind, $version, $sha256, $total, $partial);
+    }
+
+    /**
+     * Put a verified upload where devices and customers will get it.
+     *
+     * @return array<string,mixed>
+     * @throws UpdateException
+     */
+    private static function publish(string $kind, string $version, string $sha256, int $total, string $source): array
+    {
+        $dir = APP_ROOT . '/' . self::DIR;
+        $final = $dir . '/' . self::filename($kind, $version);
+        if (!rename($source, $final)) {
+            @unlink($source);
 
             throw new UpdateException('Cannot put the artefact in place.');
         }
@@ -345,6 +399,321 @@ final class EdgeRelease
             'sha256'   => $sha256,
             'size'     => $total,
         ];
+    }
+
+    // ------------------------------------------------- the edge's own key
+
+    /**
+     * What an edge signs, and what is checked here. The same string is built
+     * in services/coordinator/cmd/akconnect-coordinator/releasekey.go; the
+     * prefix keeps the signature from meaning anything anywhere else.
+     */
+    public static function artifactMessage(string $kind, string $version, string $sha256): string
+    {
+        return "akconnect-edge-artifact/v1\n" . $kind . "\n" . $version . "\n" . $sha256;
+    }
+
+    /**
+     * What an administrator compares by eye with what the edge prints:
+     * the first 80 bits of sha256 over the raw key, in groups of four.
+     * `akconnect-coordinator release-key public` prints the same.
+     */
+    public static function fingerprint(string $publicKeyHex): string
+    {
+        if (preg_match('/^[0-9a-f]{64}$/', $publicKeyHex) !== 1) {
+            return '';
+        }
+
+        return implode(' ', str_split(substr(hash('sha256', (string) hex2bin($publicKeyHex)), 0, 20), 4));
+    }
+
+    /** The edge release key this panel publishes under, lowercase hex, or ''. */
+    public static function trustedReleaseKey(): string
+    {
+        $key = strtolower(trim((string) (Setting::get(self::TRUSTED_KEY, null) ?? '')));
+
+        return preg_match('/^[0-9a-f]{64}$/', $key) === 1 ? $key : '';
+    }
+
+    /**
+     * Trust an edge's release key.
+     *
+     * Two callers, and only two: cli/edge-trust.php, which is root on this
+     * machine (upgrade-edge.sh runs it when the panel is on the edge's own
+     * machine), and an administrator approving a held upload. Never anything
+     * that arrives over the API: the shared secret is exactly the credential
+     * this key exists to not depend on.
+     *
+     * @return string the key's fingerprint
+     * @throws UpdateException
+     */
+    public static function trustReleaseKey(string $publicKeyHex, string $by): string
+    {
+        $key = strtolower(trim($publicKeyHex));
+        if (preg_match('/^[0-9a-f]{64}$/', $key) !== 1) {
+            throw new UpdateException('That is not an edge release key (64 hex characters).');
+        }
+
+        $previous = self::trustedReleaseKey();
+        if ($previous === $key) {
+            return self::fingerprint($key);
+        }
+
+        Setting::set(self::TRUSTED_KEY, $key);
+        Setting::flushCache();
+
+        Logger::notice('security', 'Edge release key trusted', [
+            'fingerprint' => self::fingerprint($key),
+            'replaces'    => $previous === '' ? null : self::fingerprint($previous),
+            'by'          => $by,
+        ]);
+
+        return self::fingerprint($key);
+    }
+
+    /**
+     * Publish, hold or refuse a complete, checksum-verified upload.
+     *
+     *   - signed by the trusted key                → published
+     *   - signed, by a key this panel does not trust (none trusted yet, or
+     *     another one)                              → held for an administrator
+     *   - no valid signature at all                  → refused
+     *
+     * Every edge from 1.9.7-dev.23 signs, so an unsigned upload is either an
+     * older edge — which builds only an older release than this panel, and is
+     * brought up to date by the timer — or somebody with the shared secret.
+     *
+     * @return array{action:string,reason:string,message:string,key:string}
+     */
+    private static function judge(string $kind, string $version, string $sha256, string $edgeKey, string $edgeSignature): array
+    {
+        $key = strtolower(trim($edgeKey));
+        $signed = preg_match('/^[0-9a-f]{64}$/', $key) === 1
+            && preg_match('/^[0-9a-f]{128}$/', strtolower(trim($edgeSignature))) === 1
+            && Crypto::verifySignature(self::artifactMessage($kind, $version, $sha256), strtolower(trim($edgeSignature)), $key);
+
+        if (!$signed) {
+            return [
+                'action'  => 'refuse',
+                'reason'  => $edgeSignature === '' ? 'unsigned' : 'bad_signature',
+                'message' => 'Refused: this upload does not carry a valid edge signature. An edge on '
+                    . '1.9.7-dev.23 or later signs what it publishes; the shared secret alone is not enough.',
+                'key'     => '',
+            ];
+        }
+
+        $trusted = self::trustedReleaseKey();
+
+        if ($trusted !== '' && hash_equals($trusted, $key)) {
+            return ['action' => 'publish', 'reason' => 'trusted', 'message' => '', 'key' => $key];
+        }
+
+        return [
+            'action'  => 'hold',
+            'reason'  => $trusted === '' ? 'no_trusted_key' : 'other_key',
+            'message' => $trusted === ''
+                ? 'Held: this panel trusts no edge key yet. An administrator approves it under Platform → Coordinator.'
+                : 'Held: signed by edge key ' . self::fingerprint($key) . ', not the trusted '
+                    . self::fingerprint($trusted) . '. An administrator decides under Platform → Coordinator.',
+            'key'     => $key,
+        ];
+    }
+
+    /**
+     * Keep an upload that nobody has vouched for yet, out of reach.
+     *
+     * One per kind; a newer one replaces it. Never served, never registered as
+     * an agent release, until approveHeld().
+     *
+     * @param array{action:string,reason:string,message:string,key:string} $verdict
+     * @return array<string,mixed>
+     * @throws UpdateException
+     */
+    private static function hold(
+        string $kind,
+        string $version,
+        string $sha256,
+        int $total,
+        string $source,
+        string $edgeKey,
+        string $edgeSignature,
+        array $verdict
+    ): array {
+        $dir = APP_ROOT . '/' . self::HELD_DIR;
+        if (!is_dir($dir) && !mkdir($dir, 0770, true) && !is_dir($dir)) {
+            @unlink($source);
+
+            throw new UpdateException('Cannot create ' . self::HELD_DIR);
+        }
+
+        $previous = self::heldRecord($kind);
+        $file = $kind . '-' . $sha256 . '.bin';
+
+        if (!rename($source, $dir . '/' . $file)) {
+            @unlink($source);
+
+            throw new UpdateException('Cannot keep the held upload.');
+        }
+        @chmod($dir . '/' . $file, 0640);
+
+        if ($previous !== null && $previous['file'] !== $file) {
+            @unlink($dir . '/' . $previous['file']);
+        }
+
+        Setting::set(self::HELD . $kind, (string) json_encode([
+            'kind'        => $kind,
+            'version'     => $version,
+            'sha256'      => $sha256,
+            'size'        => $total,
+            'file'        => $file,
+            'key'         => strtolower(trim($edgeKey)),
+            'signature'   => strtolower(trim($edgeSignature)),
+            'reason'      => $verdict['reason'],
+            'received_at' => gmdate('Y-m-d H:i:s'),
+        ], JSON_UNESCAPED_SLASHES));
+        Setting::flushCache();
+
+        Logger::warning('security', 'Edge upload held for an administrator', [
+            'kind'        => $kind,
+            'version'     => $version,
+            'sha256'      => $sha256,
+            'fingerprint' => self::fingerprint(strtolower(trim($edgeKey))),
+            'reason'      => $verdict['reason'],
+        ]);
+
+        return [
+            'complete'    => true,
+            'held'        => true,
+            'reason'      => $verdict['reason'],
+            'message'     => $verdict['message'],
+            'fingerprint' => self::fingerprint(strtolower(trim($edgeKey))),
+        ];
+    }
+
+    /**
+     * @return array<string,mixed>|null
+     */
+    private static function heldRecord(string $kind): ?array
+    {
+        $raw = (string) (Setting::get(self::HELD . $kind, null) ?? '');
+        if ($raw === '') {
+            return null;
+        }
+
+        $record = json_decode($raw, true);
+        if (!is_array($record) || !isset($record['file'], $record['sha256'], $record['version'], $record['key'])
+            || basename((string) $record['file']) !== (string) $record['file']) {
+            return null;
+        }
+
+        return $record;
+    }
+
+    /**
+     * Uploads waiting for an administrator, for the Coordinator page and the
+     * audit.
+     *
+     * @return array<string,array<string,mixed>> kind => record
+     */
+    public static function held(): array
+    {
+        $trusted = self::trustedReleaseKey();
+        $out = [];
+
+        foreach (self::KINDS as $kind) {
+            $record = self::heldRecord($kind);
+            if ($record === null) {
+                continue;
+            }
+
+            $record['fingerprint'] = self::fingerprint((string) $record['key']);
+            $record['other_key'] = $trusted !== '' && !hash_equals($trusted, (string) $record['key']);
+            $out[$kind] = $record;
+        }
+
+        return $out;
+    }
+
+    /**
+     * An administrator vouches for a held upload: its key becomes the trusted
+     * edge key, and it is published.
+     *
+     * The fingerprint the administrator was shown is passed back and must
+     * match, so a click cannot approve a different upload that replaced the
+     * one on screen in the meantime. Everything is checked again: the file's
+     * digest and the signature over it.
+     *
+     * @return array<string,mixed>
+     * @throws UpdateException
+     */
+    public static function approveHeld(string $kind, string $shownFingerprint, string $by): array
+    {
+        $record = in_array($kind, self::KINDS, true) ? self::heldRecord($kind) : null;
+        if ($record === null) {
+            throw new UpdateException('Nothing of that kind is waiting for approval.');
+        }
+
+        $key = (string) $record['key'];
+        if (self::fingerprint($key) === '' || !hash_equals(self::fingerprint($key), trim($shownFingerprint))) {
+            throw new UpdateException('The upload waiting now is not the one you approved; look again.');
+        }
+
+        $path = APP_ROOT . '/' . self::HELD_DIR . '/' . $record['file'];
+        $sha256 = (string) $record['sha256'];
+        $version = (string) $record['version'];
+
+        if (!is_file($path) || !hash_equals($sha256, (string) hash_file('sha256', $path))) {
+            self::forgetHeld($kind, $record);
+
+            throw new UpdateException('The held file is missing or has changed; discarded.');
+        }
+
+        if (!Crypto::verifySignature(self::artifactMessage($kind, $version, $sha256), (string) $record['signature'], $key)) {
+            self::forgetHeld($kind, $record);
+
+            throw new UpdateException('The held upload\'s signature does not verify; discarded.');
+        }
+
+        self::trustReleaseKey($key, $by);
+
+        Setting::set(self::HELD . $kind, null);
+        Setting::flushCache();
+
+        $result = self::publish($kind, $version, $sha256, (int) filesize($path), $path);
+
+        Logger::notice('security', 'Held edge upload approved and published', [
+            'kind'        => $kind,
+            'version'     => $version,
+            'fingerprint' => self::fingerprint($key),
+            'by'          => $by,
+        ]);
+
+        return $result;
+    }
+
+    /** Throw a held upload away. */
+    public static function discardHeld(string $kind, string $by): void
+    {
+        $record = in_array($kind, self::KINDS, true) ? self::heldRecord($kind) : null;
+        if ($record === null) {
+            return;
+        }
+
+        self::forgetHeld($kind, $record);
+
+        Logger::notice('security', 'Held edge upload discarded', [
+            'kind'    => $kind,
+            'version' => (string) $record['version'],
+            'by'      => $by,
+        ]);
+    }
+
+    /** @param array<string,mixed> $record */
+    private static function forgetHeld(string $kind, array $record): void
+    {
+        @unlink(APP_ROOT . '/' . self::HELD_DIR . '/' . $record['file']);
+        Setting::set(self::HELD . $kind, null);
+        Setting::flushCache();
     }
 
     /**

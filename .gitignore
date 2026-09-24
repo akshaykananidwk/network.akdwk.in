@@ -68,3 +68,4 @@ Thumbs.db
 
 # Lab harness scratch: binaries, logs and agent state, rebuilt each run.
 /services/lab/.run/
+__pycache__/

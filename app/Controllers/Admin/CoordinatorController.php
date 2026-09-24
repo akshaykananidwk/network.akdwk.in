@@ -5,8 +5,11 @@ declare(strict_types=1);
 namespace App\Controllers\Admin;
 
 use App\Controllers\Controller;
+use App\Core\Auth;
 use App\Core\Request;
 use App\Core\Response;
+use App\Core\UpdateException;
+use App\Services\AuditService;
 use App\Services\CoordinatorSettings;
 use App\Services\EdgeRelease;
 
@@ -31,6 +34,44 @@ final class CoordinatorController extends Controller
         CoordinatorSettings::save($request->all());
 
         return $this->redirect('admin/coordinator', 'Coordinator settings saved.');
+    }
+
+    /**
+     * Publish an upload that was held because no trusted edge key signed it.
+     *
+     * The administrator is vouching for the edge key that signed it, by the
+     * fingerprint they compared with what the edge prints; from then on that
+     * edge's uploads publish by themselves. The fingerprint comes back with
+     * the form so the approval is for what was on the screen.
+     */
+    public function approveHeld(Request $request): Response
+    {
+        $kind = (string) $request->input('kind', '');
+        $fingerprint = (string) $request->input('fingerprint', '');
+        $by = (string) (Auth::user()['email'] ?? 'an administrator');
+
+        try {
+            EdgeRelease::approveHeld($kind, $fingerprint, $by);
+        } catch (UpdateException $e) {
+            AuditService::log('edge.upload.approve', 'edge', null, null, ['kind' => $kind, 'error' => $e->getMessage()], 'failure');
+
+            return $this->redirect('admin/coordinator', '', $e->getMessage());
+        }
+
+        AuditService::log('edge.upload.approve', 'edge', null, null, ['kind' => $kind, 'fingerprint' => $fingerprint]);
+
+        return $this->redirect('admin/coordinator', 'Published, and edge key ' . $fingerprint
+            . ' is now trusted: its uploads publish by themselves from here on.');
+    }
+
+    /** Throw a held upload away. */
+    public function discardHeld(Request $request): Response
+    {
+        $kind = (string) $request->input('kind', '');
+        EdgeRelease::discardHeld($kind, (string) (Auth::user()['email'] ?? 'an administrator'));
+        AuditService::log('edge.upload.discard', 'edge', null, null, ['kind' => $kind]);
+
+        return $this->redirect('admin/coordinator', 'Discarded. Nothing was published.');
     }
 
     private function render(): Response
@@ -61,6 +102,10 @@ final class CoordinatorController extends Controller
             // assumed that was all of it is how 1.9.1's two protocol fixes sat
             // unapplied on a live deployment.
             'edge'              => EdgeRelease::status(),
+            // What the edge publishes is only published when the edge's own
+            // release key signed it; the rest waits here (1.9.7-dev.23).
+            'release_key'       => EdgeRelease::fingerprint(EdgeRelease::trustedReleaseKey()),
+            'held'              => EdgeRelease::held(),
         ]);
     }
 }

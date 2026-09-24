@@ -157,6 +157,8 @@ $router->group('/admin', ['maintenance', 'auth'], static function (Router $route
 
     $router->get('/coordinator', 'Admin\CoordinatorController@index', ['can:platform.settings'], 'admin.coordinator');
     $router->post('/coordinator', 'Admin\CoordinatorController@update', ['csrf', 'can:platform.settings']);
+    $router->post('/coordinator/held/approve', 'Admin\CoordinatorController@approveHeld', ['csrf', 'can:platform.settings']);
+    $router->post('/coordinator/held/discard', 'Admin\CoordinatorController@discardHeld', ['csrf', 'can:platform.settings']);
 
     $router->get('/updates', 'Admin\UpdateController@index', ['can:update.manage'], 'admin.updates');
     $router->post('/updates/settings', 'Admin\UpdateController@saveSettings', ['csrf', 'can:update.manage']);

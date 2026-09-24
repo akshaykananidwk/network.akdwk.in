@@ -40,6 +40,7 @@ final class ProductionDefectTests
         self::cliActsAsTreeOwner();
         self::maintenanceBypassLink();
         self::secretsStayOffScreens();
+        self::theSharedSecretCannotChooseTheEdgeKey();
         self::installerRootNeverActsInsideTheWebTree();
     }
 
@@ -1441,6 +1442,52 @@ PHP;
      * into a chat from there. And several scripts put secrets where ps shows
      * them to every user on the machine: jq --arg, openssl -macopt, mysql -e.
      */
+    /**
+     * 1.9.7-dev.23: which edge key the panel trusts is never decided by
+     * anything the shared secret can reach.
+     *
+     * Uploads publish only under the trusted edge release key. If any request
+     * authenticated with the coordinator's secret could set that key, or
+     * approve a held upload, the secret would simply bring its own key and the
+     * hole would be open again. So: only the admin controller (CSRF and
+     * platform.settings) and the CLI call them.
+     */
+    private static function theSharedSecretCannotChooseTheEdgeKey(): void
+    {
+        TestCase::group('1.9.7-dev.23 — the shared secret cannot choose the edge key');
+
+        $reach = [];
+        $files = array_merge(
+            glob(APP_ROOT . '/app/Controllers/Api/*.php') ?: [],
+            glob(APP_ROOT . '/app/Middleware/*.php') ?: [],
+            glob(APP_ROOT . '/app/Controllers/*.php') ?: []
+        );
+        foreach ($files as $file) {
+            if (preg_match('/\b(trustReleaseKey|approveHeld)\s*\(/', (string) file_get_contents($file)) === 1) {
+                $reach[] = basename($file);
+            }
+        }
+        TestCase::assert($reach === [], 'nothing on the API, and no middleware, trusts a key or approves an upload',
+            implode(', ', $reach));
+
+        $routes = (string) file_get_contents(APP_ROOT . '/app/routes.php');
+        $ok = preg_match_all("~->post\('/coordinator/held/(approve|discard)',[^\n]*\['csrf', 'can:platform\.settings'\]\);~", $routes) === 2;
+        TestCase::assert($ok, 'approving and discarding are administrator actions, CSRF-protected');
+
+        $service = (string) file_get_contents(APP_ROOT . '/app/Services/EdgeRelease.php');
+        TestCase::assert(
+            str_contains($service, "self::judge(\$kind, \$version, \$sha256, \$edgeKey, \$edgeSignature)")
+                && !preg_match('/receiveChunk[\s\S]*?self::registerAgentRelease\(/', (string) preg_replace('/private static function publish[\s\S]*$/', '', $service)),
+            'an upload reaches publication only through the signature verdict'
+        );
+
+        $script = (string) file_get_contents(APP_ROOT . '/deploy/upgrade-edge.sh');
+        TestCase::assert(
+            str_contains($script, 'not uploading it unsigned') && str_contains($script, 'release-key sign "$RELEASE_KEY"'),
+            'upgrade-edge.sh signs every upload, and uploads nothing unsigned to a panel that checks'
+        );
+    }
+
     private static function secretsStayOffScreens(): void
     {
         TestCase::group('Defect — no secret is printed or put on a command line');

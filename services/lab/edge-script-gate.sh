@@ -1756,20 +1756,61 @@ group "an edge already on the panel's release"
 # file on disk, read from /proc/<pid>/exe, and a shell script's process is the
 # shell.
 mkdir -p "$WORK/current-bin" "$WORK/units-current" "$WORK/fake-svc"
+# release-key as the real coordinator does it (1.9.7-dev.23): the same message,
+# the same file format, the same output. What the gate checks is the script
+# around it; the signer itself is tested in services/coordinator.
 cat > "$WORK/fake-svc/main.go" <<'GO'
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
 var name, version string
 
+func key(path string) ed25519.PrivateKey {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		seed := make([]byte, 32)
+		rand.Read(seed)
+		if err := os.WriteFile(path, []byte(hex.EncodeToString(seed)+"\n"), 0o600); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		raw, _ = os.ReadFile(path)
+	}
+	seed, _ := hex.DecodeString(strings.TrimSpace(string(raw)))
+	return ed25519.NewKeyFromSeed(seed)
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "version" {
 		fmt.Println(name, version)
+		return
+	}
+	if len(os.Args) > 3 && os.Args[1] == "release-key" {
+		k := key(os.Args[3])
+		pub := hex.EncodeToString(k.Public().(ed25519.PublicKey))
+		sum := sha256.Sum256(k.Public().(ed25519.PublicKey))
+		fp := hex.EncodeToString(sum[:10])
+		fp = fp[0:4] + " " + fp[4:8] + " " + fp[8:12] + " " + fp[12:16] + " " + fp[16:20]
+		switch os.Args[2] {
+		case "init":
+			fmt.Println(pub, "existing", fp)
+		case "sign":
+			body, _ := os.ReadFile(os.Args[6])
+			d := sha256.Sum256(body)
+			digest := hex.EncodeToString(d[:])
+			msg := "akconnect-edge-artifact/v1\n" + os.Args[4] + "\n" + os.Args[5] + "\n" + digest
+			fmt.Println(digest, hex.EncodeToString(ed25519.Sign(k, []byte(msg))), pub)
+		}
 		return
 	}
 	for {
@@ -1918,6 +1959,139 @@ if grep -q "restart akconnect" "$WORK/systemctl.log" \
 else
     bad "a changed unit file was not picked up without a rebuild" \
         "$(grep -E 'unit files|building|services current' "$WORK/edge-unitdiff.out" | head -3); $(grep restart "$WORK/systemctl.log" | head -2)"
+fi
+
+# ---- 1.9.7-dev.23: what the edge publishes, it signs with its own key.
+#
+# The panel published whatever arrived with the shared secret — which the
+# installer printed, and which ended up in a chat — and signed an uploaded
+# agent and offered it to every device. Now every upload carries the edge's
+# release-key signature over kind, version and digest; nothing is uploaded
+# without one; and an upload the panel is holding for an administrator is not
+# built and sent again every hour.
+group "what the edge publishes, it signs with its own release key"
+
+SIGN_SEED="$WORK/sign-seed"
+git init --quiet -b main "$SIGN_SEED"
+mkdir -p "$SIGN_SEED/deploy/systemd" "$SIGN_SEED/services/kit"
+cp "$REPO"/deploy/lib-edge-*.sh "$REPO/deploy/publish-artifact.py" "$SIGN_SEED/deploy/"
+cp "$SCRIPT" "$SIGN_SEED/deploy/upgrade-edge.sh"
+printf '9.9.9-capture\n' > "$SIGN_SEED/VERSION"
+cat > "$SIGN_SEED/services/kit/build-windows-pack.sh" <<'BUILDER'
+#!/bin/sh
+# Stand-in pack builder: writes the two files the real one does, into
+# AKCONNECT_BUILD_DIR, in a second rather than ten minutes.
+set -e
+mkdir -p "$AKCONNECT_BUILD_DIR/pack"
+printf 'MZ setup %s\n' "$1" > "$AKCONNECT_BUILD_DIR/pack/akconnect-setup.exe"
+printf 'MZ agent %s\n' "$1" > "$AKCONNECT_BUILD_DIR/pack/akconnect-agent.exe"
+BUILDER
+chmod +x "$SIGN_SEED/services/kit/build-windows-pack.sh"
+git -C "$SIGN_SEED" add -A >/dev/null
+git -C "$SIGN_SEED" -c user.email=g@l -c user.name=gate commit --quiet -m sign
+SIGN_SHA="$(git -C "$SIGN_SEED" rev-parse HEAD)"
+git clone --quiet --bare "$SIGN_SEED" "$WORK/sign-origin.git"
+: > "$WORK/sign-wintun.zip"
+
+cat > "$WORK/verify-uploads.php" <<'PHP'
+<?php
+// Every upload in a capture file must carry an ed25519 signature, by the key
+// it names, over "akconnect-edge-artifact/v1\n<kind>\n<version>\n<sha256>".
+// Prints the kinds that verified; exits 1 at the first that does not.
+$kinds = [];
+foreach (file($argv[1]) ?: [] as $line) {
+    $e = json_decode($line, true);
+    if (!is_array($e) || !isset($e['kind'])) {
+        continue;
+    }
+    $message = "akconnect-edge-artifact/v1\n" . $e['kind'] . "\n" . $e['version'] . "\n" . $e['sha256'];
+    try {
+        $ok = sodium_crypto_sign_verify_detached(
+            (string) hex2bin((string) ($e['edge_signature'] ?? '')),
+            $message,
+            (string) hex2bin((string) ($e['edge_key'] ?? ''))
+        );
+    } catch (Throwable) {
+        $ok = false;
+    }
+    if (!$ok) {
+        echo 'unsigned or badly signed: ', $e['kind'], "\n";
+        exit(1);
+    }
+    $kinds[$e['kind']] = $e['edge_key'];
+}
+ksort($kinds);
+echo implode(' ', array_keys($kinds)), ' ', implode(' ', array_unique(array_values($kinds))), "\n";
+PHP
+
+sign_case() {
+    local label=$1
+    shift
+    mkdir -p "$WORK/units-$label"
+    : > "$WORK/units-$label/akconnect-upgrade.timer"
+    rm -rf "$WORK/sign-clone-$label"
+    git clone --quiet "$WORK/sign-origin.git" "$WORK/sign-clone-$label" 2>/dev/null
+    WINTUN_ZIP="$WORK/sign-wintun.zip" EDGE_BIN="$WORK/current-bin" EDGE_ARGS=" " \
+        run_edge "$label" "$WORK/sign-clone-$label" "$@" --commit "$SIGN_SHA" --branch main
+}
+plain() { sed 's/\x1b\[[0-9;]*m//g' "$WORK/edge-$1.out"; }
+
+# 1. A panel that publishes: both uploads signed, by one key, made here, root's.
+sign_case signs 8820 --published 9.9.8 --accept
+VERIFIED="$(php "$WORK/verify-uploads.php" "$WORK/cap-signs.jsonl" 2>&1)"
+KEYFILE="$WORK/etc-signs/release-signing.key"
+if [ "$(printf '%s' "$VERIFIED" | cut -d' ' -f1-2)" = "windows-agent windows-setup" ] \
+        && [ "$(printf '%s' "$VERIFIED" | wc -w)" -eq 3 ]; then
+    ok "the installer and the agent are both uploaded with a valid edge signature, by one key"
+else
+    bad "an upload went out without a valid edge signature" "$VERIFIED; $(plain signs | grep -E 'release key|published|self-update' | head -3)"
+fi
+if [ -f "$KEYFILE" ] && [ "$(stat -c %a "$KEYFILE")" = "600" ] \
+        && plain signs | grep -qE "^\s+release key\s+PASS"; then
+    ok "the release key is made on the edge, mode 0600"
+else
+    bad "no release key, or one others can read" "$(ls -l "$KEYFILE" 2>&1)"
+fi
+if plain signs | grep -qE "^\s+published\s+PASS" && plain signs | grep -qE "^\s+self-update\s+PASS"; then
+    ok "and what the panel accepts is reported as published"
+else
+    bad "an accepted upload was not reported as published" "$(plain signs | grep -E 'published|self-update' | head -2)"
+fi
+if grep -q "$(tr -d '\n' < "$KEYFILE")" "$WORK/edge-signs.out" "$WORK/cap-signs.jsonl"; then
+    bad "the release key's private half left the key file"
+else
+    ok "and the private key is in neither the output nor anything sent"
+fi
+
+# 2. A panel that holds it: said so, and not called published.
+sign_case held 8821 --published 9.9.8 --held
+if [ "$EDGE_CODE" -ne 0 ] && plain held | grep -q "held: an administrator approves it under Platform" \
+        && ! plain held | grep -qE "^\s+published\s+PASS"; then
+    ok "an upload the panel holds is reported as waiting for an administrator, not as published"
+else
+    bad "a held upload was not reported as held" "exit $EDGE_CODE; $(plain held | grep -E 'published|self-update|held' | head -3)"
+fi
+
+# 3. Already waiting, from this edge: not built and uploaded again.
+mkdir -p "$WORK/etc-heldskip"
+FP="$( (umask 077; "$WORK/current-bin/akconnect-coordinator" release-key init "$WORK/etc-heldskip/release-signing.key") | cut -d' ' -f3-)"
+sign_case heldskip 8822 --published 9.9.8 --held --held-release 9.9.9-capture "$FP"
+if plain heldskip | grep -q "waiting for an administrator: Platform → Coordinator, edge key $FP" \
+        && ! grep -q "── building the Windows installer" "$WORK/edge-heldskip.out" \
+        && ! grep -q '/edge/artifact' "$WORK/cap-heldskip.jsonl"; then
+    ok "installers this edge already uploaded and the panel holds are not rebuilt every hour"
+else
+    bad "a held upload was built and sent again" "$(plain heldskip | grep -E 'installer|waiting|release key' | head -3)"
+fi
+
+# 4. No key, no upload — never an unsigned one instead.
+mkdir -p "$WORK/etc-nokey/release-signing.key"
+sign_case nokey 8823 --published 9.9.8 --accept
+if [ "$EDGE_CODE" -ne 0 ] && ! grep -q '/edge/artifact' "$WORK/cap-nokey.jsonl" \
+        && plain nokey | grep -q "nothing can be published without the release key"; then
+    ok "without a usable release key nothing is uploaded, and it says why"
+else
+    bad "an edge without its release key uploaded anyway, or said nothing" "$(grep -c artifact "$WORK/cap-nokey.jsonl") uploads; $(plain nokey | grep -E 'release key|installer' | head -2)"
 fi
 
 # A check that fails on an edge that IS on the release — here the relay's

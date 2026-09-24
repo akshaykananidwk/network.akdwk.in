@@ -24,6 +24,10 @@
 #   --check           say whether an upgrade is needed and exit
 #   --skip-pack       skip the Windows installer (faster; services only)
 #   --force           rebuild and restart even when already on the release
+#   --panel-dir DIR   the panel is installed in DIR on this machine: trust this
+#                     edge's release key there directly (see "the release key"
+#                     below). Once is enough; a getting-started.sh install
+#                     needs it never.
 #
 # It never touches /etc/akconnect and never touches the panel's config.php.
 # Keys and secrets are written once, by install-edge.sh, and read here only to
@@ -51,13 +55,14 @@ WINTUN_ZIP="${WINTUN_ZIP:-/var/cache/akconnect/wintun.zip}"
 # line reads as 0 and is therefore never handed over to, which is exactly the
 # property wanted: the guard and the revision were added together, so anything
 # lacking the revision also lacks the guard.
-SCRIPT_REVISION=4
+SCRIPT_REVISION=5
 
 # On by default since 1.9.5. --no-timer turns it off for an operator who
 # manages their own scheduling.
 INSTALL_TIMER=1
 CHECK_ONLY=0
 SKIP_PACK=0
+PANEL_DIR_OPT=""
 # Rebuild, reinstall and restart even when everything is already on the
 # panel's release. Without it a run that finds nothing to do says so and stops.
 FORCE=0
@@ -319,6 +324,7 @@ while [ $# -gt 0 ]; do
         --skip-pack)     SKIP_PACK=1; shift ;;
         --force)         FORCE=1; shift ;;
         --src) akconnect_need_value --src "$#"; SRC_DIR="$2"; shift 2 ;;
+        --panel-dir) akconnect_need_value --panel-dir "$#"; PANEL_DIR_OPT="$2"; shift 2 ;;
         # Refused after the hand-over is decided, not here — see
         # UNKNOWN_OPTIONS. Unless this copy was handed over to: it is the
         # release's own, and there is nobody newer to know the option.
@@ -326,7 +332,7 @@ while [ $# -gt 0 ]; do
             [ -n "${AKCONNECT_REEXEC:-}" ] && die "unknown option: $1
     Valid options are --check, --skip-pack, --force, --no-timer,
     --install-timer, --configure-apache, --no-configure-apache,
-    --unattended and --src <path>."
+    --unattended, --src <path> and --panel-dir <path>."
             UNKNOWN_OPTIONS+=("$1"); shift ;;
     esac
 done
@@ -658,11 +664,159 @@ json() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['data']
 # publish_artifact hands a built file to the panel and prints the address it
 # will be served from. The chunked, signed upload itself is in
 # publish-artifact.py — see the comment there for why it is not in shell.
+#
+# Signed with this edge's release key first. From 1.9.7-dev.23 the panel
+# publishes nothing on the shared secret alone: an upload the trusted key did
+# not sign is held for an administrator, and one with no signature is refused.
+# publish-artifact.py exits 3 when the panel held it.
 publish_artifact() {
     local kind=$1 file=$2
+    local digest="" signature="" public=""
+
+    # A panel whose release predates edge signatures neither checks nor wants
+    # one — see prepare_release_key.
+    if [ "$RELEASE_UNSIGNED" -eq 1 ]; then
+        AKCONNECT_COORDINATOR_SECRET="$SECRET" \
+            python3 "$SRC_DIR/deploy/publish-artifact.py" "$PANEL" "$kind" "$TARGET_VERSION" "$file"
+        return
+    fi
+
+    read -r digest signature public < <(
+        "$RELEASE_SIGNER" release-key sign "$RELEASE_KEY" "$kind" "$TARGET_VERSION" "$file"
+    ) || true
+
+    if [ -z "$signature" ] || [ -z "$public" ]; then
+        say "could not sign $file with $RELEASE_KEY; not uploading it unsigned."
+        return 1
+    fi
 
     AKCONNECT_COORDINATOR_SECRET="$SECRET" \
+    AKCONNECT_EDGE_KEY="$public" \
+    AKCONNECT_EDGE_SIGNATURE="$signature" \
         python3 "$SRC_DIR/deploy/publish-artifact.py" "$PANEL" "$kind" "$TARGET_VERSION" "$file"
+}
+
+# ---------------------------------------------------------- the release key
+#
+# The panel used to publish whatever installer or agent binary arrived with
+# the coordinator's shared secret — and sign the agent itself, and offer it to
+# every device as an update. The shared secret is in coordinator.env, the
+# installer printed it up to 1.9.7-dev.21, and a copy of it was pasted into a
+# chat. So from dev.23 the edge signs what it publishes with a key of its own,
+# which never leaves this machine and only root can read, and the panel
+# publishes only what the one edge key it trusts signed.
+#
+# Which key the panel trusts cannot be decided over the shared secret, or the
+# secret would simply bring its own key. It is decided here, by root, when the
+# panel is on this machine (getting-started.sh's state file says where, or
+# --panel-dir), and otherwise by an administrator approving the first upload
+# under Platform → Coordinator, after comparing the fingerprint with
+#
+#     sudo akconnect-coordinator release-key public /etc/akconnect/release-signing.key
+#
+# The signer is the coordinator binary: this machine has it at the target
+# release by the time anything is published, and Go's ed25519 is the one
+# implementation here nobody has to trust separately.
+RELEASE_KEY="$ETC_DIR/release-signing.key"
+RELEASE_SIGNER="$BIN_DIR/akconnect-coordinator"
+RELEASE_PUBLIC=""
+RELEASE_FINGERPRINT=""
+RELEASE_UNSIGNED=0
+# Set when the panel on this machine took the key and published what it was
+# holding from this edge — both installers, so there is nothing to rebuild.
+HELD_PUBLISHED=0
+
+prepare_release_key() {
+    local line
+
+    # The coordinator is built at the panel's release, so a coordinator that
+    # does not know release-key is a panel that predates edge signatures
+    # (before 1.9.7-dev.23): it ignores a signature and publishes what the
+    # shared secret sends, as it always did. Uploading to it the old way is
+    # its own rule, not a way round the new one — which lives in the panel.
+    # An installer re-run over an older panel is the case this is for.
+    line="$("$RELEASE_SIGNER" release-key 2>&1)"
+    case "$line" in
+        *"unknown command"*)
+            RELEASE_UNSIGNED=1
+            pass "release key" "not used: the panel's release, $TARGET_VERSION, predates edge signatures"
+            return 0
+            ;;
+    esac
+
+    if ! line="$(umask 077 && "$RELEASE_SIGNER" release-key init "$RELEASE_KEY" 2>&1)"; then
+        fail "release key" "$RELEASE_SIGNER could not make or read $RELEASE_KEY: $line"
+        return 1
+    fi
+
+    RELEASE_PUBLIC="${line%% *}"
+    RELEASE_FINGERPRINT="$(printf '%s\n' "$line" | cut -d' ' -f3-)"
+
+    case "$line" in
+        *" new "*) pass "release key" "made $RELEASE_KEY (root only), fingerprint $RELEASE_FINGERPRINT" ;;
+        *)         pass "release key" "fingerprint $RELEASE_FINGERPRINT" ;;
+    esac
+
+    trust_release_key_locally
+    return 0
+}
+
+# When the panel is on this machine, trust the key there directly: root here
+# is already everything the panel is. As the panel's own user, umask 022, with
+# the helper aimed at it the way getting-started.sh does it.
+trust_release_key_locally() {
+    local dir="$PANEL_DIR_OPT" web_user php="" helper out
+
+    if [ -z "$dir" ] && [ -f "$ETC_DIR/getting-started.state" ]; then
+        dir="$(sed -n 's/^AKCONNECT_PANEL_DIR=//p' "$ETC_DIR/getting-started.state" | head -1)"
+        php="$(sed -n 's/^AKCONNECT_PHP=//p' "$ETC_DIR/getting-started.state" | head -1)"
+    fi
+
+    if [ -z "$dir" ]; then
+        say "the panel is not on this machine as far as this script knows; the first upload"
+        say "waits for an administrator under Platform → Coordinator (fingerprint $RELEASE_FINGERPRINT)."
+        return 0
+    fi
+
+    if [ ! -f "$dir/config/config.php" ]; then
+        fail "release key trusted" "$dir is not an installed panel (no config/config.php)"
+        return 0
+    fi
+
+    web_user="$(stat -c %U "$dir" 2>/dev/null)"
+    if [ -z "$web_user" ] || [ "$web_user" = "root" ] || [ "$web_user" = "UNKNOWN" ]; then
+        fail "release key trusted" "$dir belongs to ${web_user:-nobody}, not to the user the panel runs as"
+        return 0
+    fi
+
+    if [ -z "$php" ] || [ ! -x "$php" ]; then
+        php="$(command -v php || true)"
+    fi
+    if [ -z "$php" ]; then
+        fail "release key trusted" "no php on this machine to run the panel's helper with"
+        return 0
+    fi
+
+    if [ -f "$dir/cli/edge-trust.php" ] && [ -f "$dir/cli/_root.php" ]; then
+        helper="$dir/cli/edge-trust.php"
+    else
+        helper="$SRC_DIR/cli/edge-trust.php"
+    fi
+
+    if out="$(sudo -H -u "$web_user" -- /bin/sh -c 'umask 022 && exec "$@"' trust_release_key \
+            "$php" "$helper" --root="$dir" --key="$RELEASE_PUBLIC" --publish-held 2>&1)"; then
+        pass "release key trusted" "by the panel in $dir"
+        printf '%s\n' "$out" | grep -v '^  trusted edge key' | sed 's/^ */    /' || true
+        case "$out" in
+            *"published the held windows-setup $TARGET_VERSION"*"published the held windows-agent $TARGET_VERSION"*|\
+            *"published the held windows-agent $TARGET_VERSION"*"published the held windows-setup $TARGET_VERSION"*)
+                HELD_PUBLISHED=1 ;;
+        esac
+    else
+        fail "release key trusted" "the panel in $dir would not take it: $(printf '%s' "$out" | tail -1)"
+    fi
+
+    return 0
 }
 
 # install_timer makes this script the thing that keeps the edge current.
@@ -964,7 +1118,7 @@ if [ "${#UNKNOWN_OPTIONS[@]}" -gt 0 ]; then
     die "unknown option: ${UNKNOWN_OPTIONS[0]}
     Valid options are --check, --skip-pack, --force, --no-timer,
     --install-timer, --configure-apache, --no-configure-apache,
-    --unattended and --src <path>."
+    --unattended, --src <path> and --panel-dir <path>."
 fi
 
 CURRENT_COORD="$("$BIN_DIR/akconnect-coordinator" version 2>/dev/null | awk '{print $NF}')"
@@ -1164,6 +1318,11 @@ running_its_binary() {
 # checks its services and its fallback and tells the panel what is running.
 PUBLISHED_SETUP="$(json "$RELEASE_JSON" published_setup)"
 PUBLISHED_AGENT="$(json "$RELEASE_JSON" published_agent)"
+# Uploads the panel is holding for an administrator (1.9.7-dev.23), and the
+# edge key that signed them. A panel older than that sends neither.
+HELD_SETUP="$(json "$RELEASE_JSON" held_setup)"
+HELD_AGENT="$(json "$RELEASE_JSON" held_agent)"
+HELD_FINGERPRINT="$(json "$RELEASE_JSON" held_fingerprint)"
 UNITS_DIR="${AKCONNECT_SYSTEMD_DIR:-/etc/systemd/system}"
 
 SERVICES_CURRENT=0
@@ -1425,6 +1584,15 @@ if [ "$SKIP_PACK" -eq 1 ]; then
     say "skipping the Windows installer (--skip-pack)"
 elif [ "$PACK_CURRENT" -eq 1 ]; then
     pass "windows installer" "$PANEL already serves the $TARGET_VERSION installers — not rebuilt"
+elif ! { step "the release key"; prepare_release_key; }; then
+    fail "windows installer" "not built: nothing can be published without the release key"
+elif [ "$HELD_PUBLISHED" -eq 1 ]; then
+    pass "windows installer" "the $TARGET_VERSION installers this edge uploaded earlier are published now — not rebuilt"
+elif [ "$FORCE" -ne 1 ] && [ "$HELD_SETUP" = "$TARGET_VERSION" ] && [ "$HELD_AGENT" = "$TARGET_VERSION" ] \
+        && [ -n "$RELEASE_FINGERPRINT" ] && [ "$HELD_FINGERPRINT" = "$RELEASE_FINGERPRINT" ]; then
+    # Already uploaded, by this edge, and waiting for an administrator. Not
+    # built and uploaded again every hour until somebody clicks.
+    fail "windows installer" "the $TARGET_VERSION installers are waiting for an administrator: Platform → Coordinator, edge key $RELEASE_FINGERPRINT"
 else
     step "building the Windows installer for $PANEL"
 
@@ -1477,11 +1645,14 @@ else
 
             step "publishing it on the panel"
 
-            if PACK_URL="$(publish_artifact "windows-setup" "$SETUP_EXE")"; then
-                pass "published" "$PACK_URL"
-            else
-                fail "published" "the panel would not accept the upload"
-            fi
+            PACK_URL="$(publish_artifact "windows-setup" "$SETUP_EXE")"
+            case $? in
+                0) pass "published" "$PACK_URL" ;;
+                3) PACK_URL=""
+                   fail "published" "held: an administrator approves it under Platform → Coordinator (edge key $RELEASE_FINGERPRINT)" ;;
+                *) PACK_URL=""
+                   fail "published" "the panel would not accept the upload" ;;
+            esac
 
             # The bare agent as well, as the windows-agent kind. That upload is
             # what the panel signs and offers to already-installed devices
@@ -1491,10 +1662,13 @@ else
 
             if [ ! -f "$AGENT_EXE" ]; then
                 fail "self-update" "the pack build left no akconnect-agent.exe to publish"
-            elif publish_artifact "windows-agent" "$AGENT_EXE" >/dev/null; then
-                pass "self-update" "installed devices will be offered $TARGET_VERSION"
             else
-                fail "self-update" "the panel would not accept the agent binary"
+                publish_artifact "windows-agent" "$AGENT_EXE" >/dev/null
+                case $? in
+                    0) pass "self-update" "installed devices will be offered $TARGET_VERSION" ;;
+                    3) fail "self-update" "held: no device is offered it until an administrator approves it under Platform → Coordinator" ;;
+                    *) fail "self-update" "the panel would not accept the agent binary" ;;
+                esac
             fi
         fi
     fi

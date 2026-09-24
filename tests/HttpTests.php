@@ -19,6 +19,7 @@ use App\Models\Plan;
 use App\Models\Tenant;
 use App\Models\User;
 use App\Services\CoordinatorSettings;
+use App\Services\EdgeRelease;
 use App\Services\DeviceService;
 use App\Services\NetworkService;
 
@@ -37,6 +38,9 @@ final class HttpTests
     private static string $baseUrl = '';
     /** @var array<string,mixed> */
     private static array $fixtures = [];
+
+    /** @var array{0:string,1:string} the upload tests' edge key: [public hex, raw secret] */
+    private static array $edgeKey = ['', ''];
 
     public static function run(string $baseUrl): void
     {
@@ -67,6 +71,8 @@ final class HttpTests
             self::deviceUpdateState();
             self::coordinatorSaysUnanswered();
             self::selfUpdate();
+            // 1.9.7-dev.23: the shared secret alone publishes nothing.
+            self::edgeUploadTrust();
         } finally {
             self::removeFixtures();
         }
@@ -584,7 +590,7 @@ final class HttpTests
         }
 
         try {
-            self::edgeUpgradeChecks($client, $secret);
+            self::withEdgeKey(static fn () => self::edgeUpgradeChecks($client, $secret));
         } finally {
             foreach ($before as $key => $value) {
                 Setting::set('edge.windows-setup.' . $key, $value === null ? null : (string) $value);
@@ -623,7 +629,7 @@ final class HttpTests
         $half = (int) (strlen($payload) / 2);
 
         foreach ([[0, substr($payload, 0, $half)], [$half, substr($payload, $half)]] as [$offset, $chunk]) {
-            $body = (string) json_encode([
+            $body = self::edgeSigned([
                 'kind'    => 'windows-setup',
                 'version' => '9.9.9-test',
                 'sha256'  => $digest,
@@ -658,7 +664,7 @@ final class HttpTests
         );
 
         // 5. Bytes that do not match the digest are refused, not published.
-        $body = (string) json_encode([
+        $body = self::edgeSigned([
             'kind'    => 'windows-setup',
             'version' => '9.9.9-test',
             'sha256'  => str_repeat('0', 64),
@@ -706,7 +712,7 @@ final class HttpTests
         }
 
         try {
-            self::selfUpdateChecks($secret, $controllerKey);
+            self::withEdgeKey(static fn () => self::selfUpdateChecks($secret, $controllerKey));
         } finally {
             foreach ($before as $key => $value) {
                 Setting::set('edge.windows-agent.' . $key, $value === null ? null : (string) $value);
@@ -733,7 +739,7 @@ final class HttpTests
         $payload = random_bytes(4096);
         $digest = hash('sha256', $payload);
 
-        self::signedRequest($client, 'POST', '/api/v1/edge/artifact', (string) json_encode([
+        self::signedRequest($client, 'POST', '/api/v1/edge/artifact', self::edgeSigned([
             'kind'    => 'windows-agent',
             'version' => '9.9.9-test',
             'sha256'  => $digest,
@@ -791,6 +797,208 @@ final class HttpTests
         ]);
         TestCase::assertSame(200, $client->status(), 'and is served to the device it is offered to');
         TestCase::assertSame($digest, hash('sha256', $client->body()), 'byte-identical to what was published');
+    }
+
+    /**
+     * 1.9.7-dev.23: an upload carrying only the shared secret is never offered.
+     *
+     * The shared secret was printed by the installer up to dev.21, and the
+     * panel signed whatever agent binary arrived with it and offered it to
+     * every device. Now it publishes only what the edge's own release key
+     * signed — the key it was told to trust locally or by an administrator —
+     * and holds or refuses the rest. Asserted over HTTP, because the attacker
+     * this is about has nothing else.
+     */
+    private static function edgeUploadTrust(): void
+    {
+        TestCase::group('HTTP — the shared secret alone publishes nothing (1.9.7-dev.23)');
+
+        $secret = (string) CoordinatorSettings::current()['shared_secret'];
+        if ($secret === '' || (string) CoordinatorSettings::current()['signing_key'] === '') {
+            TestCase::skip('upload trust', 'this panel has no coordinator secret or signing key');
+
+            return;
+        }
+
+        $before = [];
+        foreach (['file', 'version', 'sha256', 'size', 'published_at'] as $key) {
+            $before[$key] = Setting::get('edge.windows-agent.' . $key, null);
+        }
+
+        try {
+            self::withEdgeKey(static fn () => self::edgeUploadTrustChecks($secret));
+        } finally {
+            foreach ($before as $key => $value) {
+                Setting::set('edge.windows-agent.' . $key, $value === null ? null : (string) $value);
+            }
+            Setting::flushCache();
+
+            DB::execute(
+                'DELETE FROM ' . DB::table('agent_releases') . ' WHERE version IN (:a, :b)',
+                ['a' => '9.9.9-held', 'b' => '9.9.9-test']
+            );
+
+            foreach (glob(APP_ROOT . '/storage/downloads/akconnect-agent-9.9.9-*.exe') ?: [] as $leftover) {
+                @unlink($leftover);
+            }
+        }
+    }
+
+    private static function edgeUploadTrustChecks(string $secret): void
+    {
+        $client = self::client();
+
+        $payload = random_bytes(2048);
+        $digest = hash('sha256', $payload);
+        $fields = [
+            'kind'    => 'windows-agent',
+            'version' => '9.9.9-held',
+            'sha256'  => $digest,
+            'offset'  => 0,
+            'total'   => strlen($payload),
+            'data'    => base64_encode($payload),
+        ];
+
+        $offered = static function (): bool {
+            return DB::selectOne(
+                'SELECT id FROM ' . DB::table('agent_releases') . ' WHERE version = :v AND deleted_at IS NULL',
+                ['v' => '9.9.9-held']
+            ) !== null;
+        };
+
+        // 1. The shared secret and nothing else: refused outright.
+        self::signedRequest($client, 'POST', '/api/v1/edge/artifact', (string) json_encode($fields), $secret);
+        TestCase::assertSame(422, $client->status(), 'an upload with no edge signature is refused');
+        TestCase::assert(!$offered(), 'and no device is offered it');
+
+        // 2. A real signature, but over another version: a signature is for
+        //    one kind, one version and one digest.
+        $other = $fields;
+        $other['version'] = '9.9.9-other';
+        $body = json_decode(self::edgeSigned($other), true);
+        $body['version'] = '9.9.9-held';
+        self::signedRequest($client, 'POST', '/api/v1/edge/artifact', (string) json_encode($body), $secret);
+        TestCase::assertSame(422, $client->status(), 'a signature made for another version is refused');
+
+        // 3. Signed, by a key this panel does not trust: held, not offered.
+        $pair = sodium_crypto_sign_keypair();
+        $stranger = [bin2hex(sodium_crypto_sign_publickey($pair)), sodium_crypto_sign_secretkey($pair)];
+
+        self::signedRequest($client, 'POST', '/api/v1/edge/artifact', self::edgeSigned($fields, $stranger), $secret);
+        TestCase::assertSame(200, $client->status(), 'an upload signed by another edge key is taken in');
+        $data = $client->json()['data'] ?? [];
+        TestCase::assert(($data['held'] ?? false) === true, 'but held', (string) json_encode($data));
+        TestCase::assertSame('other_key', (string) ($data['reason'] ?? ''), 'because it is not the trusted key');
+        TestCase::assert(!isset($data['url']), 'with no download address');
+        TestCase::assert(!$offered(), 'and no device is offered it');
+
+        Setting::flushCache();
+        $held = EdgeRelease::held();
+        TestCase::assert(isset($held['windows-agent']), 'it waits for an administrator');
+        TestCase::assertSame(EdgeRelease::fingerprint($stranger[0]), (string) ($held['windows-agent']['fingerprint'] ?? ''),
+            'showing the fingerprint of the key that signed it');
+
+        // 3b. Approving is a platform administrator's act: a customer's own
+        //     administrator, signed in with a valid CSRF token, is refused.
+        $customer = self::signIn('alpha');
+        $customer->get('/dashboard');
+        $customer->post('/admin/coordinator/held/approve', [
+            '_token'      => $customer->csrfToken(),
+            'kind'        => 'windows-agent',
+            'fingerprint' => EdgeRelease::fingerprint($stranger[0]),
+        ]);
+        TestCase::assert(in_array($customer->status(), [302, 403, 404], true) && !$offered(),
+            'a customer administrator cannot approve a held upload', 'HTTP ' . $customer->status());
+        Setting::flushCache();
+        TestCase::assert(isset(EdgeRelease::held()['windows-agent']), 'and it is still waiting');
+
+        // 4. An approval for what was not on screen does nothing.
+        $refused = false;
+        try {
+            EdgeRelease::approveHeld('windows-agent', EdgeRelease::fingerprint(self::$edgeKey[0]), 'http test');
+        } catch (\App\Core\UpdateException) {
+            $refused = true;
+        }
+        TestCase::assert($refused, 'approving under another fingerprint is refused');
+        TestCase::assert(!$offered(), 'and publishes nothing');
+
+        // 5. The administrator approves what they were shown: that key is now
+        //    trusted, and the upload is published — signed by the panel.
+        EdgeRelease::approveHeld('windows-agent', EdgeRelease::fingerprint($stranger[0]), 'http test');
+        Setting::flushCache();
+        TestCase::assert($offered(), 'an approved upload is offered to devices');
+        TestCase::assertSame($stranger[0], EdgeRelease::trustedReleaseKey(), 'and its key is the trusted edge key');
+        TestCase::assert(EdgeRelease::held() === [], 'and nothing is left waiting');
+
+        // 6. With no key trusted at all, a signed upload is held, not published.
+        Setting::set('edge.release_key', null);
+        Setting::flushCache();
+        DB::execute('DELETE FROM ' . DB::table('agent_releases') . ' WHERE version = :v', ['v' => '9.9.9-held']);
+
+        self::signedRequest($client, 'POST', '/api/v1/edge/artifact', self::edgeSigned($fields, $stranger), $secret);
+        $data = $client->json()['data'] ?? [];
+        TestCase::assert(($data['held'] ?? false) === true && ($data['reason'] ?? '') === 'no_trusted_key',
+            'with no trusted key, a signed upload is held', (string) json_encode($data));
+        TestCase::assert(!$offered(), 'and not offered');
+
+        // 7. Discarded, it is gone.
+        Setting::flushCache();
+        $file = (string) (EdgeRelease::held()['windows-agent']['file'] ?? '');
+        EdgeRelease::discardHeld('windows-agent', 'http test');
+        Setting::flushCache();
+        TestCase::assert(EdgeRelease::held() === [], 'a discarded upload no longer waits');
+        TestCase::assert($file !== '' && !is_file(APP_ROOT . '/storage/downloads/held/' . $file), 'and its file is deleted');
+    }
+
+    /**
+     * A throwaway edge release key, trusted while $body runs, and whatever
+     * this panel trusted and held before put back afterwards.
+     */
+    private static function withEdgeKey(callable $body): void
+    {
+        $saved = ['edge.release_key' => Setting::get('edge.release_key', null)];
+        foreach (EdgeRelease::KINDS as $kind) {
+            $saved['edge.held.' . $kind] = Setting::get('edge.held.' . $kind, null);
+        }
+        $keep = glob(APP_ROOT . '/storage/downloads/held/*') ?: [];
+
+        $pair = sodium_crypto_sign_keypair();
+        self::$edgeKey = [bin2hex(sodium_crypto_sign_publickey($pair)), sodium_crypto_sign_secretkey($pair)];
+        Setting::set('edge.release_key', self::$edgeKey[0]);
+        Setting::flushCache();
+
+        try {
+            $body();
+        } finally {
+            foreach ($saved as $key => $value) {
+                Setting::set($key, $value);
+            }
+            Setting::flushCache();
+
+            foreach (glob(APP_ROOT . '/storage/downloads/held/*') ?: [] as $file) {
+                if (!in_array($file, $keep, true)) {
+                    @unlink($file);
+                }
+            }
+        }
+    }
+
+    /**
+     * An upload body signed the way upgrade-edge.sh signs one.
+     *
+     * @param array<string,mixed> $fields
+     * @param array{0:string,1:string}|null $key [public hex, raw secret]; the trusted test key by default
+     */
+    private static function edgeSigned(array $fields, ?array $key = null): string
+    {
+        $key ??= self::$edgeKey;
+        $fields['edge_key'] = $key[0];
+        $fields['edge_signature'] = bin2hex(sodium_crypto_sign_detached(
+            EdgeRelease::artifactMessage((string) $fields['kind'], (string) $fields['version'], (string) $fields['sha256']),
+            $key[1]
+        ));
+
+        return (string) json_encode($fields);
     }
 
     /**

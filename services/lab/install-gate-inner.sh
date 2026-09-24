@@ -230,6 +230,10 @@ $(grep -n -E 'building the coordinator|building the panel|services current|^\s+b
     done < <(grep -h '^AKCONNECT_RELAY_SECRET' "$GATE_ETC/coordinator.env" "$GATE_ETC/relay.env" 2>/dev/null)
     value="$(sed -n 's/^DB_PASS=//p' "$GATE_PANEL/config/.env" 2>/dev/null | head -1 | tr -d "\"'")"
     [ -n "$value" ] && grep -qF -- "$value" "$LAST_LOG" && leaked="${leaked}DB_PASS "
+    # The edge's release key (1.9.7-dev.23): what the panel trusts instead of
+    # the shared secret, so it had better not be printed either.
+    value="$(tr -d '\r\n' < "$GATE_ETC/release-signing.key" 2>/dev/null)"
+    [ -n "$value" ] && grep -qF -- "$value" "$LAST_LOG" && leaked="${leaked}release-signing.key "
     if [ -z "$leaked" ]; then
         pass "$label: no secret appears in what it printed"
     else
@@ -315,6 +319,24 @@ the_install_works() {
             "not PASS: ${missing%, }
 $(grep -E '^\s+(panel reachable|source fetched|checkout is on|source matches|build|upgrade timer|run completed)\s+(PASS|FAIL|INFO)' "$LAST_LOG" | head -8)"
     fi
+
+    # 1.9.7-dev.23: the edge made its release key, root's alone, and the panel
+    # on this machine trusts exactly that key — so its uploads publish without
+    # anybody approving them, and nothing arriving with only the shared secret
+    # does.
+    local fp keyfile="$GATE_ETC/release-signing.key"
+    fp="$(grep -E '^\s+release key\s+PASS' "$LAST_LOG" | grep -oE '([0-9a-f]{4} ){4}[0-9a-f]{4}' | tail -1)"
+    if grep -qE '^\s+release key\s+PASS\s+not used: the panel.s release, .*, predates edge signatures' "$LAST_LOG" \
+            && [ "$(field release_key)" = "" ]; then
+        pass "$label: a panel older than edge signatures is published to the way it expects"
+    elif [ -n "$fp" ] && [ -f "$keyfile" ] && [ "$(stat -c '%a %U' "$keyfile")" = "600 root" ] \
+            && grep -qE '^\s+release key trusted\s+PASS' "$LAST_LOG" && [ "$(field release_key)" = "$fp" ]; then
+        pass "$label: the edge signs with its own key, and the panel on this machine trusts exactly it"
+    else
+        fail "$label: the edge signs with its own key, and the panel on this machine trusts exactly it" \
+            "log fingerprint '$fp'; key file $(stat -c '%a %U' "$keyfile" 2>&1); panel trusts '$(field release_key)'
+$(grep -E '^\s+release key' "$LAST_LOG" | head -3)"
+    fi
 }
 
 # snapshot <file> — owner and mode of everything the installer manages,
@@ -381,6 +403,8 @@ echo json_encode([
 'host' => $c['host'], 'port' => $c['port'], 'public_key' => $c['public_key'],
 'shared_secret' => $c['shared_secret'], 'fallback_url' => $c['fallback_url'],
 'branch' => $u['branch'], 'commit' => (string) $u['current_commit'], 'channel' => $u['channel'],
+'release_key' => method_exists(App\Services\EdgeRelease::class, 'trustedReleaseKey')
+    ? App\Services\EdgeRelease::fingerprint(App\Services\EdgeRelease::trustedReleaseKey()) : '',
 ]);
 PHP
 chmod 644 "$GATE_DIR/probe-settings.php"

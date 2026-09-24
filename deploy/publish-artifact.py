@@ -12,8 +12,9 @@ credential and no new trust.
 The secret comes from AKCONNECT_COORDINATOR_SECRET in the environment, never
 from a flag: a flag is visible in ps to every user on the machine.
 
-Prints the download URL on success. Exits non-zero, with the panel's own
-message, on failure.
+Prints the download URL on success. Exits 3 when the panel took the upload
+but holds it for an administrator (its release key is not trusted there yet),
+and non-zero otherwise, with the panel's own message, on failure.
 """
 
 from __future__ import annotations
@@ -79,6 +80,15 @@ def main() -> int:
     if not secret:
         raise SystemExit("  AKCONNECT_COORDINATOR_SECRET is not set")
 
+    # The edge's own signature over kind, version and digest (1.9.7-dev.23),
+    # made by upgrade-edge.sh with the release key. Without it such a panel
+    # refuses the upload; with a key it does not trust yet, it holds it.
+    # upgrade-edge.sh leaves both unset only for a panel whose release
+    # predates signatures, which ignores them.
+    edge_key = os.environ.get("AKCONNECT_EDGE_KEY", "")
+    edge_signature = os.environ.get("AKCONNECT_EDGE_SIGNATURE", "")
+    signed = {"edge_key": edge_key, "edge_signature": edge_signature} if edge_key and edge_signature else {}
+
     total = os.path.getsize(path)
     if total == 0:
         raise SystemExit(f"  {path} is empty")
@@ -90,6 +100,7 @@ def main() -> int:
     sha256 = digest.hexdigest()
 
     url = ""
+    held = ""
     sent = 0
 
     with open(path, "rb") as handle:
@@ -109,6 +120,7 @@ def main() -> int:
                     "offset": sent,
                     "total": total,
                     "data": base64.b64encode(chunk).decode(),
+                    **signed,
                 },
             )
 
@@ -127,8 +139,15 @@ def main() -> int:
 
             if data.get("complete"):
                 url = str(data.get("url") or "")
+                if data.get("held"):
+                    held = str(data.get("message") or "held for an administrator")
 
     print("", file=sys.stderr)
+
+    if held:
+        # Exit 3: uploaded, verified, and waiting for an administrator.
+        print(f"  {held}", file=sys.stderr)
+        return 3
 
     if not url:
         raise SystemExit("  the upload finished but the panel published nothing")

@@ -6,6 +6,32 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.23] — development
+
+**The shared secret alone no longer publishes anything.** Whoever held the
+coordinator's shared secret could upload an agent binary, and the panel signed
+it with its own key and offered it to every device as an update — and up to
+dev.21 the installer printed that secret. Now the edge signs each upload with
+a release key of its own (`/etc/akconnect/release-signing.key`, made once,
+root's, mode 0600, never printed), over the kind, the version and the sha256,
+and the panel publishes only what the one edge key it trusts signed. An upload
+with no valid edge signature is refused. One signed by a key the panel does
+not trust yet is held, served to nobody and registered as no release, until an
+administrator compares the fingerprint and approves it under Platform →
+Coordinator — or discards it; a held upload under a key other than the trusted
+one is shown as a warning to rotate the secret.
+
+Which key is trusted is never decided over the API. When the panel is on the
+edge's machine (every getting-started.sh install), `upgrade-edge.sh` trusts it
+there directly as the panel's user, so nothing needs approving; elsewhere, one
+administrator approval, or `upgrade-edge.sh --panel-dir <panel>` on the panel's
+machine. `akconnect-coordinator release-key init|public|sign` is the signer.
+An edge whose own uploads are waiting says so and does not rebuild them every
+hour; a panel whose release predates signatures is published to the way it
+expects. `upgrade-edge.sh` is revision 5, so a dev.22 copy hands over to it.
+`edge-audit.php` (and so `akconnect-rotate-secret`) lists the trusted key and
+anything held.
+
 ## [1.9.7-dev.22] — development
 
 **The installer printed the coordinator's shared secret, and then set it

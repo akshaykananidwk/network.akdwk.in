@@ -71,7 +71,9 @@ final class EdgeController
                 strtolower((string) ($input['sha256'] ?? '')),
                 (int) ($input['offset'] ?? -1),
                 (int) ($input['total'] ?? 0),
-                $bytes
+                $bytes,
+                (string) ($input['edge_key'] ?? ''),
+                (string) ($input['edge_signature'] ?? '')
             );
         } catch (UpdateException $e) {
             Logger::warning('update', 'Edge artefact chunk refused', ['error' => $e->getMessage()]);
