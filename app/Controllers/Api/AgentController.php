@@ -11,6 +11,7 @@ use App\Core\Response;
 use App\Middleware\RateLimitMiddleware;
 use App\Models\AgentRelease;
 use App\Models\Device;
+use App\Models\DeviceLink;
 use App\Models\DeviceProbe;
 use App\Models\UpdateSetting;
 use App\Models\Network;
@@ -213,6 +214,66 @@ final class AgentController
         return $out;
     }
 
+    /**
+     * The per-peer paths a heartbeat carries, bounded like everything else an
+     * agent says: at most 256, a uid of safe characters, a short path word, a
+     * latency in range. Resolved to real peers only in DeviceLink::record.
+     *
+     * @return list<array{uid:string,path:string,latency_ms:?int}>
+     */
+    private static function sanitiseLinks(mixed $raw): array
+    {
+        if (!is_array($raw)) {
+            return [];
+        }
+
+        $out = [];
+        foreach (array_slice($raw, 0, 256) as $link) {
+            if (!is_array($link)) {
+                continue;
+            }
+
+            $uid = (string) ($link['uid'] ?? '');
+            if (preg_match('/^[A-Za-z0-9_\-]{1,64}$/', $uid) !== 1) {
+                continue;
+            }
+
+            $latency = isset($link['latency_ms']) && is_numeric($link['latency_ms'])
+                ? max(0, min(60000, (int) $link['latency_ms'])) : null;
+
+            $out[] = [
+                'uid'        => $uid,
+                'path'       => mb_substr((string) ($link['path'] ?? ''), 0, 16),
+                'latency_ms' => $latency,
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
+     * An endpoint a device reports about itself, if it is an IP and a port.
+     *
+     * It is handed to every other device in the network as that peer's
+     * address, and the agent refuses a configuration push at the first line
+     * it cannot parse — so a device reporting `edge.example.com:443`, or
+     * anything else, must not get that far.
+     */
+    private static function endpointOrNull(mixed $raw): ?string
+    {
+        if (!is_string($raw) || $raw === '') {
+            return null;
+        }
+
+        if (preg_match('/^\[([0-9a-fA-F:.]+)\]:(\d{1,5})$|^([0-9.]+):(\d{1,5})$/', $raw, $m) !== 1) {
+            return null;
+        }
+        $host = $m[1] !== '' ? $m[1] : $m[3];
+        $port = (int) ($m[2] !== '' ? $m[2] : $m[4]);
+
+        return filter_var($host, FILTER_VALIDATE_IP) !== false && $port >= 1 && $port <= 65535 ? $raw : null;
+    }
+
     public function heartbeat(Request $request): Response
     {
         $device = $request->deviceContext();
@@ -240,7 +301,7 @@ final class AgentController
 
         Device::heartbeat(
             (int) $device['id'],
-            (string) ($input['endpoint'] ?? ''),
+            self::endpointOrNull($input['endpoint'] ?? null),
             isset($input['lan_endpoint']) ? (string) $input['lan_endpoint'] : null,
             $connectionType,
             isset($input['relay_id']) ? (int) $input['relay_id'] : null,
@@ -255,6 +316,26 @@ final class AgentController
         // claim about that machine and nothing more — it is displayed, never
         // acted on.
         Device::recordProblems((int) $device['id'], self::sanitiseProblems($input['problems'] ?? null));
+
+        // How it reaches each peer, which it has sent since 1.9.2 and the
+        // panel used to drop. Shown per pair as "direct" or "via server" —
+        // never as the device's own status, which is the heartbeat alone.
+        //
+        // Display only, so it can never fail the heartbeat: a heartbeat that
+        // errors is one the agent retries without refreshing its
+        // configuration, and liveness is the one thing this call is for.
+        if ($device['network_id'] !== null) {
+            try {
+                DeviceLink::record(
+                    (int) $device['tenant_id'],
+                    (int) $device['id'],
+                    (int) $device['network_id'],
+                    self::sanitiseLinks($input['peers'] ?? null)
+                );
+            } catch (\Throwable $e) {
+                Logger::warning('agent', 'Could not record per-pair paths', ['error' => $e->getMessage()]);
+            }
+        }
 
         // And what it did about the last release it was offered.
         //

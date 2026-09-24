@@ -125,11 +125,17 @@ func fromRuntime(rt *state.Runtime) view {
 			OK:       true,
 		}
 	case reachable == 0:
+		// Connected: this computer is in touch with the server, which is what
+		// the word means everywhere else in the product. Whether a particular
+		// other computer has answered yet is the detail, not the headline —
+		// "Connecting" here, on a machine that was working, is the word the
+		// panel dropped for the same reason.
 		return view{
-			Headline: "Connecting to the other computers",
+			Headline: "Connected",
 			Detail: withFallbackNote(
-				fmt.Sprintf("None of %s reachable yet. This usually takes a few seconds.", plural(total)), rt),
+				fmt.Sprintf("Waiting for %s to answer.", plural(total)), rt),
 			IP: rt.VirtualIP,
+			OK: true,
 		}
 	case reachable < total:
 		return view{

@@ -10,6 +10,7 @@ use App\Core\Response;
 use App\Core\Session;
 use App\Core\Validator;
 use App\Models\Device;
+use App\Models\DeviceLink;
 use App\Models\DeviceProbe;
 use App\Models\Network;
 use App\Core\ValidationException;
@@ -91,6 +92,9 @@ final class DeviceController extends Controller
             // The most recent answer for each address this device has been
             // asked about, keyed by address.
             'probe_results' => DeviceProbe::latestByTarget((int) $device['id']),
+            // Per pair, kept apart from the device's own Online/Offline.
+            'links'         => DeviceLink::forDevice((int) $device['tenant_id'], (int) $device['id']),
+            'paths'         => DeviceLink::summaries([(int) $device['id']])[(int) $device['id']] ?? null,
             // Why this device is or is not being offered a newer agent. The
             // panel's own answer, not the device's — a device that was told
             // there is nothing for it has nothing to report.

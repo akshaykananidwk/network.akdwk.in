@@ -1,10 +1,10 @@
 {
-  "version": "1.9.7-dev.23",
-  "released_at": "2026-09-24T12:00:00Z",
+  "version": "1.9.7-dev.24",
+  "released_at": "2026-09-24T18:00:00Z",
   "min_php": "8.1.0",
   "min_mysql": "5.7",
   "breaking": false,
-  "notes": "Security release. The panel no longer publishes an installer or an agent update on the coordinator's shared secret alone: the edge signs each upload with its own release key, and only what the trusted edge key signed is published. Anything else is refused, or held under Platform → Coordinator until an administrator compares the fingerprint and approves it. A getting-started install trusts its own edge automatically.",
+  "notes": "A device's status is Online or Offline only; each pair is shown as direct or via server. A panel update no longer shows devices as offline, a configuration change no longer resets every tunnel, and a deadlock that could stop a device receiving until restarted is fixed. Includes the dev.23 review fixes.",
   "migrations": [],
   "protected": [
     ".env",

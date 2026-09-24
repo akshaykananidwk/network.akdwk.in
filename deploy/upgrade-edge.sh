@@ -344,6 +344,14 @@ if [ -d "$SRC_DIR" ]; then
     SRC_DIR="$(cd "$SRC_DIR" && pwd)"
 fi
 
+# The same for --panel-dir, which is read long after the script has changed
+# into the checkout: `--panel-dir .` from inside the panel was looked for in
+# the source tree. Physical, so the owner check below sees the directory and
+# not a symlink to it.
+if [ -n "$PANEL_DIR_OPT" ] && [ -d "$PANEL_DIR_OPT" ]; then
+    PANEL_DIR_OPT="$(cd "$PANEL_DIR_OPT" && pwd -P)"
+fi
+
 # ------------------------------------------------------------------ preflight
 
 step "preflight"
@@ -735,7 +743,9 @@ prepare_release_key() {
     # shared secret sends, as it always did. Uploading to it the old way is
     # its own rule, not a way round the new one — which lives in the panel.
     # An installer re-run over an older panel is the case this is for.
-    line="$("$RELEASE_SIGNER" release-key 2>&1)"
+    # Bounded: a binary that took the unknown word for "serve" would never
+    # come back, and this is a question, not a service.
+    line="$(timeout 10 "$RELEASE_SIGNER" release-key 2>&1)"
     case "$line" in
         *"unknown command"*)
             RELEASE_UNSIGNED=1
@@ -783,7 +793,7 @@ trust_release_key_locally() {
         return 0
     fi
 
-    web_user="$(stat -c %U "$dir" 2>/dev/null)"
+    web_user="$(stat -L -c %U "$dir" 2>/dev/null)"
     if [ -z "$web_user" ] || [ "$web_user" = "root" ] || [ "$web_user" = "UNKNOWN" ]; then
         fail "release key trusted" "$dir belongs to ${web_user:-nobody}, not to the user the panel runs as"
         return 0

@@ -155,6 +155,7 @@ $base = url('networks/' . $network['id']);
                         </tr>
                         </thead>
                         <tbody>
+                        <?php $pairPaths = \App\Models\DeviceLink::summaries(array_map(static fn (array $d): int => (int) $d['id'], $devices)); ?>
                         <?php foreach ($devices as $device): ?>
                             <tr>
                                 <td>
@@ -168,7 +169,7 @@ $base = url('networks/' . $network['id']);
                                 <td class="text-muted"><?= e($device['agent_version'] ?: '—') ?></td>
                                 <td><code><?= e($device['virtual_ip'] ?: '—') ?></code></td>
                                 <td>
-                                    <?= \App\Core\View::partial('partials.connection', ['device' => $device]) ?>
+                                    <?= \App\Core\View::partial('partials.connection', ['device' => $device, 'paths' => $pairPaths[(int) $device['id']] ?? null]) ?>
                                 </td>
                                 <td class="text-muted"><?= e(time_ago($device['last_seen_at'])) ?></td>
                                 <td class="text-muted text-sm">

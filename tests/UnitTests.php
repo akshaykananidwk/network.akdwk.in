@@ -36,6 +36,7 @@ final class UnitTests
         self::crypto();
         self::requestBooleans();
         self::redaction();
+        self::onlineThroughMaintenance();
         self::validation();
         self::ipam();
         self::acl();
@@ -153,6 +154,67 @@ final class UnitTests
 
         $_POST = [];
         $_GET = [];
+    }
+
+    /**
+     * 1.9.7-dev.24: a device is not counted offline for time the panel could
+     * not hear it. Every panel update puts the panel in maintenance, where
+     * heartbeats get 503; the page used to go red for every device.
+     */
+    private static function onlineThroughMaintenance(): void
+    {
+        TestCase::group('Online is the heartbeat, allowing for the panel\'s own maintenance (1.9.7-dev.24)');
+
+        $now = 1_800_000_000;
+        $normal = \App\Models\Device::onlineCutoffAt($now, null);
+        TestCase::assertSame($now - 90, $normal, 'with no maintenance, online means heard within 90 seconds');
+
+        // Five minutes into a window that is still on.
+        $during = \App\Models\Device::onlineCutoffAt($now, [$now - 300, null]);
+        TestCase::assertSame($now - 300 - 90, $during,
+            'during maintenance, whoever was online when it began still is');
+
+        // Thirty seconds after a five-minute window ended: the heartbeats
+        // have not all come back yet.
+        $after = \App\Models\Device::onlineCutoffAt($now, [$now - 330, $now - 30]);
+        TestCase::assertSame($now - 330 - 90, $after, 'and for a minute after it ends');
+
+        $later = \App\Models\Device::onlineCutoffAt($now, [$now - 400, $now - 100]);
+        TestCase::assertSame($now - 90, $later, 'but not after that');
+
+        $long = \App\Models\Device::onlineCutoffAt($now, [$now - 7200, null]);
+        TestCase::assertSame($now - 90, $long,
+            'and not for a window longer than half an hour: that is an outage, and a stopped device must show');
+
+        // Revoked, disabled or swept is offline at once, whatever the last
+        // heartbeat says.
+        $recent = gmdate('Y-m-d H:i:s');
+        TestCase::assert(\App\Models\Device::isOnline(['last_seen_at' => $recent, 'connection_type' => 'direct', 'status' => 'authorized']),
+            'a device heard just now is online');
+        TestCase::assert(!\App\Models\Device::isOnline(['last_seen_at' => $recent, 'connection_type' => 'offline', 'status' => 'authorized']),
+            'but not once the sweep or a revoke has written offline');
+        TestCase::assert(!\App\Models\Device::isOnline(['last_seen_at' => $recent, 'connection_type' => 'direct', 'status' => 'revoked']),
+            'and a revoked device is offline straight away');
+
+        // The window survives the flag: recorded on disable, read back.
+        $root = sys_get_temp_dir() . '/akc-maint-' . bin2hex(random_bytes(4));
+        @mkdir($root . '/storage', 0700, true);
+        try {
+            $mode = new \App\Updater\MaintenanceMode($root);
+            TestCase::assert($mode->lastWindow() === null, 'no window before any maintenance');
+            $mode->enable('unit test');
+            $open = $mode->lastWindow();
+            TestCase::assert(is_array($open) && $open[1] === null && abs($open[0] - time()) < 5, 'an open window while it is on');
+            $mode->disable();
+            $closed = $mode->lastWindow();
+            TestCase::assert(is_array($closed) && is_int($closed[1]) && $closed[1] >= $closed[0],
+                'and a closed one, with its end, after it is switched off');
+        } finally {
+            @unlink($root . '/storage/maintenance.flag');
+            @unlink($root . '/storage/maintenance.last');
+            @rmdir($root . '/storage');
+            @rmdir($root);
+        }
     }
 
     private static function redaction(): void

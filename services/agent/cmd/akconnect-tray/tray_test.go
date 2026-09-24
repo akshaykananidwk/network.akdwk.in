@@ -73,7 +73,8 @@ func TestWhatTheIconSays(t *testing.T) {
 				UpdatedAt: fresh, VirtualIP: "10.50.0.3", ControlPlaneUp: true, CoordinatorUp: true,
 				Peers: []state.RuntimePeer{{Path: "connecting"}},
 			},
-			headline: "Connecting to the other computers",
+			headline: "Connected",
+			ok:       true,
 			ip:       "10.50.0.3",
 		},
 		{

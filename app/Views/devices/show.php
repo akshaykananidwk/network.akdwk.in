@@ -31,7 +31,7 @@ declare(strict_types=1);
             </p>
         </div>
         <div class="card-header-actions">
-            <?= \App\Core\View::partial('partials.connection', ['device' => $device]) ?>
+            <?= \App\Core\View::partial('partials.connection', ['device' => $device, 'paths' => $paths ?? null]) ?>
             <span class="status status-<?= e($device['status']) ?>"><?= e($device['status']) ?></span>
         </div>
     </header>
@@ -63,6 +63,16 @@ declare(strict_types=1);
                 Last reported <?= e((string) ($device['problems_at'] ?? 'unknown')) ?> UTC. This
                 clears on its own once the agent stops reporting it.
             </p>
+        </div>
+    <?php endif; ?>
+
+    <?php if (($device['coordinator_unanswered_at'] ?? null) !== null && \App\Models\Device::isOnline($device)): ?>
+        <div class="alert alert-warning">
+            <strong>Nothing answers this device's announcements.</strong>
+            It reaches this panel, but the replies from our server are not getting back to it —
+            something on the network it is on drops them. It still works through the server
+            over HTTPS; a direct path to its peers will not be found from that network until
+            the firewall there lets UDP replies through.
         </div>
     <?php endif; ?>
 
@@ -187,6 +197,52 @@ declare(strict_types=1);
         </dd></div>
     </dl>
 </section>
+
+<?php if (($network_peers ?? []) !== []): ?>
+<?php
+/**
+ * How this device reaches each peer, as the device itself last said.
+ *
+ * A fact about each pair, kept apart from the device's own Online/Offline.
+ * "via server" is not a fault: traffic flows, and a direct path is tried in
+ * the background and taken over silently when it works.
+ */
+?>
+<section class="card">
+    <header class="card-header">
+        <h2>Peers</h2>
+        <p class="text-muted">How this computer reaches each of the others, as it last reported.</p>
+    </header>
+    <table class="table">
+        <thead><tr><th>Peer</th><th>Path</th><th>Since</th><th>Latency</th></tr></thead>
+        <tbody>
+        <?php foreach ($network_peers as $peer): ?>
+            <?php $link = ($links ?? [])[(int) $peer['id']] ?? null; ?>
+            <tr>
+                <td>
+                    <a href="<?= e(url('devices/' . (int) $peer['id'])) ?>"><?= e((string) $peer['name']) ?></a>
+                    <span class="text-muted"><?= e((string) ($peer['virtual_ip'] ?? '')) ?></span>
+                </td>
+                <td>
+                    <?php if ($link === null || $link['path'] === 'none'): ?>
+                        <span class="text-muted">—</span>
+                    <?php elseif ($link['path'] === 'direct'): ?>
+                        <span class="conn-path">direct</span>
+                    <?php else: ?>
+                        <span class="conn-path">via server</span>
+                        <?php if ((string) ($link['transport'] ?? '') === 'https'): ?>
+                            <span class="text-muted small">over HTTPS</span>
+                        <?php endif; ?>
+                    <?php endif; ?>
+                </td>
+                <td><?= $link !== null && $link['path'] !== 'none' ? e(local_time((string) $link['since_at'])) : '—' ?></td>
+                <td><?= $link !== null && $link['latency_ms'] !== null ? e((string) $link['latency_ms']) . ' ms' : '—' ?></td>
+            </tr>
+        <?php endforeach; ?>
+        </tbody>
+    </table>
+</section>
+<?php endif; ?>
 
 <?php if (can('device.update')): ?>
 <section class="card">

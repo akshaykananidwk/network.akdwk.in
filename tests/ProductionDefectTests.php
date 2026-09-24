@@ -236,9 +236,13 @@ final class ProductionDefectTests
         $migrations = glob(APP_ROOT . '/database/migrations/*_device_relay_https_state.php') ?: [];
         TestCase::assert($migrations !== [], 'the relay_https connection state has a migration');
 
-        $view = (string) @file_get_contents(APP_ROOT . '/app/Views/partials/connection.php');
-        TestCase::assertContains('relay_https', $view, 'the device list can show the HTTPS path');
-        TestCase::assertContains('relay-https', $view, 'and names it the way the agent reports it');
+        // Shown per pair since 1.9.7-dev.24: the device's own status is
+        // Online or Offline, and how each peer is reached is beside it.
+        $links = (string) @file_get_contents(APP_ROOT . '/app/Models/DeviceLink.php');
+        $page = (string) @file_get_contents(APP_ROOT . '/app/Views/devices/show.php');
+        TestCase::assertContains("'relay-https' => ['server', 'https']", $links,
+            'a pair on the HTTPS path is recorded as via server, over HTTPS, the way the agent reports it');
+        TestCase::assertContains('over HTTPS', $page, 'and the device page says so for that pair');
 
         self::coordinatorKeyMismatchIsReported();
     }

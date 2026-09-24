@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.zx2c4.com/wireguard/conn"
+
 	"github.com/akshaykananidwk/network.akdwk.in/services/shared/disco"
 )
 
@@ -174,4 +176,145 @@ func testPeer(n byte) [32]byte {
 	k[0] = n
 
 	return k
+}
+
+// A discovery handler that blocks — as one does when it waits for the tunnel's
+// lock while a rebind holds it — must never stop the socket being read: the
+// rebind is itself waiting for the reader to finish, and that was a deadlock
+// that froze all inbound traffic.
+func TestABlockedDiscoveryHandlerNeverStopsTheSocketReader(t *testing.T) {
+	bind := New()
+	release := make(chan struct{})
+	got := make(chan string, 4)
+	bind.SetHandler(func(pkt []byte, _ netip.AddrPort) {
+		<-release
+		got <- string(pkt[len(pkt)-1:])
+	})
+
+	disc := func(tag byte) []byte {
+		pkt := make([]byte, 64)
+		copy(pkt, disco.Magic[:])
+		pkt[len(pkt)-1] = tag
+		return pkt
+	}
+	queue := [][]byte{disc('a'), disc('b'), []byte("wireguard"), disc('c')}
+	recv := bind.intercept(func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
+		for i, p := range queue {
+			packets[i] = append(packets[i][:0], p...)
+			sizes[i] = len(p)
+			eps[i] = &conn.StdNetEndpoint{AddrPort: netip.MustParseAddrPort("192.0.2.1:8443")}
+		}
+		return len(queue), nil
+	})
+
+	done := make(chan int)
+	go func() {
+		packets := make([][]byte, 4)
+		for i := range packets {
+			packets[i] = make([]byte, 128)
+		}
+		sizes := make([]int, 4)
+		n, _ := recv(packets, sizes, make([]conn.Endpoint, 4))
+		kept := 0
+		for _, sz := range sizes[:n] {
+			if sz > 0 {
+				kept++
+			}
+		}
+		if kept != 1 {
+			n = -kept
+		}
+		done <- n
+	}()
+
+	select {
+	case n := <-done:
+		if n != 4 {
+			t.Fatalf("the batch came back with %d entries, want all 4 (discovery hidden by size)", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the socket reader waited for a blocked discovery handler")
+	}
+
+	close(release)
+	order := ""
+	for i := 0; i < 3; i++ {
+		select {
+		case tag := <-got:
+			order += tag
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %q of the discovery packets reached the handler", order)
+		}
+	}
+	if order != "abc" {
+		t.Fatalf("discovery packets reached the handler as %q, not in arrival order", order)
+	}
+}
+
+// wireguard-go reads each received packet from its OWN buffer at that index
+// and skips entries shorter than a WireGuard message; it never reads back the
+// slice headers a ReceiveFunc was given. So discovery packets must be hidden
+// by size, in place — compacting the batch by swapping headers left it reading
+// a discovery packet's buffer where a WireGuard packet should have been.
+func TestAMixedBatchReachesWireGuardIntactAtEveryIndex(t *testing.T) {
+	bind := New()
+	bind.SetHandler(func([]byte, netip.AddrPort) {})
+
+	const batch = 128
+	// What wireguard-go owns: one array per index. The ReceiveFunc is handed
+	// views of them, exactly as device/receive.go does.
+	arrays := make([][]byte, batch)
+	views := make([][]byte, batch)
+	for i := range arrays {
+		arrays[i] = make([]byte, 2048)
+		views[i] = arrays[i][:]
+	}
+
+	wg := func(i int) []byte {
+		p := make([]byte, 148)
+		p[0] = 4 // a WireGuard transport message
+		p[len(p)-1] = byte(i)
+		return p
+	}
+	discoPkt := func() []byte {
+		p := make([]byte, 64)
+		copy(p, disco.Magic[:])
+		return p
+	}
+
+	isDisco := func(i int) bool { return i%3 == 1 }
+	recv := bind.intercept(func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
+		for i := 0; i < batch; i++ {
+			p := wg(i)
+			if isDisco(i) {
+				p = discoPkt()
+			}
+			sizes[i] = copy(packets[i], p)
+			eps[i] = &conn.StdNetEndpoint{AddrPort: netip.MustParseAddrPort("192.0.2.1:8443")}
+		}
+		return batch, nil
+	})
+
+	sizes := make([]int, batch)
+	n, err := recv(views, sizes, make([]conn.Endpoint, batch))
+	if err != nil || n != batch {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+
+	// Now read the batch the way wireguard-go does.
+	for i := 0; i < n; i++ {
+		if sizes[i] < 32 {
+			if !isDisco(i) {
+				t.Fatalf("the WireGuard packet at %d was hidden", i)
+			}
+			continue
+		}
+		if isDisco(i) {
+			t.Fatalf("a discovery packet at %d reached WireGuard", i)
+		}
+		got := arrays[i][:sizes[i]]
+		if got[0] != 4 || got[len(got)-1] != byte(i) {
+			t.Fatalf("WireGuard read the wrong bytes at index %d", i)
+		}
+	}
 }

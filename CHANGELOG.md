@@ -6,6 +6,76 @@ Notable changes per release. This project follows
 
 ---
 
+## [1.9.7-dev.24] — development
+
+**A device's status is Online or Offline, and nothing else.** The blue
+"connecting" beside "Online" is gone. It came from whether any WireGuard
+session had handshaked lately — a fact about a pair, shown as the device's
+status — and it was what two working PCs showed. Online is the heartbeat;
+how each pair is reached is now kept per pair (`device_links`, from the
+per-peer paths the agent has sent since 1.9.2 and the panel dropped) and
+shown as a small label: **direct** or **via server** (with "over HTTPS" where
+that applies), in the device list, the network's Devices tab and a new Peers
+card on the device page with since-when and latency. The tray says
+"Connected" when the computer is in touch with the server, and "waiting for
+N to answer" underneath rather than "Connecting".
+
+**A panel update no longer turns every device red.** Heartbeats get 503 while
+the panel is in maintenance, so for the length of a window and a minute after
+it, whoever was online when it began still is (capped at 30 minutes). One rule
+(`Device::onlineCutoff`) is used by the dot, the counts, the sweep and the live
+dashboard — which counted "online" as direct + relay, so a running device with
+no peer yet was offline there. A heartbeat no longer blanks the endpoint, LAN
+endpoint, relay and latency the coordinator reported when the agent sends
+none (it flickered every ten seconds, and fed peers' configuration).
+
+**A configuration change no longer resets every tunnel.** Each revision
+re-created every WireGuard peer (`replace_peers=true`: new session keys, and
+the endpoint discovery had found replaced by the panel's stale hint) and
+reopened the UDP socket — and every panel update bumped every network's
+revision, so every pair in the fleet reset at once, and a relayed pair could
+stay dark. The agent now reconciles against the device itself: only a new,
+changed or removed peer is touched, the socket is rebound only when the port
+changes, and an unchanged interface plan is not re-applied with netsh.
+
+**A deadlock that froze all inbound traffic.** Discovery ran on wireguard-go's
+receive goroutine and takes the tunnel's lock; a rebind holds that lock while
+waiting for the receive goroutine to stop. One punch during a rebind stopped
+the device receiving anything until the service restarted. Discovery now runs
+on its own goroutine, in arrival order.
+
+**Two receive-path defects in the agent, found while designing the hub.**
+On Windows, an ICMP "port unreachable" — which a coordinator restart
+produces — comes back as an error on the socket's next receive, and
+wireguard-go ends its receive loop for good on any error it does not consider
+temporary: the device heard nothing on IPv4 until its service was restarted.
+That error is now read as "nothing arrived". And the agent hid discovery
+packets from wireguard-go by compacting the received batch, which wireguard-go
+never reads back (it reads each packet from its own buffer by index): on Linux,
+where a batch holds up to 128 packets, any batch mixing the two handed
+WireGuard the wrong bytes. Discovery packets are now hidden in place.
+
+**Reviewed before release, and fixed.** Removals are written first in the
+agent's configuration push, so a line wireguard-go refuses later can no longer
+leave a revoked peer on the device; an endpoint hint that is not an IP and a
+port is never sent (and the panel no longer stores one a device reports). A
+refused, clashing route is retried on every pass, and a pass that failed after
+touching the interface is never taken as "unchanged". The panel installers now
+run every migration after importing the schema — a panel installed from the
+browser or `cli/install.php` had none of the tables and columns added since
+the schema snapshot, and with the per-pair table every heartbeat would have
+failed; the per-pair write can no longer fail a heartbeat either. A revoked or
+disabled device is Offline at once, and a pair back on the same path after a
+gap is "since now".
+
+**dev.23 review.** A finished upload is now copied to a private file and the
+digest taken over those bytes, so a write through the shared secret cannot
+change a verified installer between the check and the publish. Publishing a
+kind clears a superseded held upload of that kind, an older held build can no
+longer be approved over a newer one, and an upload held under a key the panel
+now trusts is no longer reported as waiting (the edge would never have sent it
+again). `--panel-dir` accepts a relative path or a symlink.
+
 ## [1.9.7-dev.23] — development
 
 **The shared secret alone no longer publishes anything.** Whoever held the

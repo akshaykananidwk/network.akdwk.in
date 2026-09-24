@@ -88,10 +88,14 @@ final class EdgeRelease
             // (1.9.7-dev.23), so an edge whose own uploads are waiting says so
             // instead of building and uploading them again every hour. The
             // fingerprint of a public key; nothing here is secret.
-            'held_setup'       => (string) (self::heldRecord('windows-setup')['version'] ?? ''),
-            'held_agent'       => (string) (self::heldRecord('windows-agent')['version'] ?? ''),
-            'held_fingerprint' => self::fingerprint((string) (self::heldRecord('windows-agent')['key']
-                ?? self::heldRecord('windows-setup')['key'] ?? '')),
+            //
+            // Only what is still waiting on somebody: an upload signed by the
+            // key this panel now trusts would publish by itself if sent again,
+            // and reporting it held made the edge skip sending it.
+            'held_setup'       => (string) (self::waiting('windows-setup')['version'] ?? ''),
+            'held_agent'       => (string) (self::waiting('windows-agent')['version'] ?? ''),
+            'held_fingerprint' => self::fingerprint((string) (self::waiting('windows-agent')['key']
+                ?? self::waiting('windows-setup')['key'] ?? '')),
         ];
     }
 
@@ -313,6 +317,7 @@ final class EdgeRelease
             fclose($handle);
         }
 
+        clearstatcache(true, $partial);
         $written = (int) filesize($partial);
         if ($written < $total) {
             return ['complete' => false, 'received' => $written, 'total' => $total];
@@ -320,12 +325,23 @@ final class EdgeRelease
 
         // Verified before it is published: an artefact served to customers is
         // the one thing here that ends up executing on their machines.
-        $actual = hash_file('sha256', $partial);
-        if (!hash_equals($sha256, (string) $actual)) {
-            @unlink($partial);
+        //
+        // Not the .part file itself. Its name is the digest, so any other
+        // request carrying the shared secret can open it and write into it —
+        // and a write landing between checking the digest and moving the file
+        // into place changed what was published, under the right digest. The
+        // bytes are copied into a file with a random name only this request
+        // knows, the digest is taken over exactly the bytes copied, and that
+        // copy is what is judged, held or published.
+        $private = self::privateCopy($partial, $dir, $total);
+        if ($private === null || !hash_equals($sha256, (string) hash_file('sha256', $private))) {
+            if ($private !== null) {
+                @unlink($private);
+            }
 
             throw new UpdateException('The uploaded artefact does not match its checksum; discarded.');
         }
+        $partial = $private;
 
         // Whose upload is this? The shared secret only says it came from
         // something that holds the shared secret — which, since 1.9.7-dev.21
@@ -354,6 +370,53 @@ final class EdgeRelease
     }
 
     /**
+     * Move a finished upload out of reach of the requests that wrote it.
+     *
+     * The .part file is renamed to a name nobody else knows before it is
+     * read, and then copied again, because a handle another request opened
+     * before the rename still writes into the same file: the copy is the only
+     * thing that is certainly nobody else's. Exactly $total bytes, or nothing.
+     */
+    private static function privateCopy(string $partial, string $dir, int $total): ?string
+    {
+        $claimed = $dir . '/.' . bin2hex(random_bytes(16)) . '.claimed';
+        if (!@rename($partial, $claimed)) {
+            return null;
+        }
+
+        $private = $dir . '/.' . bin2hex(random_bytes(16)) . '.verified';
+        $in = @fopen($claimed, 'rb');
+        $out = @fopen($private, 'xb');
+        $copied = 0;
+
+        if ($in !== false && $out !== false) {
+            while ($copied < $total && !feof($in)) {
+                $chunk = fread($in, min(1 << 20, $total - $copied));
+                if ($chunk === false || $chunk === '' || fwrite($out, $chunk) !== strlen($chunk)) {
+                    break;
+                }
+                $copied += strlen($chunk);
+            }
+        }
+
+        if ($in !== false) {
+            fclose($in);
+        }
+        if ($out !== false) {
+            fclose($out);
+        }
+        @unlink($claimed);
+
+        if ($out === false || $copied !== $total) {
+            @unlink($private);
+
+            return null;
+        }
+
+        return $private;
+    }
+
+    /**
      * Put a verified upload where devices and customers will get it.
      *
      * @return array<string,mixed>
@@ -376,6 +439,20 @@ final class EdgeRelease
         Setting::set(self::PREFIX . $kind . '.size', (string) $total);
         Setting::set(self::PREFIX . $kind . '.published_at', gmdate('Y-m-d H:i:s'));
         Setting::flushCache();
+
+        // Whatever was held for this kind and is now superseded goes: the same
+        // build, an older one, or anything the trusted key signed (it would
+        // have published by itself). Left behind, it stayed on the page as
+        // "waiting for you", and approving it later put the older build back
+        // in front of every device. A newer upload under another key stays —
+        // that one is still somebody's decision.
+        $held = self::heldRecord($kind);
+        $trusted = self::trustedReleaseKey();
+        if ($held !== null && ((string) $held['sha256'] === $sha256
+                || version_compare((string) $held['version'], $version, '<=')
+                || ($trusted !== '' && hash_equals($trusted, (string) $held['key'])))) {
+            self::forgetHeld($kind, $held);
+        }
 
         self::prune($dir, self::filename($kind, $version), $kind);
 
@@ -610,6 +687,23 @@ final class EdgeRelease
     }
 
     /**
+     * A held upload that the trusted key did not sign, or null.
+     *
+     * @return array<string,mixed>|null
+     */
+    private static function waiting(string $kind): ?array
+    {
+        $record = self::heldRecord($kind);
+        $trusted = self::trustedReleaseKey();
+
+        if ($record === null || ($trusted !== '' && hash_equals($trusted, (string) $record['key']))) {
+            return null;
+        }
+
+        return $record;
+    }
+
+    /**
      * Uploads waiting for an administrator, for the Coordinator page and the
      * audit.
      *
@@ -672,6 +766,17 @@ final class EdgeRelease
             self::forgetHeld($kind, $record);
 
             throw new UpdateException('The held upload\'s signature does not verify; discarded.');
+        }
+
+        // Never an older build over a newer one: approving a card that sat on
+        // the page for a release put that release back in front of every
+        // device.
+        $published = self::current($kind);
+        if ($published !== null && version_compare($version, (string) $published['version'], '<')) {
+            self::forgetHeld($kind, $record);
+
+            throw new UpdateException('A newer ' . $kind . ' (' . $published['version'] . ') is already published; '
+                . 'the held ' . $version . ' was discarded.');
         }
 
         self::trustReleaseKey($key, $by);

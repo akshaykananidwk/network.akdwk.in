@@ -74,6 +74,7 @@ $fleet = $fleet_updates ?? null;
                 </tr>
                 </thead>
                 <tbody>
+                <?php $pairPaths = \App\Models\DeviceLink::summaries(array_map(static fn (array $d): int => (int) $d['id'], $result['rows'])); ?>
                 <?php foreach ($result['rows'] as $device): ?>
                     <tr>
                         <td>
@@ -91,7 +92,7 @@ $fleet = $fleet_updates ?? null;
                             <?php endif; ?>
                         </td>
                         <td><code><?= e($device['virtual_ip'] ?: '—') ?></code></td>
-                        <td><?= \App\Core\View::partial('partials.connection', ['device' => $device]) ?></td>
+                        <td><?= \App\Core\View::partial('partials.connection', ['device' => $device, 'paths' => $pairPaths[(int) $device['id']] ?? null]) ?></td>
                         <td class="text-muted text-sm"><?= e($device['last_endpoint'] ?: '—') ?></td>
                         <td class="text-muted text-sm">
                             ↓ <?= e(format_bytes((int) $device['rx_bytes'])) ?><br>

@@ -54,6 +54,37 @@ type Plan struct {
 	installed []netip.Prefix
 }
 
+// Same reports whether two plans configure the interface identically: the
+// same address, MTU, overlay and routes, in the same order.
+//
+// A configuration pass whose plan is the same as the one already applied does
+// not touch the interface at all. Every revision in the network used to re-run
+// netsh for the address, the MTU and every route, on every device — and a
+// revision moves on any edit in the network, and moved on every panel update.
+func (p *Plan) Same(q *Plan) bool {
+	if p == nil || q == nil {
+		return false
+	}
+	if p.Address != q.Address || p.MTU != q.MTU || p.Overlay != q.Overlay || len(p.Routes) != len(q.Routes) {
+		return false
+	}
+	for i := range p.Routes {
+		if p.Routes[i] != q.Routes[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// Carry takes over what an identical, already applied plan installed, so that
+// Remove still deletes those routes when this plan is the one kept.
+func (p *Plan) Carry(prev *Plan) {
+	if prev != nil {
+		p.installed = append([]netip.Prefix(nil), prev.installed...)
+	}
+}
+
 // Build validates a configuration and returns the plan to apply.
 func Build(cfg *panel.Config) (*Plan, error) {
 	if cfg.Device.VirtualIP == "" {

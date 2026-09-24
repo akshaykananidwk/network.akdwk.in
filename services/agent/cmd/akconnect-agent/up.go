@@ -153,9 +153,11 @@ type session struct {
 	port         int
 	verbose      bool
 	applied      bool
-	lastRX       int64
-	lastTX       int64
-	startedAt    time.Time
+	// ifaceSynced: the interface is known to hold plan. See applyConfig.
+	ifaceSynced bool
+	lastRX      int64
+	lastTX      int64
+	startedAt   time.Time
 	// updateRequested is an administrator having pressed "Update now" on this
 	// device's page, carried in the configuration the panel publishes.
 	updateRequested bool
@@ -345,11 +347,29 @@ func (s *session) applyConfig(ctx context.Context, priv wgPrivate, cfg *panel.Co
 		return err
 	}
 
-	refused, err := netcfg.Apply(s.tun.Name(), plan)
-	if err != nil {
-		return fmt.Errorf("configuring the interface: %w", err)
+	// The interface is left alone when nothing about it changed: see
+	// netcfg.Plan.Same. What was refused last time still is.
+	//
+	// Only when the interface is known to hold s.plan (a pass that failed
+	// after touching it leaves ifaceSynced false), and nothing was refused:
+	// a refused prefix is retried on every pass, because the clash that
+	// refused it — the laptop's own LAN — may be gone.
+	refused := s.refused
+	if s.applied && s.ifaceSynced && len(s.refused) == 0 && s.plan.Same(plan) {
+		plan.Carry(s.plan)
+		refused = nil
+	} else {
+		s.ifaceSynced = false
+		refused, err = netcfg.Apply(s.tun.Name(), plan)
+		if err != nil {
+			return fmt.Errorf("configuring the interface: %w", err)
+		}
+		// Recorded at once, not at the end of the pass: from here the
+		// interface holds this plan whatever fails next, and shutdown must
+		// remove what is really installed.
+		s.plan, s.applied, s.ifaceSynced = plan, true, true
+		s.refused = refused
 	}
-	s.refused = refused
 	for _, prefix := range refused {
 		// Loud, and repeated to the panel on every heartbeat. The customer
 		// experiences this as "the camera at the hotel does not open" and

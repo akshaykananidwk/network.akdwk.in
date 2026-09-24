@@ -7,6 +7,7 @@ namespace App\Models;
 use App\Core\Crypto;
 use App\Core\DB;
 use App\Middleware\TenantScope;
+use App\Updater\MaintenanceMode;
 
 /**
  * An enrolled machine.
@@ -107,13 +108,20 @@ final class Device extends Model
     /**
      * Heartbeat write.
      *
+     * What the agent did not send is left as it was. It sends no LAN
+     * endpoint, relay or latency at all, and no endpoint while it has no
+     * reflexive address (which is exactly a device on the HTTPS fallback), and
+     * every heartbeat used to write NULL or '' over what the coordinator had
+     * reported — ten seconds later the coordinator put it back, and the page
+     * and every peer's configuration flickered between the two.
+     *
      * Deliberately a single UPDATE with no surrounding SELECT: at 10k devices
      * this is the hottest write in the system (§12). Byte counters are deltas
      * applied in place so two heartbeats cannot lose each other's increment.
      */
     public static function heartbeat(
         int $deviceId,
-        string $endpoint,
+        ?string $endpoint,
         ?string $lanEndpoint,
         string $connectionType,
         ?int $relayId,
@@ -125,11 +133,11 @@ final class Device extends Model
         DB::execute(
             'UPDATE ' . self::tableName() . '
              SET last_seen_at = UTC_TIMESTAMP(),
-                 last_endpoint = :ep,
-                 last_lan_endpoint = :lan,
+                 last_endpoint = COALESCE(NULLIF(:ep, \'\'), last_endpoint),
+                 last_lan_endpoint = COALESCE(:lan, last_lan_endpoint),
                  connection_type = :ct,
-                 relay_id = :relay,
-                 latency_ms = :lat,
+                 relay_id = COALESCE(:relay, relay_id),
+                 latency_ms = COALESCE(:lat, latency_ms),
                  rx_bytes = rx_bytes + :rx,
                  tx_bytes = tx_bytes + :tx,
                  agent_version = COALESCE(:av, agent_version),
@@ -137,7 +145,7 @@ final class Device extends Model
              WHERE id = :id',
             [
                 'id'    => $deviceId,
-                'ep'    => substr($endpoint, 0, 64),
+                'ep'    => $endpoint !== null ? substr($endpoint, 0, 64) : null,
                 'lan'   => $lanEndpoint !== null ? substr($lanEndpoint, 0, 64) : null,
                 'ct'    => $connectionType,
                 'relay' => $relayId,
@@ -463,14 +471,97 @@ final class Device extends Model
      */
     public const OFFLINE_AFTER_SECONDS = 90;
 
+    /** How long after a maintenance window ends before its allowance stops. */
+    public const MAINTENANCE_GRACE_SECONDS = 60;
+
+    /** The longest maintenance window the allowance covers. */
+    public const MAINTENANCE_ALLOWANCE_CAP = 1800;
+
+    /**
+     * The oldest heartbeat that still counts as online, as a unix time.
+     *
+     * Normally ninety seconds ago. But while the panel is in maintenance —
+     * every panel update puts it there — it answers every heartbeat with 503,
+     * and a device that is running perfectly well cannot be heard. Counting
+     * that as offline turned every update into a page of red dots, and a
+     * sweep that wrote `offline` over devices that had never stopped. So for
+     * the length of a window and a minute after it, whoever was online when
+     * the window began still is. Capped at half an hour: past that the panel
+     * has been down, not updating, and a device that really stopped should
+     * not look alive for ever.
+     *
+     * One rule, used by every place that decides: the status dot, the counts,
+     * the sweep and the live dashboard.
+     */
+    public static function onlineCutoff(?int $now = null): int
+    {
+        // Read once per request: a device list asks for every row.
+        static $window = false;
+        if ($window === false) {
+            $window = MaintenanceMode::make()->lastWindow();
+        }
+
+        return self::onlineCutoffAt($now ?? time(), $window);
+    }
+
+    /**
+     * The rule itself, given the time and the maintenance window
+     * (MaintenanceMode::lastWindow()).
+     *
+     * @param array{0:int,1:?int}|null $window
+     */
+    public static function onlineCutoffAt(int $now, ?array $window): int
+    {
+        $cutoff = $now - self::OFFLINE_AFTER_SECONDS;
+
+        if ($window !== null) {
+            [$started, $ended] = $window;
+            $covers = $ended === null
+                ? $now - $started <= self::MAINTENANCE_ALLOWANCE_CAP
+                : $now <= $ended + self::MAINTENANCE_GRACE_SECONDS && $ended - $started <= self::MAINTENANCE_ALLOWANCE_CAP;
+
+            if ($covers) {
+                $cutoff = min($cutoff, $started - self::OFFLINE_AFTER_SECONDS);
+            }
+        }
+
+        return $cutoff;
+    }
+
+    /** onlineCutoff() as the UTC DATETIME the SQL compares last_seen_at with. */
+    public static function onlineCutoffSql(): string
+    {
+        return gmdate('Y-m-d H:i:s', self::onlineCutoff());
+    }
+
+    /**
+     * Is this device online? Heartbeat only — never the path to a peer.
+     *
+     * @param array<string,mixed> $device
+     */
+    public static function isOnline(array $device): bool
+    {
+        // Revoked, disabled or swept: `offline` is written only by those and
+        // never by a heartbeat, and a revoked device must not stay green for
+        // the next ninety seconds while its last heartbeat ages.
+        if (($device['last_seen_at'] ?? null) === null
+            || ($device['connection_type'] ?? 'offline') === 'offline'
+            || in_array((string) ($device['status'] ?? ''), ['revoked', 'disabled'], true)) {
+            return false;
+        }
+        $seen = strtotime((string) $device['last_seen_at'] . ' UTC');
+
+        return $seen !== false && $seen >= self::onlineCutoff();
+    }
+
     public static function markStaleOffline(int $staleSeconds): int
     {
         return TenantScope::acrossAllTenants('offline sweep', static fn (): int => DB::execute(
             'UPDATE ' . self::tableName() . '
              SET connection_type = \'offline\', updated_at = UTC_TIMESTAMP()
              WHERE connection_type <> \'offline\'
-               AND (last_seen_at IS NULL OR last_seen_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL :s SECOND))',
-            ['s' => $staleSeconds]
+               AND (last_seen_at IS NULL OR last_seen_at < :cutoff)',
+            ['cutoff' => gmdate('Y-m-d H:i:s', min(time() - $staleSeconds, self::onlineCutoff()))]
         )->rowCount());
     }
 
@@ -478,7 +569,7 @@ final class Device extends Model
     public static function statusSummary(?int $tenantId = null): array
     {
         $where = 'deleted_at IS NULL';
-        $params = [];
+        $params = ['cutoff' => self::onlineCutoffSql()];
         if ($tenantId !== null) {
             $where .= ' AND tenant_id = :t';
             $params['t'] = $tenantId;
@@ -489,9 +580,9 @@ final class Device extends Model
             // device that is running and has not yet found a peer is online;
             // counting it as offline is what made a working pair look dead.
             'SELECT COUNT(*) AS total,
-                    SUM(CASE WHEN last_seen_at IS NOT NULL
-                              AND last_seen_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL '
-                                  . self::OFFLINE_AFTER_SECONDS . ' SECOND)
+                    SUM(CASE WHEN last_seen_at IS NOT NULL AND last_seen_at >= :cutoff
+                              AND connection_type <> \'offline\'
+                              AND status NOT IN (\'revoked\', \'disabled\')
                              THEN 1 ELSE 0 END) AS online,
                     SUM(CASE WHEN connection_type = \'direct\' THEN 1 ELSE 0 END) AS direct,
                     SUM(CASE WHEN connection_type IN (\'relay\', \'relay_https\')

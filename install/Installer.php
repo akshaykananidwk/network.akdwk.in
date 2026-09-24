@@ -403,6 +403,28 @@ final class Installer
             $this->log[] = sprintf('Imported %s (%d statements).', $file, $statementsRun);
         }
 
+        // Then every migration, on the same connection, and recorded as
+        // applied. schema.sql is a snapshot that lags the migrations — the
+        // probe table, the update-state columns and the per-pair links are
+        // only in migrations — and neither installer ever ran them: a panel
+        // installed from the browser or cli/install.php had no device_links
+        // table, and every heartbeat failed on it. getting-started.sh ran
+        // cli/migrate.php afterwards, which is why nb never showed it.
+        // Every migration is written to be re-runnable over a schema that
+        // already has what it adds.
+        try {
+            \App\Core\DB::setConnection($pdo, $prefix);
+            $migrated = (new \App\Updater\MigrationRunner($this->appRoot . '/database/migrations', $prefix))->run();
+            $this->log[] = sprintf('Applied %d migration(s).', count($migrated['applied']));
+        } catch (\Throwable $e) {
+            return [
+                'ok'         => false,
+                'message'    => 'A migration failed on the new schema: ' . $e->getMessage(),
+                'tables'     => 0,
+                'statements' => $statementsRun,
+            ];
+        }
+
         $tables = (int) $pdo->query(
             'SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()'
             . ($prefix !== '' ? ' AND TABLE_NAME LIKE ' . $pdo->quote($prefix . '%') : '')

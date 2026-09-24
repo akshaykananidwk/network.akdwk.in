@@ -247,13 +247,20 @@ func (t *Tunnel) Apply(priv wgkey.Private, cfg *panel.Config, plan *netcfg.Plan)
 		return fmt.Errorf("tunnel is closed")
 	}
 
-	uapi, err := buildUAPI(priv, t.port, cfg, plan)
+	current, err := t.dev.IpcGet()
+	if err != nil {
+		return fmt.Errorf("reading the WireGuard device: %w", err)
+	}
+
+	uapi, err := buildApply(priv, t.port, parseDeviceState(current), cfg, plan)
 	if err != nil {
 		return err
 	}
 
-	if err := t.dev.IpcSet(uapi); err != nil {
-		return fmt.Errorf("configuring the WireGuard device: %w", err)
+	if uapi != "" {
+		if err := t.dev.IpcSet(uapi); err != nil {
+			return fmt.Errorf("configuring the WireGuard device: %w", err)
+		}
 	}
 
 	if err := t.dev.Up(); err != nil {

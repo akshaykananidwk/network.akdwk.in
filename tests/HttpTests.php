@@ -73,6 +73,8 @@ final class HttpTests
             self::selfUpdate();
             // 1.9.7-dev.23: the shared secret alone publishes nothing.
             self::edgeUploadTrust();
+            // 1.9.7-dev.24: Online is the device; direct / via server is the pair.
+            self::pairLinks();
         } finally {
             self::removeFixtures();
         }
@@ -800,6 +802,120 @@ final class HttpTests
     }
 
     /**
+     * 1.9.7-dev.24: each pair says "direct" or "via server"; the device says
+     * Online.
+     *
+     * The agent has sent a path per peer on every heartbeat since 1.9.2, and
+     * the panel dropped it, showing one word for the whole device instead —
+     * "connecting", for any device with no live WireGuard session, which was
+     * what the operator saw on two PCs that were working.
+     */
+    private static function pairLinks(): void
+    {
+        TestCase::group('HTTP — Online is the device; direct or via server is the pair (1.9.7-dev.24)');
+
+        $tenantId = (int) self::$fixtures['alpha']['tenant_id'];
+        $alphaId = (int) self::$fixtures['alpha']['device_id'];
+
+        // A second device in Alpha's network, to be the peer.
+        $peer = TenantScope::asTenant($tenantId, static function () use ($tenantId): array {
+            \App\Core\Auth::setApiActor(null, $tenantId, ['*']);
+            $enrolment = DeviceService::enroll([
+                'join_code'     => self::$fixtures['alpha']['join_code'],
+                'public_key'    => base64_encode(random_bytes(32)),
+                'hostname'      => 'alpha-http-02',
+                'os'            => 'windows',
+                'agent_version' => '1.0.0',
+            ]);
+            $device = Device::findByUid($enrolment['device_uid']);
+            DeviceService::approve((int) $device['id']);
+
+            return ['id' => (int) $device['id'], 'uid' => (string) $enrolment['device_uid']];
+        });
+        \App\Core\Auth::reset();
+        TenantScope::reset();
+
+        $agent = [
+            'Authorization' => 'Bearer ' . (string) self::$fixtures['alpha']['device_token'],
+            'Content-Type'  => 'application/json',
+            'Accept'        => 'application/json',
+        ];
+        $client = self::client();
+        $links = static fn (): array => TenantScope::asTenant($tenantId,
+            static fn (): array => \App\Models\DeviceLink::forDevice($tenantId, $alphaId));
+
+        // Relayed, plus two entries that must be ignored: another customer's
+        // device, and something that is not a uid at all.
+        $client->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'connecting',
+            'peers'           => [
+                ['uid' => $peer['uid'], 'path' => 'relay-udp'],
+                ['uid' => (string) self::$fixtures['beta']['device_uid'], 'path' => 'direct'],
+                ['uid' => '<script>', 'path' => 'direct'],
+            ],
+        ]), $agent);
+        TestCase::assertSame(200, $client->status(), 'a heartbeat with per-peer paths is accepted');
+
+        $now = $links();
+        TestCase::assert(count($now) === 1 && ($now[$peer['id']]['path'] ?? '') === 'server',
+            'the relayed peer is recorded as via server, and nothing else is recorded',
+            (string) json_encode(array_map(static fn (array $l): string => (string) $l['path'], $now)));
+
+        $page = self::signIn('alpha');
+        $page->get('/devices/' . $alphaId);
+        TestCase::assertContains('via server', $page->body(), 'the device page says via server');
+        TestCase::assert(str_contains($page->body(), 'conn-online') && !preg_match('/>\s*connecting\s*</', $page->body()),
+            'and the device is Online, with no "connecting" anywhere');
+        $page->get('/devices');
+        TestCase::assertContains('via server', $page->body(), 'the device list says so too');
+
+        // Direct now: the label follows, and "since" moves because the path did.
+        TenantScope::asTenant($tenantId, static fn (): int => DB::execute(
+            'UPDATE ' . DB::table('device_links') . ' SET since_at = DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 HOUR)
+             WHERE tenant_id = :t AND device_id = :d',
+            ['t' => $tenantId, 'd' => $alphaId]
+        )->rowCount());
+        $client->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'connection_type' => 'direct',
+            'peers'           => [['uid' => $peer['uid'], 'path' => 'direct', 'latency_ms' => 21]],
+        ]), $agent);
+        $now = $links();
+        $since = strtotime((string) ($now[$peer['id']]['since_at'] ?? '') . ' UTC');
+        TestCase::assert(($now[$peer['id']]['path'] ?? '') === 'direct' && $since > time() - 600,
+            'a pair that goes direct is recorded as direct, since now');
+        TestCase::assertSame(21, (int) ($now[$peer['id']]['latency_ms'] ?? 0), 'with its latency');
+
+        // The same path again leaves "since" alone.
+        TenantScope::asTenant($tenantId, static fn (): int => DB::execute(
+            'UPDATE ' . DB::table('device_links') . ' SET since_at = DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 HOUR)
+             WHERE tenant_id = :t AND device_id = :d',
+            ['t' => $tenantId, 'd' => $alphaId]
+        )->rowCount());
+        $client->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'peers' => [['uid' => $peer['uid'], 'path' => 'direct']],
+        ]), $agent);
+        $since = strtotime((string) ($links()[$peer['id']]['since_at'] ?? '') . ' UTC');
+        TestCase::assert($since < time() - 3000, 'and staying on it does not reset "since"');
+
+        $page->get('/devices/' . $alphaId);
+        TestCase::assertContains('direct', $page->body(), 'the device page says direct');
+
+        // Back after a gap, on the same path: "since" is now, not before the
+        // gap — the pair was down in between.
+        TenantScope::asTenant($tenantId, static fn (): int => DB::execute(
+            'UPDATE ' . DB::table('device_links') . '
+             SET since_at = DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY), updated_at = DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 HOUR)
+             WHERE tenant_id = :t AND device_id = :d',
+            ['t' => $tenantId, 'd' => $alphaId]
+        )->rowCount());
+        $client->post('/api/v1/agent/heartbeat', (string) json_encode([
+            'peers' => [['uid' => $peer['uid'], 'path' => 'direct']],
+        ]), $agent);
+        $since = strtotime((string) ($links()[$peer['id']]['since_at'] ?? '') . ' UTC');
+        TestCase::assert($since > time() - 600, 'a pair back after a gap on the same path is "since now", not since before the gap');
+    }
+
+    /**
      * 1.9.7-dev.23: an upload carrying only the shared secret is never offered.
      *
      * The shared secret was printed by the installer up to dev.21, and the
@@ -834,11 +950,11 @@ final class HttpTests
             Setting::flushCache();
 
             DB::execute(
-                'DELETE FROM ' . DB::table('agent_releases') . ' WHERE version IN (:a, :b)',
-                ['a' => '9.9.9-held', 'b' => '9.9.9-test']
+                'DELETE FROM ' . DB::table('agent_releases') . ' WHERE version IN (:a, :b, :c)',
+                ['a' => '9.9.9-held', 'b' => '9.9.9-test', 'c' => '9.9.8-old']
             );
 
-            foreach (glob(APP_ROOT . '/storage/downloads/akconnect-agent-9.9.9-*.exe') ?: [] as $leftover) {
+            foreach (glob(APP_ROOT . '/storage/downloads/akconnect-agent-9.9.[89]-*.exe') ?: [] as $leftover) {
                 @unlink($leftover);
             }
         }
@@ -948,6 +1064,51 @@ final class HttpTests
         Setting::flushCache();
         TestCase::assert(EdgeRelease::held() === [], 'a discarded upload no longer waits');
         TestCase::assert($file !== '' && !is_file(APP_ROOT . '/storage/downloads/held/' . $file), 'and its file is deleted');
+
+        // 8. Held, then its key trusted some other way (edge-trust.php without
+        //    --publish-held, or approving the other kind): the edge must not
+        //    be told it is still waiting, or it never sends it again.
+        self::signedRequest($client, 'POST', '/api/v1/edge/artifact', self::edgeSigned($fields, $stranger), $secret);
+        EdgeRelease::trustReleaseKey($stranger[0], 'http test');
+        Setting::flushCache();
+        self::signedRequest($client, 'GET', '/api/v1/edge/release', '', $secret);
+        $release = $client->json()['data'] ?? [];
+        TestCase::assertSame('', (string) ($release['held_agent'] ?? 'missing'),
+            'an upload held under a key that is now trusted is not reported as waiting');
+
+        // 9. And sent again, it publishes — and the stale held record goes.
+        self::signedRequest($client, 'POST', '/api/v1/edge/artifact', self::edgeSigned($fields, $stranger), $secret);
+        TestCase::assert(($client->json()['data']['complete'] ?? false) === true && !isset($client->json()['data']['held']),
+            'the same upload, sent again, publishes');
+        Setting::flushCache();
+        TestCase::assert(EdgeRelease::held() === [], 'and publishing it clears what was held for that kind');
+
+        // 10. An older build held under another key cannot be approved over
+        //     the newer one that is published: that put the old agent back in
+        //     front of every device.
+        $pair = sodium_crypto_sign_keypair();
+        $third = [bin2hex(sodium_crypto_sign_publickey($pair)), sodium_crypto_sign_secretkey($pair)];
+        $older = $fields;
+        $older['version'] = '9.9.8-old';
+        self::signedRequest($client, 'POST', '/api/v1/edge/artifact', self::edgeSigned($older, $third), $secret);
+        Setting::flushCache();
+        $refused = false;
+        try {
+            EdgeRelease::approveHeld('windows-agent', EdgeRelease::fingerprint($third[0]), 'http test');
+        } catch (\App\Core\UpdateException) {
+            $refused = true;
+        }
+        Setting::flushCache();
+        TestCase::assert($refused && EdgeRelease::held() === [] && EdgeRelease::trustedReleaseKey() === $stranger[0],
+            'an older held build is refused and discarded, and its key is not trusted');
+
+        // 11. Nothing an upload wrote is left lying around.
+        $left = array_merge(
+            glob(APP_ROOT . '/storage/downloads/.*.part') ?: [],
+            glob(APP_ROOT . '/storage/downloads/.*.claimed') ?: [],
+            glob(APP_ROOT . '/storage/downloads/.*.verified') ?: []
+        );
+        TestCase::assert($left === [], 'no partial or private upload files are left behind', implode(', ', array_map('basename', $left)));
     }
 
     /**
@@ -965,6 +1126,14 @@ final class HttpTests
         $pair = sodium_crypto_sign_keypair();
         self::$edgeKey = [bin2hex(sodium_crypto_sign_publickey($pair)), sodium_crypto_sign_secretkey($pair)];
         Setting::set('edge.release_key', self::$edgeKey[0]);
+        // Nothing held while the tests run: a held record here would have its
+        // file deleted by the tests' own uploads (hold() replaces one per
+        // kind), and restoring the setting afterwards would then point at a
+        // file that is gone. With the records cleared the real files are never
+        // touched, and the restore below brings both back as they were.
+        foreach (EdgeRelease::KINDS as $kind) {
+            Setting::set('edge.held.' . $kind, null);
+        }
         Setting::flushCache();
 
         try {
@@ -1143,11 +1312,28 @@ final class HttpTests
             'and the endpoint in the same report still landed'
         );
 
-        // The device page shows it as blocked, not as connecting.
+        // The device page says so in words — and the device itself is still
+        // Online: it is heartbeating. "connecting" is not shown anywhere.
         $panel = self::signIn('alpha');
         $panel->get('/devices/' . $deviceId);
-        TestCase::assertContains('conn-blocked', $panel->body(),
-            'the device page shows it blocked rather than still connecting');
+        TestCase::assertContains('Nothing answers this device', $panel->body(),
+            'the device page says nothing answers its announcements');
+        TestCase::assert(str_contains($panel->body(), 'conn-online') && !str_contains($panel->body(), 'conn-connecting'),
+            'while its status stays Online, not "connecting"');
+
+        // A heartbeat without an endpoint leaves the coordinator's alone. It
+        // used to write '' over it every ten seconds.
+        $client->post('/api/v1/agent/heartbeat', (string) json_encode(['connection_type' => 'connecting']), $agent);
+        $device = TenantScope::asTenant($tenantId, static fn (): ?array => Device::find($deviceId));
+        TestCase::assertSame('150.129.167.50:53722', (string) ($device['last_endpoint'] ?? ''),
+            'a heartbeat that sends no endpoint does not blank the one the coordinator reported');
+
+        // Nor does one that is not an address: it would be handed to every
+        // peer, and the agent refuses a push at the first line it cannot parse.
+        $client->post('/api/v1/agent/heartbeat', (string) json_encode(['endpoint' => 'edge.example.com:443']), $agent);
+        $device = TenantScope::asTenant($tenantId, static fn (): ?array => Device::find($deviceId));
+        TestCase::assertSame('150.129.167.50:53722', (string) ($device['last_endpoint'] ?? ''),
+            'an endpoint that is not an IP and a port is not stored');
 
         // And when it starts hearing again, that clears — without a heartbeat
         // from the device, because the device was never the one reporting it.

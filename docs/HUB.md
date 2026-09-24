@@ -1,6 +1,7 @@
 # The hub
 
-*Design. Nothing in this document is built yet.*
+*Design. The PC hub (below, "The PC hub, as built") is being built for
+1.9.7-dev.25; the phone side is not built yet.*
 
 ## Why it exists
 
@@ -135,3 +136,139 @@ build; the decision is which is the default.
 `51820/udp` has to be open. `deploy/getting-started.sh` does not open it yet —
 it is not in the firewall list, and it will need to be before any of this
 works.
+
+
+---
+
+## The PC hub, as built
+
+*1.9.7-dev.25. This section replaces "PCs get it too" above, which described
+the hub as one more WireGuard peer with the overlay as its AllowedIPs. That
+cannot work for PCs: AllowedIPs is longest-prefix with one owner per prefix,
+every PC peer already holds its own /32, and WireGuard drops an inbound packet
+whose source is not in the delivering peer's AllowedIPs — so "falling back to
+the hub" would mean withdrawing /32s on both ends in lockstep, which loses
+packets, and it would have the server decrypt PC traffic, which the relay
+design (RELAY-DESIGN.md) has always refused to do.*
+
+### What the owner asked for
+
+- Every device keeps a permanent session to the server from the moment it
+  starts; traffic between any two devices flows through the server at once,
+  with no wait for hole punching.
+- A direct path is a silent upgrade on top of that, with no packet loss, and
+  when it breaks the pair falls back to the server with no packet loss.
+- A device's status is its session to the server — Online or Offline — and
+  the path of each pair is a separate small label, "via server" or "direct".
+- Acceptance on nb: two PCs, 24 hours, Online the whole time, ping never
+  stopping for more than 3 seconds, through panel updates, coordinator and
+  relay restarts, network changes and sleep/wake.
+
+### The decision: the coordinator's session is the hub
+
+Every agent already has a permanent session with the coordinator: a sealed,
+panel-verified Hello at start, then a ping every 20 seconds, from the same
+socket WireGuard uses. The coordinator already holds, per device, everything a
+hub needs — its key, tenant and network, the ACL-filtered peer set the panel
+verified (with the last known answer if the panel is unreachable), its current
+public address, and presence. So the hub is that session carrying data too,
+not a new service with a second session to establish, authorise and keep
+alive: `akconnect-coordinator` forwards, on its existing UDP port.
+
+This inverts R6 ("the coordinator can be stopped without any established
+tunnel noticing") for pairs on the hub, and it is deliberate. What replaces
+R6's guarantee is restart survival (below): a coordinator restart must cost a
+pair on the hub less than the owner's 3-second budget.
+
+Phones join the same process later, on 51820, as in the first half of this
+document: one service, two faces.
+
+### The wire
+
+A hub frame is a disco packet, so the agent's socket already sifts it out:
+
+    "AKC1"  type 0x20 (HubData)  peer (8 bytes)  WireGuard packet
+
+`peer` is the first 8 bytes of the OTHER device's public key: the destination
+when the agent sends, the source when the coordinator delivers. 13 bytes of
+header; at the default overlay MTU of 1280 the outer packet is 1353 bytes on
+IPv4.
+
+The coordinator forwards a frame only when all of these hold:
+
+- the source address is a registered device's current address (the same
+  attribution the coordinator already uses for pings);
+- the destination is in that device's verified peer set (the ACL);
+- the destination is registered, and it forwards to its current address.
+
+It never decrypts: the payload is the pair's own WireGuard ciphertext. A
+forged frame can at worst deliver bytes the destination's WireGuard rejects.
+
+Capability: HelloAck carries a flag saying the coordinator forwards. An agent
+uses the hub only when it sees it; against an older coordinator it behaves as
+it does today (punch, then relay).
+
+### The agent: one stable endpoint per peer, the path chosen per packet
+
+Each WireGuard peer is configured with a fixed pseudo endpoint that never
+changes. `disconn.Bind` decides, per packet, where a packet to that endpoint
+actually goes:
+
+- **hub** (the default, from the first packet): wrapped in a HubData frame and
+  sent to the coordinator;
+- **direct**: sent to the peer's address found by punching.
+
+Every packet received — from the hub or from the peer's direct address — is
+handed to WireGuard as coming from the peer's pseudo endpoint. WireGuard's own
+endpoint therefore never moves: roaming cannot pull it to a stale path, and a
+configuration apply cannot reset it to the panel's hint. Switching path is a
+table update in the bind, not a UAPI call, and needs no nudge.
+
+### Direct as a silent upgrade, and a fast fall back
+
+- Punching works as today and finds a candidate address. It is not taken on a
+  single unsealed punch: the agent proves the path with a sealed ping/pong on
+  it first.
+- Upgrade: for the first two seconds on a proven direct path, packets go both
+  ways, hub and direct. WireGuard's replay window drops the duplicates.
+  Nothing is lost at the switch.
+- Liveness: while a pair is carrying traffic, a sealed ping goes down the
+  direct path every second. After 1 second with no pong and no packet from the
+  peer on that path, packets are duplicated to the hub again; after 2.5
+  seconds the pair is on the hub alone and the direct path is re-probed in the
+  background. The loss on a direct path that dies is bounded by that one
+  second of detection.
+- An idle pair is checked every 15 seconds. A network change or a wake marks
+  every direct path unproven at once, so traffic goes via the hub until it is
+  proven again.
+
+### Status
+
+- A device is Online while its session to the server is alive. The panel
+  learns that from the heartbeat, and from the coordinator's presence reports.
+  Panel maintenance does not turn devices red (1.9.7-dev.24).
+- Each pair reports "via server" (hub) or "direct"; the panel shows that as a
+  small label, never as the device's status.
+
+### Restart survival
+
+- The coordinator writes its registry (keys, uids, verified peer sets,
+  addresses, last-known panel answers) to its state directory on shutdown and
+  every 30 seconds, and loads it at start. Forwarding resumes with the first
+  packet after a restart; nobody has to say Hello again.
+- A frame or ping from a key the coordinator does not know gets an immediate
+  "say Hello" answer instead of silence, so a device it forgot re-registers in
+  one round trip, not after 5 to 25 seconds.
+- The last-known panel answers survive the restart too, so a restart during a
+  panel update (when verify answers 503) cannot lock every device out.
+
+### Billing
+
+The coordinator counts hub bytes per tenant itself and reports what it
+counted since the last report that the panel accepted. There is no cumulative
+figure to turn into a delta, so a restart cannot bill anything twice.
+
+### What stays
+
+The relay stays for agents that predate the hub and for relays on other
+servers. An agent on the hub does not ask for one.

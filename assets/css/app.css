@@ -436,15 +436,9 @@ textarea { resize: vertical; font-family: var(--font-mono); font-size: .82rem; }
 .status-disabled, .status-paused, .status-archived { background: var(--bg-sunken); color: var(--text-muted); }
 
 .conn { display: inline-flex; align-items: center; gap: var(--space-2); font-size: .82rem; white-space: nowrap; }
-.conn-direct { color: var(--success); }
-.conn-relay { color: var(--warning); }
+/* Online is the heartbeat alone; the path to each peer is a separate label. */
+.conn-online { color: var(--success); }
 .conn-offline { color: var(--text-muted); }
-/* Online, heartbeating, no path to a peer yet. Not a fault and not offline. */
-.conn-connecting { color: var(--info, #3b82f6); }
-/* Heartbeating, and nothing answers its announcements. Deliberately not the
-   same colour as "connecting": one of them resolves itself and the other one
-   never will until somebody changes a firewall. */
-.conn-blocked { color: var(--warning); font-weight: 500; }
 .conn-path { font-size: 0.85em; text-transform: lowercase; }
 
 .badge-dot {

@@ -35,6 +35,22 @@ type Bind struct {
 	handler Handler
 	port    uint16
 
+	// discovery is where received discovery packets wait for the handler.
+	//
+	// The handler used to run right here, on wireguard-go's receive
+	// goroutine, and it takes the tunnel's lock (a punch adopts a path, a
+	// bind ack repoints a peer). Rebind and a port move hold that lock while
+	// wireguard-go closes the socket — which waits for the receive goroutines
+	// to finish. One punch arriving during a rebind, and neither could ever
+	// finish: all inbound traffic stopped until the service was restarted.
+	// Now the socket reader only queues, one goroutine owns the handler, and
+	// the order packets arrived in is kept. Lossy when full, like the socket
+	// under it: discovery retries everything it sends.
+	discovery   chan discoPacket
+	startWorker sync.Once
+	// discoDropped counts packets the queue had no room for.
+	discoDropped atomic.Uint64
+
 	// route is the HTTPS fallback's diversion table, swapped whole rather
 	// than locked. Send consults it for every batch WireGuard hands over, and
 	// a lock there would be contended by every packet on a machine that has
@@ -79,8 +95,9 @@ type Bind struct {
 // New wraps the platform's default bind.
 func New() *Bind {
 	b := &Bind{
-		inner:    conn.NewDefaultBind(),
-		injected: make(chan injected, injectQueue),
+		inner:     conn.NewDefaultBind(),
+		injected:  make(chan injected, injectQueue),
+		discovery: make(chan discoPacket, discoveryQueue),
 	}
 	// Until a coordinator has proved it understands path probes. See the
 	// field it sets.
@@ -151,11 +168,20 @@ func (b *Bind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 func (b *Bind) intercept(fn conn.ReceiveFunc) conn.ReceiveFunc {
 	return func(packets [][]byte, sizes []int, eps []conn.Endpoint) (int, error) {
 		n, err := fn(packets, sizes, eps)
-		if err != nil || n == 0 {
+		if err != nil {
+			// A UDP socket on Windows reports an ICMP port-unreachable as an
+			// error on the NEXT receive — WSAECONNRESET — and wireguard-go
+			// treats any error that is not Temporary as fatal: its receive
+			// goroutine returns for good, and the device hears nothing on
+			// that address family until the service restarts. A coordinator
+			// restart is enough to produce one. It says nothing about this
+			// socket, which is fine and already re-armed, so it is read as
+			// "nothing arrived".
+			if ignorableReceiveError(err) {
+				return 0, nil
+			}
 			return n, err
 		}
-
-		kept := 0
 
 		for i := 0; i < n; i++ {
 			pkt := packets[i][:sizes[i]]
@@ -167,37 +193,67 @@ func (b *Bind) intercept(fn conn.ReceiveFunc) conn.ReceiveFunc {
 				b.lastUDP.Store(time.Now().Unix())
 				b.dispatch(pkt, endpointAddrPort(eps[i]))
 
+				// Hidden from wireguard-go by its size, never by moving
+				// entries: it reads each packet from its OWN buffer at that
+				// index (device/receive.go), not from the slice header
+				// handed back here, and skips any entry shorter than a
+				// WireGuard message. Swapping the headers to compact the
+				// batch — which this used to do — left wireguard-go reading
+				// the discovery packet's buffer in place of the WireGuard
+				// packet that had been moved, whenever a batch mixed the two:
+				// every such batch on Linux, where a batch is up to 128.
+				sizes[i] = 0
+
 				continue
 			}
-
-			if kept != i {
-				// The buffers themselves belong to wireguard-go's pool, so the
-				// slice headers are swapped rather than the contents copied.
-				packets[kept], packets[i] = packets[i], packets[kept]
-				sizes[kept] = sizes[i]
-				eps[kept] = eps[i]
-			}
-			kept++
 		}
 
-		return kept, nil
+		return n, nil
 	}
 }
 
-func (b *Bind) dispatch(pkt []byte, from netip.AddrPort) {
-	b.mu.RLock()
-	handler := b.handler
-	b.mu.RUnlock()
+// discoveryQueue is how many discovery packets may wait for the handler. A
+// second of a busy coordinator's answers and every peer's punches is far less.
+const discoveryQueue = 1024
 
-	if handler == nil || !from.IsValid() {
+type discoPacket struct {
+	pkt  []byte
+	from netip.AddrPort
+}
+
+// dispatch hands a discovery packet to the handler's goroutine and returns at
+// once. Never the handler itself: see Bind.discovery.
+func (b *Bind) dispatch(pkt []byte, from netip.AddrPort) {
+	if !from.IsValid() {
 		return
 	}
+
+	b.startWorker.Do(func() { go b.runHandler() })
 
 	// Copied: the buffer goes straight back into wireguard-go's pool.
 	owned := make([]byte, len(pkt))
 	copy(owned, pkt)
 
-	handler(owned, from)
+	select {
+	case b.discovery <- discoPacket{pkt: owned, from: from}:
+	default:
+		b.discoDropped.Add(1)
+	}
+}
+
+// runHandler delivers queued discovery packets, in order, for the life of the
+// bind. The handler is read per packet, so one installed later still gets
+// everything that arrives after it.
+func (b *Bind) runHandler() {
+	for p := range b.discovery {
+		b.mu.RLock()
+		handler := b.handler
+		b.mu.RUnlock()
+
+		if handler != nil {
+			handler(p.pkt, p.from)
+		}
+	}
 }
 
 // Send passes through, which is what lets discovery reuse the socket: a

@@ -1795,6 +1795,10 @@ func main() {
 		fmt.Println(name, version)
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "release-key" && len(os.Args) <= 3 {
+		fmt.Fprintln(os.Stderr, "usage: release-key init|public <keyfile>")
+		os.Exit(1)
+	}
 	if len(os.Args) > 3 && os.Args[1] == "release-key" {
 		k := key(os.Args[3])
 		pub := hex.EncodeToString(k.Public().(ed25519.PublicKey))

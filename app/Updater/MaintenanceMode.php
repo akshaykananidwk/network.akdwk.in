@@ -18,6 +18,14 @@ final class MaintenanceMode
 {
     private const FLAG = '/storage/maintenance.flag';
 
+    /**
+     * When the last maintenance window began and ended, kept after the flag
+     * is gone. Devices cannot heartbeat while the panel answers 503, so a
+     * device is not counted offline for time the panel could not hear it —
+     * see Device::onlineCutoff().
+     */
+    private const LAST = '/storage/maintenance.last';
+
     public function __construct(private readonly string $appRoot)
     {
     }
@@ -64,9 +72,40 @@ final class MaintenanceMode
     public function disable(): void
     {
         if (is_file($this->flagPath())) {
+            $started = strtotime((string) ($this->details()['enabled_at'] ?? ''));
+            if ($started !== false) {
+                @file_put_contents($this->appRoot . self::LAST, (string) json_encode([
+                    'started' => $started,
+                    'ended'   => time(),
+                ]), LOCK_EX);
+            }
+
             @unlink($this->flagPath());
             Logger::notice('update', 'Maintenance mode disabled');
         }
+    }
+
+    /**
+     * The current or most recent maintenance window: [started, ended], unix
+     * times, `ended` null while it is still on. Null when there has been none.
+     *
+     * @return array{0:int,1:?int}|null
+     */
+    public function lastWindow(): ?array
+    {
+        if ($this->isEnabled()) {
+            $started = strtotime((string) ($this->details()['enabled_at'] ?? ''));
+
+            return $started !== false ? [$started, null] : null;
+        }
+
+        $raw = @file_get_contents($this->appRoot . self::LAST);
+        $last = is_string($raw) ? json_decode($raw, true) : null;
+        if (!is_array($last) || !is_int($last['started'] ?? null) || !is_int($last['ended'] ?? null)) {
+            return null;
+        }
+
+        return [$last['started'], $last['ended']];
     }
 
     public function isEnabled(): bool

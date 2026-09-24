@@ -10,6 +10,7 @@ use App\Core\Request;
 use App\Core\Response;
 use App\Core\Session;
 use App\Middleware\TenantScope;
+use App\Models\Device;
 
 /**
  * Server-Sent Events for live dashboard updates (§3.1).
@@ -100,7 +101,7 @@ final class StreamController
     private function snapshot(?int $tenantId): array
     {
         $where = 'deleted_at IS NULL';
-        $bindings = [];
+        $bindings = ['cutoff' => Device::onlineCutoffSql()];
 
         if ($tenantId !== null) {
             $where .= ' AND tenant_id = :t';
@@ -108,7 +109,14 @@ final class StreamController
         }
 
         $devices = DB::selectOne(
+            // Online by the heartbeat, the same rule as everywhere else. It
+            // was direct + relay, so a running device that had not needed a
+            // peer yet was counted offline on the live dashboard.
             'SELECT COUNT(*) AS total,
+                    SUM(CASE WHEN last_seen_at IS NOT NULL AND last_seen_at >= :cutoff
+                              AND connection_type <> \'offline\'
+                              AND status NOT IN (\'revoked\', \'disabled\')
+                             THEN 1 ELSE 0 END) AS online,
                     SUM(CASE WHEN connection_type = \'direct\' THEN 1 ELSE 0 END) AS direct,
                     SUM(CASE WHEN connection_type IN (\'relay\', \'relay_https\')
                              THEN 1 ELSE 0 END) AS relay,
@@ -121,6 +129,7 @@ final class StreamController
         return [
             'at'      => gmdate('c'),
             'total'   => (int) ($devices['total'] ?? 0),
+            'online'  => (int) ($devices['online'] ?? 0),
             'direct'  => (int) ($devices['direct'] ?? 0),
             'relay'   => (int) ($devices['relay'] ?? 0),
             'offline' => (int) ($devices['offline'] ?? 0),
@@ -139,8 +148,8 @@ final class StreamController
     {
         $events = [];
 
-        $onlineBefore = (int) $before['direct'] + (int) $before['relay'];
-        $onlineAfter = (int) $after['direct'] + (int) $after['relay'];
+        $onlineBefore = (int) ($before['online'] ?? 0);
+        $onlineAfter = (int) ($after['online'] ?? 0);
 
         if ($onlineAfter > $onlineBefore) {
             $events['device.online'] = ['count' => $onlineAfter - $onlineBefore, 'online' => $onlineAfter];
